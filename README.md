@@ -187,6 +187,7 @@ Use a project config:
 repo = "https://cloud.r-project.org"
 cache_dir = ".rs-cache"
 lockfile = "rs.lock.json"
+r_version = "4.4"
 rscript = "tools/Rscript-4.4"
 packages = ["jsonlite", "cli"]
 bioc_packages = ["Biostrings"]
@@ -220,7 +221,7 @@ repo = "owner/report-specific-pkg"
 ref = "feature-branch"
 ```
 
-The root block defines project defaults. A `[scripts."relative/path.R"]` block can override or extend settings for one script, including `rscript` when one entrypoint must pin a different interpreter. A `[sources."packageName"]` block declares a project-wide non-CRAN installation source, and `[scripts."relative/path.R".sources."packageName"]` overrides that source for one script. `rs.toml` is validated when it is loaded, so malformed sections, contradictory source fields, repeated keys, and common typos now fail early with the offending section and line, plus supported-key or close-match hints when the fix is obvious.
+The root block defines project defaults. A `[scripts."relative/path.R"]` block can override or extend settings for one script, including `rscript` when one entrypoint must pin a specific interpreter path and `r_version` when one entrypoint should target a specific R line such as `4.4`. When both are set, `rs` expects the selected interpreter to match `r_version`. A `[sources."packageName"]` block declares a project-wide non-CRAN installation source, and `[scripts."relative/path.R".sources."packageName"]` overrides that source for one script. `rs.toml` is validated when it is loaded, so malformed sections, contradictory source fields, repeated keys, and common typos now fail early with the offending section and line, plus supported-key or close-match hints when the fix is obvious.
 
 ## Examples
 
@@ -280,13 +281,14 @@ The staged delivery plan lives at [`docs/roadmap.md`](/Volumes/DataCenter_01/Git
 - `cache_dir`
 - `lockfile`
 - `rscript`
+- `r_version`
 - `packages`
 - `bioc_packages`
 - `[sources."packageName"]`
 - `[scripts."relative/path.R"]`
 - `[scripts."relative/path.R".sources."packageName"]`
 
-Script blocks are matched against the script path relative to the directory that contains `rs.toml`. Script-specific packages are merged with the project defaults, while scalar settings like `repo`, `cache_dir`, `lockfile`, and `rscript` override the default value for that one script. Source blocks are keyed by package name, and script-local source blocks override project-wide ones.
+Script blocks are matched against the script path relative to the directory that contains `rs.toml`. Script-specific packages are merged with the project defaults, while scalar settings like `repo`, `cache_dir`, `lockfile`, `rscript`, and `r_version` override the default value for that one script. Source blocks are keyed by package name, and script-local source blocks override project-wide ones.
 
 `rs init` writes a starter `rs.toml`. With `--from path/to/script.R`, it first scans the script and seeds the config with detected packages. `--from-dir path/to/scripts/` does the same for every `.R` and `.Rscript` under a directory, skipping `.git` and `.rs-cache`. By default it drops R bundled base/recommended packages such as `stats` and `utils`, so the generated config only keeps installable dependencies. It also heuristically moves a curated set of common Bioconductor packages such as `DESeq2`, `Biostrings`, and `SummarizedExperiment` into `bioc_packages`. Pass `--include-bundled` if you want the raw scan result, `--exclude <pkg>` to remove an unwanted detected dependency, `--include <pkg>` to add a missing project-level dependency, and `--bioc-package <name>` to add an explicit project-level Bioconductor dependency. With one `--from`, the detected packages are written to the root `packages` array by default; `--write-script-block` instead writes them under `[scripts."relative/path.R"]`. When you pass multiple `--from` flags, use `--from-dir`, or otherwise resolve to multiple scripts, `rs init` automatically writes one script block per scanned file.
 

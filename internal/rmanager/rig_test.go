@@ -170,6 +170,26 @@ func TestLooksLikeVersionSpec(t *testing.T) {
 	}
 }
 
+func TestVersionMatchesSpec(t *testing.T) {
+	cases := []struct {
+		spec   string
+		actual string
+		want   bool
+	}{
+		{spec: "4.4", actual: "4.4.3", want: true},
+		{spec: "4.4.3", actual: "4.4.3", want: true},
+		{spec: "4.4.3", actual: "4.4.4", want: false},
+		{spec: "4.5", actual: "4.4.3", want: false},
+		{spec: "release", actual: "4.5.3", want: true},
+	}
+
+	for _, tc := range cases {
+		if got := VersionMatchesSpec(tc.spec, tc.actual); got != tc.want {
+			t.Fatalf("VersionMatchesSpec(%q, %q) = %v, want %v", tc.spec, tc.actual, got, tc.want)
+		}
+	}
+}
+
 func TestRunRigWithoutRigReturnsHelpfulNextStep(t *testing.T) {
 	origRigLookPath := rigLookPath
 	origToolLookPath := toolLookPath

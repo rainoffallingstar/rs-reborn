@@ -120,6 +120,32 @@ func LooksLikeVersionSpec(spec string) bool {
 	return hasDigit
 }
 
+func VersionMatchesSpec(spec, actual string) bool {
+	spec = strings.TrimSpace(strings.ToLower(spec))
+	actual = strings.TrimSpace(strings.ToLower(actual))
+	if spec == "" || actual == "" {
+		return true
+	}
+	if isNamedVersionSpec(spec) {
+		return true
+	}
+
+	specVersion, specOK := parseVersionHint(spec)
+	actualVersion, actualOK := parseVersionHint(actual)
+	if specOK && actualOK {
+		if len(specVersion) > len(actualVersion) {
+			return false
+		}
+		for i := range specVersion {
+			if specVersion[i] != actualVersion[i] {
+				return false
+			}
+		}
+		return true
+	}
+	return spec == actual
+}
+
 func runRig(stdout, stderr io.Writer, args ...string) error {
 	rigPath, err := ensureRigAvailable(stdout, stderr)
 	if err != nil {

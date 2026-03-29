@@ -269,6 +269,15 @@ var ensureManagedRscript = func(selected string, stderr io.Writer) (string, erro
 var rigAvailable = rmanager.RigAvailable
 var rigBootstrapAdvice = rmanager.BootstrapAdvice
 
+type interpreterSelection struct {
+	Selected     string
+	Requested    string
+	RequestedVer string
+	Interpreter  string
+	Runtime      RuntimeMetadata
+	Issue        error
+}
+
 var bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
 	cmd := exec.Command(env.Interpreter, "-e", `source(Sys.getenv("RS_BOOTSTRAP_FILE")); rs_bootstrap()`)
 	cmd.Stdout = env.Stdout
@@ -595,22 +604,24 @@ type validationContext struct {
 }
 
 type dependencyPlan struct {
-	ScriptPath   string
-	ProjectPath  string
-	ScriptKey    string
-	RequestedR   string
-	RscriptPath  string
-	Repo         string
-	CacheRoot    string
-	LockfilePath string
-	LibraryPath  string
-	DetectedDeps []string
-	CRANDeps     []string
-	BiocDeps     []string
-	IncludedCRAN []string
-	IncludedBioc []string
-	ExcludedDeps []string
-	SourceDeps   map[string]project.SourceSpec
+	ScriptPath        string
+	ProjectPath       string
+	ScriptKey         string
+	RequestedR        string
+	RequestedRVersion string
+	RscriptPath       string
+	RscriptIssue      string
+	Repo              string
+	CacheRoot         string
+	LockfilePath      string
+	LibraryPath       string
+	DetectedDeps      []string
+	CRANDeps          []string
+	BiocDeps          []string
+	IncludedCRAN      []string
+	IncludedBioc      []string
+	ExcludedDeps      []string
+	SourceDeps        map[string]project.SourceSpec
 }
 
 type ListReport struct {
@@ -1030,6 +1041,9 @@ func List(opts ListOptions) error {
 	if err != nil {
 		return err
 	}
+	if plan.RscriptIssue != "" {
+		return fmt.Errorf("%s", plan.RscriptIssue)
+	}
 	report := buildListReport(plan, opts)
 	normalizeListReport(&report)
 
@@ -1414,9 +1428,9 @@ func Doctor(opts DoctorOptions) error {
 
 	rscriptPath := plan.RscriptPath
 	var rscriptErr error
-	if rscriptPath == "" {
-		rscriptErr = fmt.Errorf("selected Rscript is not available")
-		errorsList = append(errorsList, missingRscriptMessage(opts.RscriptPath, plan.RequestedR))
+	if plan.RscriptIssue != "" {
+		rscriptErr = fmt.Errorf(plan.RscriptIssue)
+		errorsList = append(errorsList, plan.RscriptIssue)
 	}
 
 	needsGit := hasSourceType(plan.SourceDeps, "git")
@@ -1614,7 +1628,7 @@ func resolveDependencyPlan(scriptPath string, extraDeps, extraBiocDeps, excludeD
 	}
 
 	repo := firstNonEmpty(repoOverride, scriptCfg.Repo, "https://cloud.r-project.org")
-	interpreter, interpreterErr := ResolveRscriptPath(rscriptOverride, scriptCfg.Rscript)
+	selection := resolveInterpreterSelection(rscriptOverride, scriptCfg.Rscript, scriptCfg.RVersion, filepath.Dir(scriptPath), io.Discard, false)
 	detectedDeps, err := ScanScript(scriptPath)
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("scan script: %w", err)
@@ -1630,28 +1644,28 @@ func resolveDependencyPlan(scriptPath string, extraDeps, extraBiocDeps, excludeD
 		lockfilePath = defaultLockfilePath(projectCfg.RootDir, scriptPath)
 	}
 	runtime := RuntimeMetadata{}
-	if interpreterErr == nil {
-		if meta, err := inspectRuntimeWithInterpreter(interpreter, filepath.Dir(scriptPath), io.Discard); err == nil {
-			runtime = meta
-		}
+	if selection.Issue == nil {
+		runtime = selection.Runtime
 	}
 	libraryPath := predictedLibraryPath(cacheRoot, scriptPath, cranDeps, biocDeps, sourceDeps, repo, runtime)
 
 	return dependencyPlan{
-		ScriptPath:   scriptPath,
-		ProjectPath:  projectCfg.Path,
-		ScriptKey:    scriptCfg.ScriptKey,
-		RequestedR:   firstNonEmpty(rscriptOverride, scriptCfg.Rscript, "Rscript"),
-		RscriptPath:  interpreter,
-		Repo:         repo,
-		CacheRoot:    cacheRoot,
-		LockfilePath: lockfilePath,
-		LibraryPath:  libraryPath,
-		DetectedDeps: detectedDeps,
-		CRANDeps:     cranDeps,
-		BiocDeps:     biocDeps,
-		ExcludedDeps: copyStrings(excludeDeps),
-		SourceDeps:   sourceDeps,
+		ScriptPath:        scriptPath,
+		ProjectPath:       projectCfg.Path,
+		ScriptKey:         scriptCfg.ScriptKey,
+		RequestedR:        selection.Requested,
+		RequestedRVersion: selection.RequestedVer,
+		RscriptPath:       selection.Interpreter,
+		RscriptIssue:      errorString(selection.Issue),
+		Repo:              repo,
+		CacheRoot:         cacheRoot,
+		LockfilePath:      lockfilePath,
+		LibraryPath:       libraryPath,
+		DetectedDeps:      detectedDeps,
+		CRANDeps:          cranDeps,
+		BiocDeps:          biocDeps,
+		ExcludedDeps:      copyStrings(excludeDeps),
+		SourceDeps:        sourceDeps,
 	}, nil
 }
 
@@ -2712,6 +2726,13 @@ func shouldSuggestRigBootstrap(requestedR string) bool {
 	return rmanager.LooksLikeVersionSpec(requestedR)
 }
 
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func collectProjectScriptPaths(root string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -2983,6 +3004,58 @@ func resolveRunnableRscriptPath(override, configValue string, stderr io.Writer) 
 	return managed, nil
 }
 
+func selectInterpreterTarget(override, configuredPath, configuredVersion string) (string, string) {
+	switch {
+	case override != "":
+		requestedVersion := ""
+		if !looksLikePath(override) && rmanager.LooksLikeVersionSpec(override) {
+			requestedVersion = override
+		}
+		return override, requestedVersion
+	case configuredPath != "":
+		return configuredPath, configuredVersion
+	case configuredVersion != "":
+		return configuredVersion, configuredVersion
+	default:
+		return "Rscript", ""
+	}
+}
+
+func resolveInterpreterSelection(override, configuredPath, configuredVersion, workDir string, stderr io.Writer, autoInstall bool) interpreterSelection {
+	selected, requestedVersion := selectInterpreterTarget(override, configuredPath, configuredVersion)
+	result := interpreterSelection{
+		Selected:     selected,
+		Requested:    selected,
+		RequestedVer: requestedVersion,
+	}
+
+	var (
+		interpreter string
+		err         error
+	)
+	if autoInstall {
+		interpreter, err = resolveRunnableRscriptPath("", selected, stderr)
+	} else {
+		interpreter, err = resolveSelectedRscript("", selected)
+	}
+	if err != nil {
+		result.Issue = err
+		return result
+	}
+	result.Interpreter = interpreter
+
+	runtime, err := inspectRuntimeWithInterpreter(interpreter, workDir, stderr)
+	if err != nil {
+		result.Issue = err
+		return result
+	}
+	result.Runtime = runtime
+	if requestedVersion != "" && !rmanager.VersionMatchesSpec(requestedVersion, runtime.RVersion) {
+		result.Issue = fmt.Errorf("configured r_version %q does not match selected interpreter runtime %s", requestedVersion, runtime.RVersion)
+	}
+	return result
+}
+
 func resolveRShellPath(rscriptPath string) (string, error) {
 	if looksLikePath(rscriptPath) {
 		dir := filepath.Dir(rscriptPath)
@@ -3074,19 +3147,12 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		lockfilePath = defaultLockfilePath(projectCfg.RootDir, opts.ScriptPath)
 	}
 
-	var interpreter string
-	if opts.AutoInstallR {
-		interpreter, err = resolveRunnableRscriptPath(opts.RscriptPath, scriptCfg.Rscript, opts.Stderr)
-	} else {
-		interpreter, err = resolveSelectedRscript(opts.RscriptPath, scriptCfg.Rscript)
+	selection := resolveInterpreterSelection(opts.RscriptPath, scriptCfg.Rscript, scriptCfg.RVersion, filepath.Dir(opts.ScriptPath), opts.Stderr, opts.AutoInstallR)
+	if selection.Issue != nil {
+		return ResolvedEnvironment{}, selection.Issue
 	}
-	if err != nil {
-		return ResolvedEnvironment{}, err
-	}
-	runtime, err := inspectRuntimeWithInterpreter(interpreter, filepath.Dir(opts.ScriptPath), opts.Stderr)
-	if err != nil {
-		return ResolvedEnvironment{}, err
-	}
+	interpreter := selection.Interpreter
+	runtime := selection.Runtime
 	libPath, err := resolveLibraryPath(cacheRoot, opts.ScriptPath, cranDeps, biocDeps, sourceDeps, repo, runtime)
 	if err != nil {
 		return ResolvedEnvironment{}, err

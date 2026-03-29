@@ -44,6 +44,30 @@ exit 1
 	return path
 }
 
+func writeFakeRscriptWithVersion(t *testing.T, dir, version string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "Rscript")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-e" ]; then
+	cat <<'EOF'
+version	%s
+platform	x86_64-pc-linux-gnu
+arch	x86_64
+os	linux-gnu
+pkg_type	source
+EOF
+	exit 0
+fi
+echo "unexpected fake Rscript args: $*" >&2
+exit 1
+`, version)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
+	}
+	return path
+}
+
 func TestMergeDeps(t *testing.T) {
 	got := mergeDeps([]string{"jsonlite", "dplyr"}, []string{"cli", "dplyr"})
 	want := []string{"cli", "dplyr", "jsonlite"}
@@ -253,6 +277,46 @@ func TestResolveRunnableRscriptPathDoesNotAutoInstallExplicitPath(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "requested Rscript \"/tmp/missing/Rscript\" is not available") {
 		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+}
+
+func TestResolveInterpreterSelectionUsesConfiguredVersion(t *testing.T) {
+	oldResolve := resolveSelectedRscript
+	t.Cleanup(func() {
+		resolveSelectedRscript = oldResolve
+	})
+
+	dir := t.TempDir()
+	rscriptPath := writeFakeRscriptWithVersion(t, dir, "4.4.2")
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		if configValue != "4.4" {
+			t.Fatalf("configValue = %q, want 4.4", configValue)
+		}
+		return rscriptPath, nil
+	}
+
+	selection := resolveInterpreterSelection("", "", "4.4", dir, io.Discard, false)
+	if selection.Issue != nil {
+		t.Fatalf("selection.Issue = %v", selection.Issue)
+	}
+	if selection.Interpreter != rscriptPath {
+		t.Fatalf("selection.Interpreter = %q, want %q", selection.Interpreter, rscriptPath)
+	}
+	if selection.RequestedVer != "4.4" {
+		t.Fatalf("selection.RequestedVer = %q, want 4.4", selection.RequestedVer)
+	}
+}
+
+func TestResolveInterpreterSelectionRejectsRscriptVersionMismatch(t *testing.T) {
+	dir := t.TempDir()
+	rscriptPath := writeFakeRscriptWithVersion(t, dir, "4.5.1")
+
+	selection := resolveInterpreterSelection("", rscriptPath, "4.4", dir, io.Discard, false)
+	if selection.Issue == nil {
+		t.Fatalf("selection.Issue = nil, want version mismatch")
+	}
+	if !strings.Contains(selection.Issue.Error(), `configured r_version "4.4" does not match selected interpreter runtime 4.5.1`) {
+		t.Fatalf("selection.Issue = %v", selection.Issue)
 	}
 }
 

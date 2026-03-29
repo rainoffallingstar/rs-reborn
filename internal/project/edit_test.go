@@ -61,7 +61,7 @@ func TestRenderRoundTrip(t *testing.T) {
 func TestLoadEditablePreservesRelativePaths(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ConfigFileName)
-	content := "cache_dir = \".rs-cache\"\nlockfile = \"locks/rs.lock.json\"\nrscript = \"tools/Rscript\"\n"
+	content := "cache_dir = \".rs-cache\"\nlockfile = \"locks/rs.lock.json\"\nrscript = \"tools/Rscript\"\nr_version = \"4.4\"\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
@@ -80,6 +80,9 @@ func TestLoadEditablePreservesRelativePaths(t *testing.T) {
 	if cfg.Defaults.Rscript != "tools/Rscript" {
 		t.Fatalf("Rscript = %q, want relative path", cfg.Defaults.Rscript)
 	}
+	if cfg.Defaults.RVersion != "4.4" {
+		t.Fatalf("RVersion = %q, want relative version", cfg.Defaults.RVersion)
+	}
 }
 
 func TestRenderPreservesRscriptOrderAndComments(t *testing.T) {
@@ -89,6 +92,7 @@ func TestRenderPreservesRscriptOrderAndComments(t *testing.T) {
 		"repo = \"https://cloud.r-project.org\"",
 		"# interpreter note",
 		"rscript = \"tools/Rscript-4.4\" # pinned R",
+		"r_version = \"4.4\"",
 		"packages = [\"jsonlite\"]",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {

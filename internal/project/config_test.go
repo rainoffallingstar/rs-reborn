@@ -14,6 +14,7 @@ repo = "https://packagemanager.posit.co/cran/latest"
 cache_dir = ".rs-cache"
 lockfile = "state/rs.lock.json"
 rscript = "bin/Rscript"
+r_version = "4.4"
 packages = ["dplyr", "jsonlite"]
 bioc_packages = ["Biostrings"]
 
@@ -62,6 +63,9 @@ ref = "feature-branch"
 	}
 	if cfg.Defaults.Rscript != "bin/Rscript" {
 		t.Fatalf("Defaults.Rscript = %q", cfg.Defaults.Rscript)
+	}
+	if cfg.Defaults.RVersion != "4.4" {
+		t.Fatalf("Defaults.RVersion = %q", cfg.Defaults.RVersion)
 	}
 	if !reflect.DeepEqual(cfg.Defaults.Packages, []string{"dplyr", "jsonlite"}) {
 		t.Fatalf("Defaults.Packages = %v", cfg.Defaults.Packages)
@@ -115,6 +119,7 @@ func TestLoadResolvesRelativePaths(t *testing.T) {
 	content := `cache_dir = ".rs-cache"
 lockfile = "locks/rs.lock.json"
 rscript = "bin/Rscript"
+r_version = "4.4"
 
 [sources."localpkg"]
 type = "local"
@@ -147,6 +152,9 @@ path = "vendor/scriptpkg_0.2.0.tar.gz"
 	if cfg.Defaults.Rscript != filepath.Join(dir, "bin", "Rscript") {
 		t.Fatalf("Defaults.Rscript = %q", cfg.Defaults.Rscript)
 	}
+	if cfg.Defaults.RVersion != "4.4" {
+		t.Fatalf("Defaults.RVersion = %q", cfg.Defaults.RVersion)
+	}
 	if cfg.Sources["localpkg"].Path != filepath.Join(dir, "vendor", "localpkg_0.1.0.tar.gz") {
 		t.Fatalf("Sources[localpkg].Path = %q", cfg.Sources["localpkg"].Path)
 	}
@@ -174,6 +182,7 @@ func TestResolveForScript(t *testing.T) {
 			CacheDir:     "/tmp/project/.rs-cache",
 			Lockfile:     "/tmp/project/rs.lock.json",
 			Rscript:      "/tmp/project/bin/Rscript",
+			RVersion:     "4.4",
 			Packages:     []string{"jsonlite"},
 			BiocPackages: []string{"Biostrings"},
 		},
@@ -199,6 +208,7 @@ func TestResolveForScript(t *testing.T) {
 			"scripts/report.R": {
 				Repo:         "https://cran.rstudio.com",
 				Rscript:      "/tmp/project/tools/Rscript-4.4",
+				RVersion:     "4.4",
 				Packages:     []string{"cli", "jsonlite"},
 				BiocPackages: []string{"DESeq2"},
 				Sources: map[string]SourceSpec{
@@ -226,6 +236,9 @@ func TestResolveForScript(t *testing.T) {
 	}
 	if resolved.Rscript != "/tmp/project/tools/Rscript-4.4" {
 		t.Fatalf("Rscript = %q", resolved.Rscript)
+	}
+	if resolved.RVersion != "4.4" {
+		t.Fatalf("RVersion = %q", resolved.RVersion)
 	}
 	if resolved.ScriptKey != "scripts/report.R" {
 		t.Fatalf("ScriptKey = %q", resolved.ScriptKey)
@@ -409,7 +422,7 @@ url = "https://cloud.r-project.org"
 	if err == nil {
 		t.Fatal("Parse() error = nil, want unsupported key error")
 	}
-	if !strings.Contains(err.Error(), `root config: unsupported key "url"; supported keys: repo, cache_dir, lockfile, rscript, packages, bioc_packages`) {
+	if !strings.Contains(err.Error(), `root config: unsupported key "url"; supported keys: repo, cache_dir, lockfile, rscript, r_version, packages, bioc_packages`) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 }
@@ -424,7 +437,7 @@ url = "https://cloud.r-project.org"
 	if err == nil {
 		t.Fatal("Parse() error = nil, want unsupported key error")
 	}
-	if !strings.Contains(err.Error(), `[scripts."scripts/report.R"]: unsupported key "url"; supported keys: repo, cache_dir, lockfile, rscript, packages, bioc_packages`) {
+	if !strings.Contains(err.Error(), `[scripts."scripts/report.R"]: unsupported key "url"; supported keys: repo, cache_dir, lockfile, rscript, r_version, packages, bioc_packages`) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 }
@@ -438,7 +451,7 @@ packags = ["jsonlite"]
 	if err == nil {
 		t.Fatal("Parse() error = nil, want unsupported key error")
 	}
-	if !strings.Contains(err.Error(), `root config: unsupported key "packags"; supported keys: repo, cache_dir, lockfile, rscript, packages, bioc_packages; did you mean "packages"?`) {
+	if !strings.Contains(err.Error(), `root config: unsupported key "packags"; supported keys: repo, cache_dir, lockfile, rscript, r_version, packages, bioc_packages; did you mean "packages"?`) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 }
