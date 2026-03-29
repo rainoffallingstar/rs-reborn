@@ -352,6 +352,8 @@ It then writes a temporary `R_PROFILE_USER` file that:
 
 Because the bootstrap happens before `Rscript script.R` starts, the script still sees normal `commandArgs()` behavior.
 
+By default the installer backend runs in `auto` mode. It first tries to use `pak` for CRAN and Bioconductor packages, then falls back to the legacy `install.packages()` / `BiocManager::install()` / custom-source flow if `pak` is unavailable, fails, or the dependency plan includes custom sources that still rely on the existing source-specific installers. You can override that behavior by setting `RS_INSTALL_BACKEND=legacy` or `RS_INSTALL_BACKEND=pak` in the environment before invoking `rs`.
+
 ### 5. Lock file
 
 `rs lock`, `rs sync`, and `rs run` all write `rs.lock.json` after dependency resolution succeeds. `rs check` and `rs run --frozen` validate that file. The lockfile records:

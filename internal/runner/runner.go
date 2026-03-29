@@ -3537,8 +3537,16 @@ func runtimeEnv(env ResolvedEnvironment, installEnabled bool) []string {
 		"RS_BIOC_DEPS="+strings.Join(env.BiocDeps, ","),
 		"RS_SOURCE_DEPS="+encodeSourceSpecs(env.SourceDeps),
 		"RS_BOOTSTRAP_FILE="+env.BootstrapPath,
+		"RS_INSTALL_BACKEND="+installBackend(),
 		fmt.Sprintf("RS_INSTALL_ENABLED=%t", installEnabled),
 	)
+}
+
+func installBackend() string {
+	if backend := strings.TrimSpace(os.Getenv("RS_INSTALL_BACKEND")); backend != "" {
+		return backend
+	}
+	return "auto"
 }
 
 func allDeps(env ResolvedEnvironment) []string {

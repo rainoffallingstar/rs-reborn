@@ -55,6 +55,35 @@ func TestMergeDeps(t *testing.T) {
 	}
 }
 
+func TestInstallBackendDefaultsToAuto(t *testing.T) {
+	t.Setenv("RS_INSTALL_BACKEND", "")
+
+	if got := installBackend(); got != "auto" {
+		t.Fatalf("installBackend() = %q, want auto", got)
+	}
+}
+
+func TestInstallBackendUsesEnvironmentOverride(t *testing.T) {
+	t.Setenv("RS_INSTALL_BACKEND", "legacy")
+
+	if got := installBackend(); got != "legacy" {
+		t.Fatalf("installBackend() = %q, want legacy", got)
+	}
+}
+
+func TestBootstrapSourceIncludesPakFallback(t *testing.T) {
+	for _, want := range []string{
+		"RS_INSTALL_BACKEND",
+		"rs_install_pak",
+		"pak::pkg_install",
+		"falling back to legacy",
+	} {
+		if !strings.Contains(bootstrapSource, want) {
+			t.Fatalf("bootstrapSource missing %q", want)
+		}
+	}
+}
+
 func TestDefaultLockfilePath(t *testing.T) {
 	got := defaultLockfilePath("/tmp/project", "/tmp/project/scripts/a.R")
 	want := "/tmp/project/rs.lock.json"

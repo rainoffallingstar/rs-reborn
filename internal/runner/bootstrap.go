@@ -6,10 +6,11 @@ import (
 	"path/filepath"
 )
 
-const bootstrapSource = `rs_bootstrap <- function() {
+const bootstrapSource = `rs_bootstrap_context <- function() {
   rs_lib <- Sys.getenv("RS_LIB_PATH", "")
   rs_repos <- Sys.getenv("RS_REPOS", "https://cloud.r-project.org")
   rs_install <- identical(tolower(Sys.getenv("RS_INSTALL_ENABLED", "true")), "true")
+  rs_backend <- tolower(Sys.getenv("RS_INSTALL_BACKEND", "auto"))
   cran_raw <- Sys.getenv("RS_CRAN_DEPS", "")
   bioc_raw <- Sys.getenv("RS_BIOC_DEPS", "")
   source_raw <- Sys.getenv("RS_SOURCE_DEPS", "")
@@ -26,30 +27,67 @@ const bootstrapSource = `rs_bootstrap <- function() {
     dir.create(rs_meta_dir, recursive = TRUE, showWarnings = FALSE)
   }
 
-  if (!rs_install) {
+  list(
+    lib = rs_lib,
+    repos = rs_repos,
+    install = rs_install,
+    backend = rs_backend,
+    cran = rs_cran,
+    bioc = rs_bioc,
+    sources = rs_sources,
+    meta_dir = rs_meta_dir
+  )
+}
+
+rs_installed_names <- function() {
+  rownames(installed.packages(lib.loc = .libPaths()))
+}
+
+rs_install_pak <- function(ctx) {
+  if (nrow(ctx$sources) > 0) {
+    stop("pak backend does not yet support custom sources")
+  }
+
+  options(repos = c(CRAN = ctx$repos))
+  installed <- rs_installed_names()
+  missing_cran <- setdiff(ctx$cran, installed)
+  missing_bioc <- setdiff(ctx$bioc, installed)
+  refs <- c(missing_cran, paste0("bioc::", missing_bioc))
+  if (length(refs) == 0) {
     return(invisible(NULL))
   }
 
-  options(repos = c(CRAN = rs_repos))
-  installed <- rownames(installed.packages(lib.loc = .libPaths()))
-
-  missing_cran <- setdiff(rs_cran, installed)
-  if (length(missing_cran) > 0) {
-    message(sprintf("[rs] installing missing CRAN packages: %s", paste(missing_cran, collapse = ", ")))
-    utils::install.packages(missing_cran, lib = rs_lib, repos = rs_repos)
-    installed <- rownames(installed.packages(lib.loc = .libPaths()))
+  if (!"pak" %in% installed) {
+    message("[rs] installing pak")
+    utils::install.packages("pak", lib = ctx$lib, repos = ctx$repos)
   }
 
-  if (nrow(rs_sources) > 0) {
-    missing_sources <- rs_sources[!(rs_sources$package %in% installed), , drop = FALSE]
+  message(sprintf("[rs] installing via pak: %s", paste(refs, collapse = ", ")))
+  pak::pkg_install(refs, lib = ctx$lib, ask = FALSE, upgrade = FALSE)
+  invisible(NULL)
+}
+
+rs_install_legacy <- function(ctx) {
+  options(repos = c(CRAN = ctx$repos))
+  installed <- rs_installed_names()
+
+  missing_cran <- setdiff(ctx$cran, installed)
+  if (length(missing_cran) > 0) {
+    message(sprintf("[rs] installing missing CRAN packages: %s", paste(missing_cran, collapse = ", ")))
+    utils::install.packages(missing_cran, lib = ctx$lib, repos = ctx$repos)
+    installed <- rs_installed_names()
+  }
+
+  if (nrow(ctx$sources) > 0) {
+    missing_sources <- ctx$sources[!(ctx$sources$package %in% installed), , drop = FALSE]
     if (nrow(missing_sources) > 0) {
       for (i in seq_len(nrow(missing_sources))) {
         spec <- missing_sources[i, , drop = FALSE]
         if (identical(spec$type[[1]], "github")) {
           if (!"remotes" %in% installed) {
             message("[rs] installing remotes")
-            utils::install.packages("remotes", lib = rs_lib, repos = rs_repos)
-            installed <- rownames(installed.packages(lib.loc = .libPaths()))
+            utils::install.packages("remotes", lib = ctx$lib, repos = ctx$repos)
+            installed <- rs_installed_names()
           }
           target <- spec$repo[[1]]
           if (nzchar(spec$ref[[1]])) {
@@ -63,23 +101,23 @@ const bootstrapSource = `rs_bootstrap <- function() {
             subdir = if (nzchar(spec$subdir[[1]])) spec$subdir[[1]] else NULL,
             host = if (nzchar(spec$host[[1]])) spec$host[[1]] else "api.github.com",
             auth_token = if (nzchar(spec$token_env[[1]])) Sys.getenv(spec$token_env[[1]]) else NULL,
-            lib = rs_lib,
+            lib = ctx$lib,
             upgrade = "never",
             dependencies = TRUE
           )
-          installed <- installed.packages(
+          installed_meta <- installed.packages(
             lib.loc = .libPaths(),
             fields = c("RemoteSha")
           )
           commit <- ""
-          if (spec$package[[1]] %in% rownames(installed) && "RemoteSha" %in% colnames(installed)) {
-            commit <- installed[spec$package[[1]], "RemoteSha"]
+          if (spec$package[[1]] %in% rownames(installed_meta) && "RemoteSha" %in% colnames(installed_meta)) {
+            commit <- installed_meta[spec$package[[1]], "RemoteSha"]
             if (is.na(commit)) {
               commit <- ""
             }
           }
           rs_write_source_metadata(
-            rs_meta_dir,
+            ctx$meta_dir,
             spec$package[[1]],
             spec$type[[1]],
             if (nzchar(spec$host[[1]])) spec$host[[1]] else "api.github.com",
@@ -108,13 +146,13 @@ const bootstrapSource = `rs_bootstrap <- function() {
           message(sprintf("[rs] installing git package %s from %s", spec$package[[1]], spec$url[[1]]))
           status <- system2(
             file.path(R.home("bin"), "R"),
-            c("CMD", "INSTALL", "-l", rs_lib, target)
+            c("CMD", "INSTALL", "-l", ctx$lib, target)
           )
           if (!identical(status, 0L)) {
             stop(sprintf("failed to install git package %s from %s", spec$package[[1]], spec$url[[1]]))
           }
           rs_write_source_metadata(
-            rs_meta_dir,
+            ctx$meta_dir,
             spec$package[[1]],
             spec$type[[1]],
             "",
@@ -130,13 +168,13 @@ const bootstrapSource = `rs_bootstrap <- function() {
           message(sprintf("[rs] installing local package %s from %s", spec$package[[1]], target))
           status <- system2(
             file.path(R.home("bin"), "R"),
-            c("CMD", "INSTALL", "-l", rs_lib, target)
+            c("CMD", "INSTALL", "-l", ctx$lib, target)
           )
           if (!identical(status, 0L)) {
             stop(sprintf("failed to install local package %s from %s", spec$package[[1]], target))
           }
           rs_write_source_metadata(
-            rs_meta_dir,
+            ctx$meta_dir,
             spec$package[[1]],
             spec$type[[1]],
             "",
@@ -151,28 +189,54 @@ const bootstrapSource = `rs_bootstrap <- function() {
           stop(sprintf("unsupported source type: %s", spec$type[[1]]))
         }
       }
-      installed <- rownames(installed.packages(lib.loc = .libPaths()))
+      installed <- rs_installed_names()
     }
   }
 
-  missing_bioc <- setdiff(rs_bioc, installed)
+  missing_bioc <- setdiff(ctx$bioc, installed)
   if (length(missing_bioc) > 0) {
     if (!"BiocManager" %in% installed) {
       message("[rs] installing BiocManager")
-      utils::install.packages("BiocManager", lib = rs_lib, repos = rs_repos)
+      utils::install.packages("BiocManager", lib = ctx$lib, repos = ctx$repos)
     }
     message(sprintf("[rs] installing missing Bioconductor packages: %s", paste(missing_bioc, collapse = ", ")))
     BiocManager::install(
       missing_bioc,
-      lib = rs_lib,
+      lib = ctx$lib,
       ask = FALSE,
       update = FALSE,
       site_repository = character(),
-      repos = c(CRAN = rs_repos)
+      repos = c(CRAN = ctx$repos)
     )
   }
 
   invisible(NULL)
+}
+
+rs_bootstrap <- function() {
+  ctx <- rs_bootstrap_context()
+  if (!ctx$install) {
+    return(invisible(NULL))
+  }
+
+  if (!(ctx$backend %in% c("auto", "legacy", "pak"))) {
+    stop(sprintf("unsupported install backend %s", ctx$backend))
+  }
+
+  if (identical(ctx$backend, "legacy")) {
+    return(rs_install_legacy(ctx))
+  }
+  if (identical(ctx$backend, "pak")) {
+    return(rs_install_pak(ctx))
+  }
+
+  tryCatch(
+    rs_install_pak(ctx),
+    error = function(err) {
+      message(sprintf("[rs] pak backend unavailable or failed; falling back to legacy: %s", conditionMessage(err)))
+      rs_install_legacy(ctx)
+    }
+  )
 }
 
 rs_parse_sources <- function(raw) {
