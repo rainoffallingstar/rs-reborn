@@ -199,6 +199,11 @@ jobs:
           r-version: release
           use-public-rspm: true
 
+      - name: Install system dependencies for pak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev pkg-config
+
       - name: Run pak backend E2E
         run: bash scripts/ci/e2e-pak-backend.sh
 
