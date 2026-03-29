@@ -64,6 +64,27 @@ jobs:
       - name: Run CLI smoke coverage
         run: bash scripts/ci/e2e-smoke.sh
 
+  rig-guidance:
+    name: Rig Guidance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run rig guidance E2E
+        run: bash scripts/ci/e2e-rig-guidance.sh
+
   local-source-drift:
     name: Local Source Drift
     runs-on: ubuntu-latest
