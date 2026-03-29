@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"gr/internal/installer"
 	"gr/internal/lockfile"
 	"gr/internal/project"
 	"gr/internal/rdeps"
@@ -248,6 +249,28 @@ type ValidationError struct {
 }
 
 type ValidationMode string
+
+var nativeInstall = func(req installer.Request) error {
+	return installer.Install(req)
+}
+
+var nativeValidatePlan = func(req installer.Request) error {
+	return installer.Validate(req)
+}
+
+var bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
+	cmd := exec.Command(env.Interpreter, "-e", `source(Sys.getenv("RS_BOOTSTRAP_FILE")); rs_bootstrap()`)
+	cmd.Stdout = env.Stdout
+	cmd.Stderr = env.Stderr
+	cmd.Stdin = os.Stdin
+	cmd.Dir = filepath.Dir(env.ScriptPath)
+	cmd.Env = append(runtimeEnv(env, true), "RS_BOOTSTRAP_AUTORUN=false", "RS_INSTALL_BACKEND="+backend)
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("install packages: %w", err)
+	}
+	return nil
+}
 
 const (
 	ValidationModeGeneric ValidationMode = ""
@@ -643,22 +666,28 @@ type CheckReport struct {
 	IncludedCRAN             []string               `json:"included_cran_packages"`
 	IncludedBioc             []string               `json:"included_bioc_packages"`
 	ExcludedDeps             []string               `json:"excluded_packages"`
+	PlanningIssues           []string               `json:"planning_issues"`
 	InputIssues              []string               `json:"input_issues"`
 	InstalledIssues          []string               `json:"installed_issues"`
 	InstalledMissingPackages []string               `json:"installed_missing_packages"`
 	InstalledVersionIssues   []string               `json:"installed_version_issues"`
 	InstalledSourceIssues    []string               `json:"installed_source_issues"`
 	InstalledOtherIssues     []string               `json:"installed_other_issues"`
+	PlanningIssueDetails     []InstalledIssueDetail `json:"planning_issue_details"`
 	InstalledIssueDetails    []InstalledIssueDetail `json:"installed_issue_details"`
 	Valid                    bool                   `json:"valid"`
 	Issues                   []string               `json:"issues"`
 }
 
 type InstalledIssueDetail struct {
-	Kind    string `json:"kind"`
-	Package string `json:"package,omitempty"`
-	Field   string `json:"field,omitempty"`
-	Message string `json:"message"`
+	Kind           string   `json:"kind"`
+	Package        string   `json:"package,omitempty"`
+	Field          string   `json:"field,omitempty"`
+	Message        string   `json:"message"`
+	DependencyPath []string `json:"dependency_path,omitempty"`
+	Constraint     string   `json:"constraint,omitempty"`
+	Selected       string   `json:"selected_version,omitempty"`
+	RequiredBy     string   `json:"required_by,omitempty"`
 }
 
 type DoctorReport struct {
@@ -716,12 +745,16 @@ type DoctorSummary struct {
 }
 
 type DoctorIssueDetail struct {
-	Category string `json:"category"`
-	Kind     string `json:"kind"`
-	Message  string `json:"message"`
-	Package  string `json:"package,omitempty"`
-	Path     string `json:"path,omitempty"`
-	EnvVar   string `json:"env_var,omitempty"`
+	Category       string   `json:"category"`
+	Kind           string   `json:"kind"`
+	Message        string   `json:"message"`
+	Package        string   `json:"package,omitempty"`
+	Path           string   `json:"path,omitempty"`
+	EnvVar         string   `json:"env_var,omitempty"`
+	DependencyPath []string `json:"dependency_path,omitempty"`
+	Constraint     string   `json:"constraint,omitempty"`
+	Selected       string   `json:"selected_version,omitempty"`
+	RequiredBy     string   `json:"required_by,omitempty"`
 }
 
 type SystemHintDetail struct {
@@ -1383,6 +1416,29 @@ func Doctor(opts DoctorOptions) error {
 
 	errorsList = append(errorsList, collectSourceDefinitionIssues(plan.SourceDeps)...)
 	errorsList = append(errorsList, collectSourceAvailabilityIssues(plan.SourceDeps)...)
+	if rscriptErr == nil {
+		backend := installBackend()
+		if backend == "native" || backend == "auto" {
+			env := ResolvedEnvironment{
+				ScriptPath:   plan.ScriptPath,
+				Repo:         plan.Repo,
+				CacheRoot:    plan.CacheRoot,
+				LibraryPath:  plan.LibraryPath,
+				LockfilePath: plan.LockfilePath,
+				Interpreter:  plan.RscriptPath,
+				DetectedDeps: copyStrings(plan.DetectedDeps),
+				CRANDeps:     copyStrings(plan.CRANDeps),
+				BiocDeps:     copyStrings(plan.BiocDeps),
+				SourceDeps:   cloneSourceSpecMap(plan.SourceDeps),
+			}
+			req, err := installerRequestFromEnvironment(env, io.Discard, io.Discard)
+			if err != nil {
+				errorsList = append(errorsList, errorLines(err)...)
+			} else if err := nativeValidatePlan(req); err != nil {
+				errorsList = append(errorsList, errorLines(err)...)
+			}
+		}
+	}
 
 	if _, err := os.Stat(plan.LockfilePath); errors.Is(err, os.ErrNotExist) {
 		warnings = append(warnings, fmt.Sprintf("lockfile not found: %s", plan.LockfilePath))
@@ -1628,6 +1684,17 @@ func copyStrings(values []string) []string {
 	return append([]string(nil), values...)
 }
 
+func cloneSourceSpecMap(values map[string]project.SourceSpec) map[string]project.SourceSpec {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]project.SourceSpec, len(values))
+	for name, spec := range values {
+		out[name] = spec
+	}
+	return out
+}
+
 func normalizeListReport(report *ListReport) {
 	if report == nil {
 		return
@@ -1671,14 +1738,36 @@ func buildCheckReport(env ResolvedEnvironment, opts CheckOptions) (CheckReport, 
 		IncludedCRAN:             copyStrings(opts.IncludeDeps),
 		IncludedBioc:             copyStrings(opts.IncludeBiocDeps),
 		ExcludedDeps:             copyStrings(opts.ExcludeDeps),
+		PlanningIssues:           []string{},
 		InputIssues:              []string{},
 		InstalledIssues:          []string{},
 		InstalledMissingPackages: []string{},
 		InstalledVersionIssues:   []string{},
 		InstalledSourceIssues:    []string{},
 		InstalledOtherIssues:     []string{},
+		PlanningIssueDetails:     []InstalledIssueDetail{},
 		InstalledIssueDetails:    []InstalledIssueDetail{},
 		Issues:                   []string{},
+	}
+
+	if backend := installBackend(); backend == "native" || backend == "auto" {
+		req, err := installerRequestFromEnvironment(env, io.Discard, io.Discard)
+		if err != nil {
+			report.Valid = false
+			report.Issues = errorLines(err)
+			report.PlanningIssues = copyStrings(report.Issues)
+			report.PlanningIssueDetails = buildInstalledIssueDetails(report.Issues)
+			normalizeCheckReport(&report)
+			return report, err
+		}
+		if err := nativeValidatePlan(req); err != nil {
+			report.Valid = false
+			report.Issues = errorLines(err)
+			report.PlanningIssues = copyStrings(report.Issues)
+			report.PlanningIssueDetails = buildInstalledIssueDetails(report.Issues)
+			normalizeCheckReport(&report)
+			return report, err
+		}
 	}
 
 	validation, err := ValidateLockfileInputs(env, ValidationModeCheck)
@@ -1739,6 +1828,9 @@ func normalizeCheckReport(report *CheckReport) {
 	if report.ExcludedDeps == nil {
 		report.ExcludedDeps = []string{}
 	}
+	if report.PlanningIssues == nil {
+		report.PlanningIssues = []string{}
+	}
 	if report.InputIssues == nil {
 		report.InputIssues = []string{}
 	}
@@ -1756,6 +1848,9 @@ func normalizeCheckReport(report *CheckReport) {
 	}
 	if report.InstalledOtherIssues == nil {
 		report.InstalledOtherIssues = []string{}
+	}
+	if report.PlanningIssueDetails == nil {
+		report.PlanningIssueDetails = []InstalledIssueDetail{}
 	}
 	if report.InstalledIssueDetails == nil {
 		report.InstalledIssueDetails = []InstalledIssueDetail{}
@@ -1985,6 +2080,16 @@ func installedIssueDetail(issue string) InstalledIssueDetail {
 		Message: issue,
 	}
 
+	if conflict, ok := parseDependencyConflictIssue(issue); ok {
+		detail.Kind = "dependency_conflict"
+		detail.Package = conflict.Package
+		detail.DependencyPath = copyStrings(conflict.DependencyPath)
+		detail.Constraint = conflict.Constraint
+		detail.Selected = conflict.SelectedVersion
+		detail.RequiredBy = conflict.RequiredBy
+		return detail
+	}
+
 	if pkg, ok := strings.CutPrefix(issue, "package not installed in managed library: "); ok {
 		detail.Kind = "missing_package"
 		detail.Package = pkg
@@ -2150,6 +2255,15 @@ func doctorIssueDetail(issue string, warning bool) DoctorIssueDetail {
 			detail.Package = pkg
 			detail.Path = path
 		}
+	case strings.HasPrefix(issue, "dependency constraint conflict for "):
+		detail.Kind = "dependency_conflict"
+		if conflict, ok := parseDependencyConflictIssue(issue); ok {
+			detail.Package = conflict.Package
+			detail.DependencyPath = copyStrings(conflict.DependencyPath)
+			detail.Constraint = conflict.Constraint
+			detail.Selected = conflict.SelectedVersion
+			detail.RequiredBy = conflict.RequiredBy
+		}
 	default:
 		detail.Kind = "error"
 	}
@@ -2189,6 +2303,51 @@ func parseDoctorSourceEnvIssue(issue string) (string, string, bool) {
 	}
 	envVar, _, _ := strings.Cut(afterName, ",")
 	return name, strings.TrimSpace(envVar), true
+}
+
+type dependencyConflictDetail struct {
+	Package         string
+	SelectedVersion string
+	Constraint      string
+	RequiredBy      string
+	DependencyPath  []string
+}
+
+func parseDependencyConflictIssue(issue string) (dependencyConflictDetail, bool) {
+	const prefix = "dependency constraint conflict for "
+	rest, ok := strings.CutPrefix(issue, prefix)
+	if !ok {
+		return dependencyConflictDetail{}, false
+	}
+	name, message, found := strings.Cut(rest, ":")
+	if !found {
+		return dependencyConflictDetail{}, false
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return dependencyConflictDetail{}, false
+	}
+	detail := dependencyConflictDetail{Package: name}
+	if body, ok := strings.CutPrefix(strings.TrimSpace(message), "selected version "); ok {
+		selected, remainder, found := strings.Cut(body, " does not satisfy ")
+		if found {
+			detail.SelectedVersion = strings.TrimSpace(selected)
+			if beforePath, pathPart, foundPath := strings.Cut(remainder, " (dependency path: "); foundPath {
+				remainder = beforePath
+				pathPart = strings.TrimSuffix(pathPart, ")")
+				if pathPart != "" {
+					detail.DependencyPath = strings.Split(pathPart, " -> ")
+				}
+			}
+			if constraint, requiredByPart, foundRequiredBy := strings.Cut(remainder, " required by "); foundRequiredBy {
+				detail.Constraint = strings.TrimSpace(constraint)
+				detail.RequiredBy = strings.TrimSpace(requiredByPart)
+			} else {
+				detail.Constraint = strings.TrimSpace(remainder)
+			}
+		}
+	}
+	return detail, true
 }
 
 func collectSystemDependencyHintDetails(cranDeps, biocDeps []string, sourceDeps map[string]project.SourceSpec) []SystemHintDetail {
@@ -3037,17 +3196,58 @@ func printAppliedAdjustments(w io.Writer, prefix string, includeCRAN, includeBio
 }
 
 func EnsureInstalled(env ResolvedEnvironment) error {
-	cmd := exec.Command(env.Interpreter, "-e", `source(Sys.getenv("RS_BOOTSTRAP_FILE")); rs_bootstrap()`)
-	cmd.Stdout = env.Stdout
-	cmd.Stderr = env.Stderr
-	cmd.Stdin = os.Stdin
-	cmd.Dir = filepath.Dir(env.ScriptPath)
-	cmd.Env = append(runtimeEnv(env, true), "RS_BOOTSTRAP_AUTORUN=false")
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("install packages: %w", err)
+	backend := installBackend()
+	switch backend {
+	case "native":
+		return ensureInstalledNative(env)
+	case "legacy", "pak":
+		return bootstrapInstall(env, backend)
+	case "auto":
+		if err := ensureInstalledNative(env); err != nil {
+			if env.Stderr != nil {
+				fmt.Fprintf(env.Stderr, "[rs] native backend unavailable or failed; falling back to legacy: %v\n", err)
+			}
+			if fallbackErr := bootstrapInstall(env, "legacy"); fallbackErr != nil {
+				return fmt.Errorf("native install failed: %v; legacy fallback failed: %w", err, fallbackErr)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported install backend %s", backend)
 	}
-	return nil
+}
+
+func ensureInstalledNative(env ResolvedEnvironment) error {
+	req, err := installerRequestFromEnvironment(env, env.Stdout, env.Stderr)
+	if err != nil {
+		return err
+	}
+	return nativeInstall(req)
+}
+
+func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.Writer) (installer.Request, error) {
+	runtime, err := InspectRuntime(env)
+	if err != nil {
+		return installer.Request{}, err
+	}
+	sourceDeps := make(map[string]project.SourceSpec, len(env.SourceDeps))
+	for name, spec := range env.SourceDeps {
+		sourceDeps[name] = spec
+	}
+	return installer.Request{
+		Interpreter: env.Interpreter,
+		WorkDir:     filepath.Dir(env.ScriptPath),
+		LibraryPath: env.LibraryPath,
+		Repo:        env.Repo,
+		Runtime: installer.Runtime{
+			RVersion: runtime.RVersion,
+		},
+		CRANDeps:   copyStrings(env.CRANDeps),
+		BiocDeps:   copyStrings(env.BiocDeps),
+		SourceDeps: sourceDeps,
+		Stdout:     stdout,
+		Stderr:     stderr,
+	}, nil
 }
 
 func WriteLockfile(env ResolvedEnvironment) error {
@@ -3155,7 +3355,7 @@ for (pkg in pkgs) {
 				source = priority
 			}
 		}
-		if len(fields) >= 4 && fields[3] != "" && source != "base" && source != "recommended" {
+		if len(fields) >= 4 && fields[3] != "" && source != "base" && source != "recommended" && source != "cran" && source != "bioconductor" {
 			source = fields[3]
 		}
 		pkg := lockfile.Package{

@@ -32,7 +32,7 @@ go build -o rs ./cmd/rs
 
 Continuous integration:
 
-- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux and macOS, a local-source drift end-to-end check, and a Linux `rig` integration check
+- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux and macOS, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and a Linux `rig` integration check
 - the CI helper scripts live under [`scripts/ci/`](/Volumes/DataCenter_01/GitHub/gr/scripts/ci)
 
 Initialize a project:
@@ -341,18 +341,30 @@ For those cases, `--package <name>` and `--bioc-package <name>` are the escape h
 It then writes a temporary `R_PROFILE_USER` file that:
 
 - prepends the managed library to `.libPaths()`
-- checks which packages are missing
-- calls `install.packages()` for CRAN packages
-- calls `remotes::install_github()` for packages declared with `type = "github"`
-- passes `subdir` through to GitHub installs when configured
-- passes `host` and `token_env` through for GitHub Enterprise or private repository installs
-- clones and installs packages declared with `type = "git"` and records the resolved commit
-- calls `R CMD INSTALL` for packages declared with `type = "local"`
-- calls `BiocManager::install()` for Bioconductor packages when needed
+- keeps the runtime library wiring in one place before `Rscript` starts
 
 Because the bootstrap happens before `Rscript script.R` starts, the script still sees normal `commandArgs()` behavior.
 
-By default the installer backend runs in `auto` mode. It first tries to use `pak` for CRAN, Bioconductor, local package sources, git package sources without `subdir`, and standard GitHub sources that only use `repo` / `ref` / `subdir`, then falls back to the legacy `install.packages()` / `BiocManager::install()` / source-specific flow if `pak` is unavailable, fails, or the dependency plan includes source types or settings that still rely on the existing installers such as custom GitHub hosts or `token_env`. You can override that behavior by setting `RS_INSTALL_BACKEND=legacy` or `RS_INSTALL_BACKEND=pak` in the environment before invoking `rs`.
+Package installation is now orchestrated primarily from Go. The `native` backend resolves CRAN and Bioconductor indexes, clones or checks out `git` and GitHub sources, computes local-source fingerprints, writes `.rs-source-meta`, and then shells out to `R CMD INSTALL` for the final install step. The older R bootstrap installers are still available as compatibility backends.
+
+Today the native backend covers the package source types that `rs` exposes in normal use:
+
+- CRAN packages
+- Bioconductor packages
+- `type = "local"` sources
+- `type = "git"` sources
+- standard `type = "github"` sources, including custom GitHub Enterprise hosts and `token_env` authentication
+
+That means the default install path no longer depends on `pak` for routine `lock`, `run`, `sync`, or `check` flows. `pak` is kept as an explicit compatibility backend and CI comparison path while the Go-native planner and installer continue to mature.
+
+By default the installer backend runs in `auto` mode, which now means `native` first with a fallback to `legacy` if the native path fails. You can override that behavior by setting `RS_INSTALL_BACKEND=native`, `RS_INSTALL_BACKEND=legacy`, or `RS_INSTALL_BACKEND=pak` before invoking `rs`. `pak` remains available as a transitional compatibility backend, but it is no longer the default install path.
+
+In practice the backend modes now mean:
+
+- `auto`: try the Go-native installer first, then fall back to `legacy`
+- `native`: require the Go-native installer and fail if it cannot complete
+- `legacy`: use the older R bootstrap install path directly
+- `pak`: use `pak` explicitly as a compatibility backend
 
 ### 5. Lock file
 
@@ -385,7 +397,7 @@ That still is not a full reproducibility story, but it is now enough to detect m
 If any of those drift, the command fails and points you back to `rs lock`.
 The human-readable failure output now also adds short grouped summaries for input drift and installed-library drift so you can quickly see whether the mismatch is coming from script/config changes, runtime changes, dependency-set changes, or source differences.
 
-`rs check --json` reports the same drift in a machine-friendly shape. Alongside the top-level `issues` array, it now also splits failures into `input_issues` and `installed_issues`, plus installed-side buckets such as `installed_missing_packages`, `installed_version_issues`, and `installed_source_issues`. It also exposes `installed_issue_details` with structured `kind`, `package`, `field`, and `message` values so automation can avoid reparsing human text.
+`rs check --json` reports the same drift in a machine-friendly shape. Alongside the top-level `issues` array, it now also splits failures into `planning_issues`, `input_issues`, and `installed_issues`, plus installed-side buckets such as `installed_missing_packages`, `installed_version_issues`, and `installed_source_issues`. It also exposes `planning_issue_details` and `installed_issue_details` with structured fields such as `kind`, `package`, `field`, `message`, and for dependency conflicts `dependency_path`, `constraint`, `selected_version`, and `required_by`, so automation can avoid reparsing human text.
 
 ### 7. Doctor Diagnostics
 

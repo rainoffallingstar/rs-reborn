@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"gr/internal/installer"
 	"gr/internal/lockfile"
 	"gr/internal/project"
 )
@@ -71,12 +72,12 @@ func TestInstallBackendUsesEnvironmentOverride(t *testing.T) {
 	}
 }
 
-func TestBootstrapSourceIncludesPakFallback(t *testing.T) {
+func TestBootstrapSourceIncludesInstallerBackends(t *testing.T) {
 	for _, want := range []string{
 		"RS_INSTALL_BACKEND",
 		"rs_install_pak",
 		"pak::pkg_install",
-		"falling back to legacy",
+		"native backend must be executed from the Go installer",
 		"local::",
 		"git::",
 		"github::",
@@ -84,6 +85,176 @@ func TestBootstrapSourceIncludesPakFallback(t *testing.T) {
 		if !strings.Contains(bootstrapSource, want) {
 			t.Fatalf("bootstrapSource missing %q", want)
 		}
+	}
+}
+
+func TestEnsureInstalledUsesNativeBackend(t *testing.T) {
+	oldNative := nativeInstall
+	oldBootstrap := bootstrapInstall
+	t.Cleanup(func() {
+		nativeInstall = oldNative
+		bootstrapInstall = oldBootstrap
+	})
+
+	calledNative := false
+	nativeInstall = func(req installer.Request) error {
+		calledNative = true
+		if req.Runtime.RVersion != "4.4.1" {
+			t.Fatalf("native runtime version = %q, want 4.4.1", req.Runtime.RVersion)
+		}
+		return nil
+	}
+	bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
+		t.Fatalf("bootstrapInstall called unexpectedly with backend %q", backend)
+		return nil
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "native")
+	err := EnsureInstalled(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		LibraryPath: t.TempDir(),
+		Interpreter: "fake-Rscript",
+		Runtime: RuntimeMetadata{
+			Interpreter: "fake-Rscript",
+			RVersion:    "4.4.1",
+		},
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("EnsureInstalled() error = %v", err)
+	}
+	if !calledNative {
+		t.Fatalf("nativeInstall was not called")
+	}
+}
+
+func TestEnsureInstalledAutoFallsBackToLegacy(t *testing.T) {
+	oldNative := nativeInstall
+	oldBootstrap := bootstrapInstall
+	t.Cleanup(func() {
+		nativeInstall = oldNative
+		bootstrapInstall = oldBootstrap
+	})
+
+	var stderr bytes.Buffer
+	nativeInstall = func(req installer.Request) error {
+		return errors.New("native exploded")
+	}
+	bootstrapCalled := ""
+	bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
+		bootstrapCalled = backend
+		return nil
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "auto")
+	err := EnsureInstalled(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		LibraryPath: t.TempDir(),
+		Interpreter: "fake-Rscript",
+		Runtime: RuntimeMetadata{
+			Interpreter: "fake-Rscript",
+			RVersion:    "4.4.1",
+		},
+		Stdout: &bytes.Buffer{},
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("EnsureInstalled() error = %v", err)
+	}
+	if bootstrapCalled != "legacy" {
+		t.Fatalf("bootstrapInstall backend = %q, want legacy", bootstrapCalled)
+	}
+	if !strings.Contains(stderr.String(), "native backend unavailable or failed; falling back to legacy: native exploded") {
+		t.Fatalf("fallback stderr = %q", stderr.String())
+	}
+}
+
+func TestDoctorJSONOutputIncludesDependencyConflictDetails(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error {
+		return installer.ConstraintConflictError{
+			Package:     "cli",
+			Version:     "3.6.5",
+			RequiredBy:  "demo",
+			Operator:    ">=",
+			Requirement: "4.0.0",
+			Chain:       []string{"root", "demo"},
+		}
+	}
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "native")
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatalf("Doctor() error = nil, want blocking dependency conflict")
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if !slices.Contains(report.Errors, "dependency constraint conflict for cli: selected version 3.6.5 does not satisfy >= 4.0.0 required by demo (dependency path: root -> demo -> cli)") {
+		t.Fatalf("report.Errors = %v", report.Errors)
+	}
+	found := false
+	for _, detail := range report.ErrorDetails {
+		if detail.Kind == "dependency_conflict" && detail.Package == "cli" {
+			if !reflect.DeepEqual(detail.DependencyPath, []string{"root", "demo", "cli"}) {
+				t.Fatalf("detail.DependencyPath = %v", detail.DependencyPath)
+			}
+			if detail.Constraint != ">= 4.0.0" {
+				t.Fatalf("detail.Constraint = %q", detail.Constraint)
+			}
+			if detail.Selected != "3.6.5" {
+				t.Fatalf("detail.Selected = %q", detail.Selected)
+			}
+			if detail.RequiredBy != "demo" {
+				t.Fatalf("detail.RequiredBy = %q", detail.RequiredBy)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report.ErrorDetails = %v, want dependency conflict detail", report.ErrorDetails)
+	}
+}
+
+func TestParseDependencyConflictIssue(t *testing.T) {
+	detail, ok := parseDependencyConflictIssue("dependency constraint conflict for cli: selected version 3.6.5 does not satisfy >= 4.0.0 required by demo (dependency path: root -> demo -> cli)")
+	if !ok {
+		t.Fatalf("parseDependencyConflictIssue() ok = false")
+	}
+	if detail.Package != "cli" {
+		t.Fatalf("detail.Package = %q", detail.Package)
+	}
+	if detail.SelectedVersion != "3.6.5" {
+		t.Fatalf("detail.SelectedVersion = %q", detail.SelectedVersion)
+	}
+	if detail.Constraint != ">= 4.0.0" {
+		t.Fatalf("detail.Constraint = %q", detail.Constraint)
+	}
+	if detail.RequiredBy != "demo" {
+		t.Fatalf("detail.RequiredBy = %q", detail.RequiredBy)
+	}
+	if !reflect.DeepEqual(detail.DependencyPath, []string{"root", "demo", "cli"}) {
+		t.Fatalf("detail.DependencyPath = %v", detail.DependencyPath)
 	}
 }
 
@@ -1886,6 +2057,89 @@ func TestCheckJSONOutputOnFailure(t *testing.T) {
 	}
 	if len(report.InstalledIssueDetails) != 0 {
 		t.Fatalf("report.InstalledIssueDetails = %v, want none for missing lockfile", report.InstalledIssueDetails)
+	}
+	if len(report.PlanningIssues) != 0 {
+		t.Fatalf("report.PlanningIssues = %v, want none for missing lockfile", report.PlanningIssues)
+	}
+	if len(report.PlanningIssueDetails) != 0 {
+		t.Fatalf("report.PlanningIssueDetails = %v, want none for missing lockfile", report.PlanningIssueDetails)
+	}
+}
+
+func TestCheckJSONOutputIncludesPlanningConflictDetails(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error {
+		return installer.ConstraintConflictError{
+			Package:     "cli",
+			Version:     "3.6.5",
+			RequiredBy:  "demo",
+			Operator:    ">=",
+			Requirement: "4.0.0",
+			Chain:       []string{"root", "demo"},
+		}
+	}
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	cacheDir := filepath.Join(dir, "cache")
+	rscriptPath := writeFakeRscript(t, dir)
+	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "native")
+	var stdout bytes.Buffer
+	err := Check(CheckOptions{
+		ScriptPath:  scriptPath,
+		CacheDir:    cacheDir,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatalf("Check() error = nil, want planning conflict")
+	}
+
+	var report CheckReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if report.Valid {
+		t.Fatalf("report.Valid = true, want false")
+	}
+	if !slices.Contains(report.PlanningIssues, "dependency constraint conflict for cli: selected version 3.6.5 does not satisfy >= 4.0.0 required by demo (dependency path: root -> demo -> cli)") {
+		t.Fatalf("report.PlanningIssues = %v", report.PlanningIssues)
+	}
+	if len(report.InputIssues) != 0 {
+		t.Fatalf("report.InputIssues = %v, want none", report.InputIssues)
+	}
+	if len(report.InstalledIssues) != 0 {
+		t.Fatalf("report.InstalledIssues = %v, want none", report.InstalledIssues)
+	}
+	found := false
+	for _, detail := range report.PlanningIssueDetails {
+		if detail.Kind == "dependency_conflict" && detail.Package == "cli" {
+			if !reflect.DeepEqual(detail.DependencyPath, []string{"root", "demo", "cli"}) {
+				t.Fatalf("detail.DependencyPath = %v", detail.DependencyPath)
+			}
+			if detail.Constraint != ">= 4.0.0" {
+				t.Fatalf("detail.Constraint = %q", detail.Constraint)
+			}
+			if detail.Selected != "3.6.5" {
+				t.Fatalf("detail.Selected = %q", detail.Selected)
+			}
+			if detail.RequiredBy != "demo" {
+				t.Fatalf("detail.RequiredBy = %q", detail.RequiredBy)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report.PlanningIssueDetails = %v, want dependency conflict detail", report.PlanningIssueDetails)
 	}
 }
 

@@ -14,6 +14,7 @@ SCRIPT_B="$PROJECT_DIR/scripts/b.R"
 RSCRIPT_PATH="$(command -v Rscript)"
 export GOCACHE="$TMP_DIR/go-build"
 export GOMODCACHE="$TMP_DIR/gomodcache"
+export RS_INSTALL_BACKEND=native
 
 cd "$ROOT_DIR"
 
