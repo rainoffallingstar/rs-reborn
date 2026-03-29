@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"unicode"
 )
 
 var (
@@ -19,6 +20,8 @@ var (
 	rigAbs      = filepath.Abs
 	rigHomeDir  = os.UserHomeDir
 )
+
+const defaultAutoInstallVersionEnv = "RS_R_VERSION"
 
 func List(stdout, stderr io.Writer) error {
 	return runRig(stdout, stderr, "list")
@@ -42,19 +45,64 @@ func ResolveVersionOrPath(spec string) (string, error) {
 		return resolveExplicitRscript(spec)
 	}
 
-	candidates, err := installedRscriptCandidates(spec)
-	if err != nil {
-		return "", err
+	versionSpec := spec
+	if isNamedVersionSpec(spec) {
+		versionSpec = "*"
 	}
-	for _, candidate := range candidates {
-		info, err := rigStat(candidate)
-		if err != nil || info.IsDir() {
-			continue
-		}
+	candidate, err := bestInstalledRscript(versionSpec)
+	if err == nil {
 		return candidate, nil
 	}
 
 	return "", fmt.Errorf("could not find an installed Rscript for version %q; run `rs r list`, install it with `rs r install %s`, or set rs.toml rscript manually", spec, spec)
+}
+
+func EnsureInstalledRscript(spec string, stdout, stderr io.Writer) (string, error) {
+	spec = strings.TrimSpace(spec)
+	requested := spec
+	target := spec
+	switch {
+	case requested == "", strings.EqualFold(requested, "Rscript"), strings.EqualFold(requested, "Rscript.exe"):
+		target = defaultAutoInstallVersion()
+	case !LooksLikeVersionSpec(requested):
+		return "", fmt.Errorf("automatic R installation requires a version-like target, got %q", requested)
+	}
+
+	if stderr != nil {
+		fmt.Fprintf(stderr, "[rs] Rscript is not available; installing R %s via rig\n", target)
+	}
+	if err := Install(target, io.Discard, stderr); err != nil {
+		return "", err
+	}
+
+	switch {
+	case requested == "", strings.EqualFold(requested, "Rscript"), strings.EqualFold(requested, "Rscript.exe"), isNamedVersionSpec(requested):
+		return bestInstalledRscript("*")
+	default:
+		return ResolveVersionOrPath(requested)
+	}
+}
+
+func LooksLikeVersionSpec(spec string) bool {
+	spec = strings.TrimSpace(strings.ToLower(spec))
+	if spec == "" {
+		return false
+	}
+	if isNamedVersionSpec(spec) {
+		return true
+	}
+
+	hasDigit := false
+	for _, r := range spec {
+		switch {
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case r == '.', r == '-', unicode.IsLetter(r):
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func runRig(stdout, stderr io.Writer, args ...string) error {
@@ -133,6 +181,116 @@ func installedRscriptCandidates(version string) ([]string, error) {
 	}
 	slices.Sort(matches)
 	return matches, nil
+}
+
+func bestInstalledRscript(version string) (string, error) {
+	candidates, err := installedRscriptCandidates(version)
+	if err != nil {
+		return "", err
+	}
+
+	best := ""
+	for _, candidate := range candidates {
+		info, err := rigStat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if best == "" || compareRscriptCandidates(candidate, best) > 0 {
+			best = candidate
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("no installed Rscript found for version %q", version)
+	}
+	return best, nil
+}
+
+func compareRscriptCandidates(left, right string) int {
+	leftVersion, leftOK := parseVersionHint(left)
+	rightVersion, rightOK := parseVersionHint(right)
+	switch {
+	case leftOK && rightOK:
+		for i := 0; i < len(leftVersion) || i < len(rightVersion); i++ {
+			leftPart := 0
+			if i < len(leftVersion) {
+				leftPart = leftVersion[i]
+			}
+			rightPart := 0
+			if i < len(rightVersion) {
+				rightPart = rightVersion[i]
+			}
+			if leftPart > rightPart {
+				return 1
+			}
+			if leftPart < rightPart {
+				return -1
+			}
+		}
+	case leftOK:
+		return 1
+	case rightOK:
+		return -1
+	}
+
+	if left > right {
+		return 1
+	}
+	if left < right {
+		return -1
+	}
+	return 0
+}
+
+func parseVersionHint(path string) ([]int, bool) {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if version, ok := parseLeadingVersion(parts[i]); ok {
+			return version, true
+		}
+	}
+	return nil, false
+}
+
+func parseLeadingVersion(component string) ([]int, bool) {
+	var current int
+	haveCurrent := false
+	var version []int
+	for _, r := range component {
+		switch {
+		case unicode.IsDigit(r):
+			haveCurrent = true
+			current = current*10 + int(r-'0')
+		case r == '.' && haveCurrent:
+			version = append(version, current)
+			current = 0
+			haveCurrent = false
+		default:
+			if haveCurrent {
+				version = append(version, current)
+			}
+			return version, len(version) > 0
+		}
+	}
+	if haveCurrent {
+		version = append(version, current)
+	}
+	return version, len(version) > 0
+}
+
+func defaultAutoInstallVersion() string {
+	if value := strings.TrimSpace(os.Getenv(defaultAutoInstallVersionEnv)); value != "" {
+		return value
+	}
+	return "release"
+}
+
+func isNamedVersionSpec(spec string) bool {
+	switch strings.TrimSpace(strings.ToLower(spec)) {
+	case "release", "oldrel", "devel", "next":
+		return true
+	default:
+		return false
+	}
 }
 
 func rscriptExecutableName() string {

@@ -148,6 +148,8 @@ Manage interpreter versions and selection:
 ./rs r which
 ```
 
+When `Rscript` is missing, `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` now try to install R automatically through `rig`. By default they ask `rig` for `release`; set `RS_R_VERSION=4.4` (or another rig-compatible version selector) if you want to pin the bootstrap target on fresh machines.
+
 Compatibility alias:
 
 ```bash
@@ -436,7 +438,8 @@ If you want this to grow from prototype into a real tool, the next steps are:
 
 ## Notes
 
-- `Rscript` must already be installed; by default `rs` resolves it from `PATH`, but you can pin a project interpreter with `rscript = "..."`, override it with `--rscript`, or use the thin `rig` integration under `rs r ...`
+- `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` automatically bootstrap R through `rig` when `Rscript` is missing; by default they install `release`, or you can override that bootstrap target with `RS_R_VERSION`
+- you can still pin a project interpreter with `rscript = "..."`, override it with `--rscript`, or use the explicit `rs r ...` commands when you want full control
 - package installation supports CRAN, explicitly declared Bioconductor packages, GitHub sources, and local package sources
 - package installation also supports generic `git` sources with `url`, `ref`, and `subdir`
 - GitHub tokens are referenced by environment variable name via `token_env`; token values are never written to the lockfile

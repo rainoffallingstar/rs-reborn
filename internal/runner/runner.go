@@ -20,6 +20,7 @@ import (
 	"gr/internal/lockfile"
 	"gr/internal/project"
 	"gr/internal/rdeps"
+	"gr/internal/rmanager"
 )
 
 type RunOptions struct {
@@ -37,6 +38,7 @@ type RunOptions struct {
 	Verbose       bool
 	Stdout        io.Writer
 	Stderr        io.Writer
+	AutoInstallR  bool
 }
 
 type ShellOptions struct {
@@ -256,6 +258,12 @@ var nativeInstall = func(req installer.Request) error {
 
 var nativeValidatePlan = func(req installer.Request) error {
 	return installer.Validate(req)
+}
+
+var resolveSelectedRscript = ResolveRscriptPath
+
+var ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
+	return rmanager.EnsureInstalledRscript(selected, io.Discard, stderr)
 }
 
 var bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
@@ -786,6 +794,7 @@ func Run(opts RunOptions) error {
 		Verbose:       opts.Verbose,
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
+		AutoInstallR:  true,
 	})
 	if err != nil {
 		return err
@@ -851,6 +860,7 @@ func Shell(opts ShellOptions) error {
 		Verbose:       opts.Verbose,
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
+		AutoInstallR:  true,
 	})
 	if err != nil {
 		return err
@@ -923,6 +933,7 @@ func Exec(opts ExecOptions) error {
 		Verbose:       opts.Verbose,
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
+		AutoInstallR:  true,
 	})
 	if err != nil {
 		return err
@@ -984,6 +995,7 @@ func Sync(opts SyncOptions) error {
 		Verbose:       opts.Verbose,
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
+		AutoInstallR:  true,
 	})
 	if err != nil {
 		return err
@@ -2923,6 +2935,27 @@ func ResolveRscriptPath(override, configValue string) (string, error) {
 	return path, nil
 }
 
+func resolveRunnableRscriptPath(override, configValue string, stderr io.Writer) (string, error) {
+	interpreter, err := resolveSelectedRscript(override, configValue)
+	if err == nil {
+		return interpreter, nil
+	}
+
+	selected := firstNonEmpty(override, configValue, "Rscript")
+	if looksLikePath(selected) {
+		return "", err
+	}
+	if !strings.EqualFold(selected, "Rscript") && !strings.EqualFold(selected, "Rscript.exe") && !rmanager.LooksLikeVersionSpec(selected) {
+		return "", err
+	}
+
+	managed, managedErr := ensureManagedRscript(selected, stderr)
+	if managedErr != nil {
+		return "", fmt.Errorf("%v; automatic R installation failed: %w", err, managedErr)
+	}
+	return managed, nil
+}
+
 func resolveRShellPath(rscriptPath string) (string, error) {
 	if looksLikePath(rscriptPath) {
 		dir := filepath.Dir(rscriptPath)
@@ -3014,7 +3047,12 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		lockfilePath = defaultLockfilePath(projectCfg.RootDir, opts.ScriptPath)
 	}
 
-	interpreter, err := ResolveRscriptPath(opts.RscriptPath, scriptCfg.Rscript)
+	var interpreter string
+	if opts.AutoInstallR {
+		interpreter, err = resolveRunnableRscriptPath(opts.RscriptPath, scriptCfg.Rscript, opts.Stderr)
+	} else {
+		interpreter, err = resolveSelectedRscript(opts.RscriptPath, scriptCfg.Rscript)
+	}
 	if err != nil {
 		return ResolvedEnvironment{}, err
 	}

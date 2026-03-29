@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -167,6 +169,89 @@ func TestEnsureInstalledAutoFallsBackToLegacy(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "native backend unavailable or failed; falling back to legacy: native exploded") {
 		t.Fatalf("fallback stderr = %q", stderr.String())
+	}
+}
+
+func TestResolveRunnableRscriptPathAutoInstallsDefaultInterpreter(t *testing.T) {
+	oldEnsure := ensureManagedRscript
+	oldResolve := resolveSelectedRscript
+	t.Cleanup(func() {
+		ensureManagedRscript = oldEnsure
+		resolveSelectedRscript = oldResolve
+	})
+
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		return "", errors.New("Rscript is not available on PATH: executable file not found")
+	}
+	var requested string
+	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
+		requested = selected
+		return "/tmp/managed/Rscript", nil
+	}
+
+	got, err := resolveRunnableRscriptPath("", "", io.Discard)
+	if err != nil {
+		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+	if got != "/tmp/managed/Rscript" {
+		t.Fatalf("resolveRunnableRscriptPath() = %q, want managed path", got)
+	}
+	if requested != "Rscript" {
+		t.Fatalf("ensureManagedRscript selected = %q, want Rscript", requested)
+	}
+}
+
+func TestResolveRunnableRscriptPathAutoInstallsVersionSpec(t *testing.T) {
+	oldEnsure := ensureManagedRscript
+	oldResolve := resolveSelectedRscript
+	t.Cleanup(func() {
+		ensureManagedRscript = oldEnsure
+		resolveSelectedRscript = oldResolve
+	})
+
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		return "", errors.New("requested Rscript \"4.4\" is not available: executable file not found")
+	}
+	var requested string
+	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
+		requested = selected
+		return "/tmp/managed/4.4/Rscript", nil
+	}
+
+	got, err := resolveRunnableRscriptPath("4.4", "", io.Discard)
+	if err != nil {
+		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+	if got != "/tmp/managed/4.4/Rscript" {
+		t.Fatalf("resolveRunnableRscriptPath() = %q, want managed version path", got)
+	}
+	if requested != "4.4" {
+		t.Fatalf("ensureManagedRscript selected = %q, want 4.4", requested)
+	}
+}
+
+func TestResolveRunnableRscriptPathDoesNotAutoInstallExplicitPath(t *testing.T) {
+	oldEnsure := ensureManagedRscript
+	oldResolve := resolveSelectedRscript
+	t.Cleanup(func() {
+		ensureManagedRscript = oldEnsure
+		resolveSelectedRscript = oldResolve
+	})
+
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		return "", fmt.Errorf("requested Rscript %q is not available: stat %s: no such file or directory", override, override)
+	}
+	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
+		t.Fatalf("ensureManagedRscript called unexpectedly with %q", selected)
+		return "", nil
+	}
+
+	_, err := resolveRunnableRscriptPath("/tmp/missing/Rscript", "", io.Discard)
+	if err == nil {
+		t.Fatalf("resolveRunnableRscriptPath() error = nil, want missing explicit path")
+	}
+	if !strings.Contains(err.Error(), "requested Rscript \"/tmp/missing/Rscript\" is not available") {
+		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
 	}
 }
 
