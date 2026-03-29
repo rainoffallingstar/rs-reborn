@@ -77,6 +77,9 @@ func TestBootstrapSourceIncludesPakFallback(t *testing.T) {
 		"rs_install_pak",
 		"pak::pkg_install",
 		"falling back to legacy",
+		"local::",
+		"git::",
+		"github::",
 	} {
 		if !strings.Contains(bootstrapSource, want) {
 			t.Fatalf("bootstrapSource missing %q", want)
