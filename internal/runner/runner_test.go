@@ -16,6 +16,30 @@ import (
 	"gr/internal/project"
 )
 
+func writeFakeRscript(t *testing.T, dir string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "Rscript")
+	script := `#!/bin/sh
+if [ "$1" = "-e" ]; then
+	cat <<'EOF'
+version	4.4.1
+platform	x86_64-pc-linux-gnu
+arch	x86_64
+os	linux-gnu
+pkg_type	source
+EOF
+	exit 0
+fi
+echo "unexpected fake Rscript args: $*" >&2
+exit 1
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
+	}
+	return path
+}
+
 func TestMergeDeps(t *testing.T) {
 	got := mergeDeps([]string{"jsonlite", "dplyr"}, []string{"cli", "dplyr"})
 	want := []string{"cli", "dplyr", "jsonlite"}
@@ -1215,6 +1239,7 @@ func TestListJSONOutputIncludesAppliedAdjustments(t *testing.T) {
 func TestDoctorPrintsAppliedAdjustments(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("library(dplyr)\njsonlite::fromJSON('{}')\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
@@ -1227,6 +1252,7 @@ func TestDoctorPrintsAppliedAdjustments(t *testing.T) {
 		IncludeDeps:     []string{"cli"},
 		IncludeBiocDeps: []string{"Biostrings"},
 		ExcludeDeps:     []string{"dplyr"},
+		RscriptPath:     rscriptPath,
 		Stdout:          &stdout,
 		Stderr:          &bytes.Buffer{},
 	})
@@ -1246,15 +1272,17 @@ func TestDoctorPrintsAppliedAdjustments(t *testing.T) {
 func TestDoctorPrintsSystemHints(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("xml2::read_xml('<a/>')\ncurl::curl()\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
 
 	var stdout bytes.Buffer
 	err := Doctor(DoctorOptions{
-		ScriptPath: scriptPath,
-		Stdout:     &stdout,
-		Stderr:     &bytes.Buffer{},
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
 	})
 	if err != nil {
 		t.Fatalf("Doctor() error = %v", err)
@@ -1281,6 +1309,7 @@ func TestDoctorPrintsSystemHints(t *testing.T) {
 func TestDoctorSummaryOnly(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
@@ -1288,6 +1317,7 @@ func TestDoctorSummaryOnly(t *testing.T) {
 	var stdout bytes.Buffer
 	err := Doctor(DoctorOptions{
 		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
 		SummaryOnly: true,
 		Stdout:      &stdout,
 		Stderr:      &bytes.Buffer{},
@@ -1305,6 +1335,7 @@ func TestDoctorSummaryOnly(t *testing.T) {
 func TestDoctorSummaryOnlyStrictFails(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
@@ -1312,6 +1343,7 @@ func TestDoctorSummaryOnlyStrictFails(t *testing.T) {
 	var stdout bytes.Buffer
 	err := Doctor(DoctorOptions{
 		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
 		Strict:      true,
 		SummaryOnly: true,
 		Stdout:      &stdout,
@@ -1337,16 +1369,18 @@ func TestDoctorSummaryOnlyStrictFails(t *testing.T) {
 func TestDoctorQuietHidesInfoLines(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("xml2::read_xml('<a/>')\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
 
 	var stdout bytes.Buffer
 	err := Doctor(DoctorOptions{
-		ScriptPath: scriptPath,
-		Quiet:      true,
-		Stdout:     &stdout,
-		Stderr:     &bytes.Buffer{},
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		Quiet:       true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
 	})
 	if err != nil {
 		t.Fatalf("Doctor() error = %v", err)
@@ -1369,6 +1403,7 @@ func TestDoctorQuietHidesInfoLines(t *testing.T) {
 func TestDoctorJSONOutput(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("DESeq2::DESeq()\njsonlite::fromJSON('{}')\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
@@ -1381,6 +1416,7 @@ func TestDoctorJSONOutput(t *testing.T) {
 		IncludeDeps:     []string{"cli"},
 		IncludeBiocDeps: []string{"Biostrings"},
 		ExcludeDeps:     []string{"DESeq2"},
+		RscriptPath:     rscriptPath,
 		JSON:            true,
 		Stdout:          &stdout,
 		Stderr:          &bytes.Buffer{},
@@ -1462,16 +1498,18 @@ func TestDoctorJSONOutput(t *testing.T) {
 func TestDoctorStrictFailsOnWarnings(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
 
 	var stdout bytes.Buffer
 	err := Doctor(DoctorOptions{
-		ScriptPath: scriptPath,
-		Strict:     true,
-		Stdout:     &stdout,
-		Stderr:     &bytes.Buffer{},
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		Strict:      true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
 	})
 	if err == nil {
 		t.Fatalf("Doctor() error = nil, want strict-mode warning failure")
@@ -1495,17 +1533,19 @@ func TestDoctorStrictFailsOnWarnings(t *testing.T) {
 func TestDoctorStrictJSONStillPrintsReport(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
 
 	var stdout bytes.Buffer
 	err := Doctor(DoctorOptions{
-		ScriptPath: scriptPath,
-		JSON:       true,
-		Strict:     true,
-		Stdout:     &stdout,
-		Stderr:     &bytes.Buffer{},
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Strict:      true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
 	})
 	if err == nil {
 		t.Fatalf("Doctor() error = nil, want strict-mode warning failure")
@@ -1523,16 +1563,18 @@ func TestDoctorStrictJSONStillPrintsReport(t *testing.T) {
 func TestDoctorJSONOutputIncludesSystemHints(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("xml2::read_xml('<a/>')\ncurl::curl()\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
 
 	var stdout bytes.Buffer
 	err := Doctor(DoctorOptions{
-		ScriptPath: scriptPath,
-		JSON:       true,
-		Stdout:     &stdout,
-		Stderr:     &bytes.Buffer{},
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
 	})
 	if err != nil {
 		t.Fatalf("Doctor() error = %v", err)
@@ -1581,6 +1623,7 @@ func TestDoctorJSONOutputClassifiesNetworkAndSourceErrors(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
 	configPath := filepath.Join(dir, project.ConfigFileName)
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("privpkg::do_work()\ngitpkg::do_work()\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
@@ -1604,10 +1647,11 @@ func TestDoctorJSONOutputClassifiesNetworkAndSourceErrors(t *testing.T) {
 
 	var stdout bytes.Buffer
 	err := Doctor(DoctorOptions{
-		ScriptPath: scriptPath,
-		JSON:       true,
-		Stdout:     &stdout,
-		Stderr:     &bytes.Buffer{},
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
 	})
 	if err == nil {
 		t.Fatalf("Doctor() error = nil, want categorized doctor failure")
@@ -1757,6 +1801,7 @@ func TestCheckJSONOutputOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
 	cacheDir := filepath.Join(dir, "cache")
+	rscriptPath := writeFakeRscript(t, dir)
 	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(script) error = %v", err)
 	}
@@ -1770,6 +1815,7 @@ func TestCheckJSONOutputOnFailure(t *testing.T) {
 		IncludeBiocDeps: []string{"Biostrings"},
 		ExcludeDeps:     []string{"jsonlite"},
 		CacheDir:        cacheDir,
+		RscriptPath:     rscriptPath,
 		JSON:            true,
 		Stdout:          &stdout,
 		Stderr:          &bytes.Buffer{},
