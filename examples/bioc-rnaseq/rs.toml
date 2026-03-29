@@ -1,0 +1,5 @@
+repo = "https://cloud.r-project.org"
+cache_dir = ".rs-cache"
+lockfile = "rs.lock.json"
+packages = ["jsonlite"]
+bioc_packages = ["DESeq2", "SummarizedExperiment"]

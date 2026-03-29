@@ -1,0 +1,4 @@
+repo = "https://cloud.r-project.org"
+cache_dir = ".rs-cache"
+lockfile = "rs.lock.json"
+packages = ["cli", "jsonlite"]

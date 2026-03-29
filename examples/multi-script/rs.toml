@@ -1,0 +1,9 @@
+repo = "https://cloud.r-project.org"
+cache_dir = ".rs-cache"
+lockfile = "rs.lock.json"
+
+[scripts."scripts/report.R"]
+packages = ["glue", "jsonlite"]
+
+[scripts."scripts/qc.R"]
+packages = ["cli", "stringr"]
