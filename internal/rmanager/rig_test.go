@@ -169,3 +169,96 @@ func TestLooksLikeVersionSpec(t *testing.T) {
 		}
 	}
 }
+
+func TestRunRigWithoutRigReturnsHelpfulNextStep(t *testing.T) {
+	origRigLookPath := rigLookPath
+	origToolLookPath := toolLookPath
+	origOS := rigOS
+	t.Cleanup(func() {
+		rigLookPath = origRigLookPath
+		toolLookPath = origToolLookPath
+		rigOS = origOS
+	})
+
+	rigOS = "darwin"
+	rigLookPath = func(file string) (string, error) {
+		return "", fmt.Errorf("executable file not found")
+	}
+	toolLookPath = func(file string) (string, error) {
+		if file == "brew" {
+			return "/opt/homebrew/bin/brew", nil
+		}
+		return "", fmt.Errorf("missing")
+	}
+	t.Setenv(autoInstallRigEnv, "")
+
+	err := runRig(io.Discard, io.Discard, "list")
+	if err == nil {
+		t.Fatalf("runRig() error = nil, want missing rig")
+	}
+	if !strings.Contains(err.Error(), "next step: install rig with Homebrew and rerun rs: brew tap r-lib/rig && brew install --cask rig") {
+		t.Fatalf("runRig() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "explicit auto-install: set RS_AUTO_INSTALL_RIG=1 and retry") {
+		t.Fatalf("runRig() error = %v", err)
+	}
+}
+
+func TestRunRigAutoInstallsRigWhenEnabled(t *testing.T) {
+	origRigLookPath := rigLookPath
+	origRigCommand := rigCommand
+	origToolLookPath := toolLookPath
+	origToolCommand := toolCommand
+	origOS := rigOS
+	t.Cleanup(func() {
+		rigLookPath = origRigLookPath
+		rigCommand = origRigCommand
+		toolLookPath = origToolLookPath
+		toolCommand = origToolCommand
+		rigOS = origOS
+	})
+
+	rigOS = "darwin"
+	installed := false
+	rigLookPath = func(file string) (string, error) {
+		if file != "rig" {
+			return "", fmt.Errorf("unexpected lookpath %q", file)
+		}
+		if installed {
+			return "/opt/homebrew/bin/rig", nil
+		}
+		return "", fmt.Errorf("missing")
+	}
+	toolLookPath = func(file string) (string, error) {
+		switch file {
+		case "brew":
+			return "/opt/homebrew/bin/brew", nil
+		default:
+			return "", fmt.Errorf("missing")
+		}
+	}
+
+	var toolCalls []string
+	toolCommand = func(name string, args ...string) *exec.Cmd {
+		toolCalls = append(toolCalls, name+" "+strings.Join(args, " "))
+		installed = true
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	var rigCalls []string
+	rigCommand = func(name string, args ...string) *exec.Cmd {
+		rigCalls = append(rigCalls, name+" "+strings.Join(args, " "))
+		return exec.Command("sh", "-c", "exit 0")
+	}
+
+	t.Setenv(autoInstallRigEnv, "1")
+	if err := runRig(io.Discard, io.Discard, "list"); err != nil {
+		t.Fatalf("runRig() error = %v", err)
+	}
+	if len(toolCalls) == 0 || !strings.Contains(toolCalls[0], "brew tap r-lib/rig") {
+		t.Fatalf("toolCalls = %v, want brew bootstrap", toolCalls)
+	}
+	if len(rigCalls) == 0 || !strings.Contains(rigCalls[0], "/opt/homebrew/bin/rig list") {
+		t.Fatalf("rigCalls = %v, want rig list", rigCalls)
+	}
+}

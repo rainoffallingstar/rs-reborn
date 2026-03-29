@@ -17,6 +17,7 @@ import (
 	"gr/internal/installer"
 	"gr/internal/lockfile"
 	"gr/internal/project"
+	"gr/internal/rmanager"
 )
 
 func writeFakeRscript(t *testing.T, dir string) string {
@@ -2010,6 +2011,46 @@ func TestBuildDoctorNextStepsHealthyEnvironment(t *testing.T) {
 	}
 	if steps[0].Blocking {
 		t.Fatalf("steps[0].Blocking = true, want false")
+	}
+}
+
+func TestBuildDoctorNextStepsSuggestsRigBootstrapWhenMissing(t *testing.T) {
+	oldRigAvailable := rigAvailable
+	oldRigAdvice := rigBootstrapAdvice
+	t.Cleanup(func() {
+		rigAvailable = oldRigAvailable
+		rigBootstrapAdvice = oldRigAdvice
+	})
+
+	rigAvailable = func() bool { return false }
+	rigBootstrapAdvice = func() rmanager.RigBootstrapAdvice {
+		return rmanager.RigBootstrapAdvice{
+			ManualMessage: "install rig with Homebrew and rerun rs",
+			ManualCommand: "brew tap r-lib/rig && brew install --cask rig",
+			AutoEnableEnv: "RS_AUTO_INSTALL_RIG",
+		}
+	}
+
+	steps := buildDoctorNextSteps(dependencyPlan{
+		ScriptPath: "/tmp/project/report.R",
+		RequestedR: "Rscript",
+	}, errors.New("selected Rscript is not available"), false, nil, nil, nil)
+
+	if len(steps) < 3 {
+		t.Fatalf("len(steps) = %d, want rig bootstrap steps included (%v)", len(steps), steps)
+	}
+	foundManual := false
+	foundAuto := false
+	for _, step := range steps {
+		if step.Kind == "install_rig" && strings.Contains(step.Message, "brew tap r-lib/rig && brew install --cask rig") && step.Blocking {
+			foundManual = true
+		}
+		if step.Kind == "auto_install_rig" && step.Command == "RS_AUTO_INSTALL_RIG=1 rs run /tmp/project/report.R" && step.Blocking {
+			foundAuto = true
+		}
+	}
+	if !foundManual || !foundAuto {
+		t.Fatalf("steps = %#v, want both manual and auto rig guidance", steps)
 	}
 }
 

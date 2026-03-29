@@ -266,6 +266,9 @@ var ensureManagedRscript = func(selected string, stderr io.Writer) (string, erro
 	return rmanager.EnsureInstalledRscript(selected, io.Discard, stderr)
 }
 
+var rigAvailable = rmanager.RigAvailable
+var rigBootstrapAdvice = rmanager.BootstrapAdvice
+
 var bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
 	cmd := exec.Command(env.Interpreter, "-e", `source(Sys.getenv("RS_BOOTSTRAP_FILE")); rs_bootstrap()`)
 	cmd.Stdout = env.Stdout
@@ -2588,6 +2591,22 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 	}
 
 	if rscriptErr != nil {
+		advice := rigBootstrapAdvice()
+		if shouldSuggestRigBootstrap(plan.RequestedR) && !rigAvailable() {
+			add(NextStepDetail{
+				Category: "setup",
+				Kind:     "install_rig",
+				Message:  advice.ManualMessageWithCommand(),
+				Blocking: true,
+			})
+			add(NextStepDetail{
+				Category: "setup",
+				Kind:     "auto_install_rig",
+				Message:  "explicitly allow rs to install rig automatically and rerun",
+				Command:  fmt.Sprintf("%s=1 rs run %s", advice.AutoEnableEnv, plan.ScriptPath),
+				Blocking: true,
+			})
+		}
 		add(NextStepDetail{
 			Category: "setup",
 			Kind:     "install_r",
@@ -2683,6 +2702,14 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 	}
 
 	return steps
+}
+
+func shouldSuggestRigBootstrap(requestedR string) bool {
+	requestedR = strings.TrimSpace(requestedR)
+	if requestedR == "" || strings.EqualFold(requestedR, "Rscript") || strings.EqualFold(requestedR, "Rscript.exe") {
+		return true
+	}
+	return rmanager.LooksLikeVersionSpec(requestedR)
 }
 
 func collectProjectScriptPaths(root string) ([]string, error) {
