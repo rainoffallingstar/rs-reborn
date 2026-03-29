@@ -1041,9 +1041,6 @@ func List(opts ListOptions) error {
 	if err != nil {
 		return err
 	}
-	if plan.RscriptIssue != "" {
-		return fmt.Errorf("%s", plan.RscriptIssue)
-	}
 	report := buildListReport(plan, opts)
 	normalizeListReport(&report)
 
