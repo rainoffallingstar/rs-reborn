@@ -1041,6 +1041,9 @@ func List(opts ListOptions) error {
 	if err != nil {
 		return err
 	}
+	if plan.RscriptIssue != "" && !listCanProceedWithoutRuntime(plan.RscriptIssue) {
+		return fmt.Errorf("%s", plan.RscriptIssue)
+	}
 	report := buildListReport(plan, opts)
 	normalizeListReport(&report)
 
@@ -1139,6 +1142,10 @@ func List(opts ListOptions) error {
 		fmt.Fprintln(opts.Stdout)
 	}
 	return nil
+}
+
+func listCanProceedWithoutRuntime(issue string) bool {
+	return strings.Contains(issue, "is not available")
 }
 
 func Prune(opts PruneOptions) error {

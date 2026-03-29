@@ -1589,6 +1589,33 @@ func TestListJSONOutputIncludesAppliedAdjustments(t *testing.T) {
 	}
 }
 
+func TestListFailsOnConfiguredRVersionMismatch(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	configPath := filepath.Join(dir, "rs.toml")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	config := fmt.Sprintf("rscript = %q\nr_version = \"9.9\"\n", rscriptPath)
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	err := List(ListOptions{
+		ScriptPath: scriptPath,
+		JSON:       true,
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("List() error = nil, want r_version mismatch")
+	}
+	if !strings.Contains(err.Error(), `configured r_version "9.9" does not match selected interpreter runtime 4.4.1`) {
+		t.Fatalf("List() error = %v", err)
+	}
+}
+
 func TestDoctorPrintsAppliedAdjustments(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
