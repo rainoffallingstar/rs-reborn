@@ -327,6 +327,24 @@ func TestInitCommandWritesRscript(t *testing.T) {
 	}
 }
 
+func TestInitCommandWritesRVersion(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{"--r-version", "4.4", dir})
+	}); err != nil {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+
+	cfg, err := project.LoadEditable(filepath.Join(dir, project.ConfigFileName))
+	if err != nil {
+		t.Fatalf("LoadEditable() error = %v", err)
+	}
+	if cfg.Defaults.RVersion != "4.4" {
+		t.Fatalf("Defaults.RVersion = %q", cfg.Defaults.RVersion)
+	}
+}
+
 func TestRUseCommandWritesResolvedRscript(t *testing.T) {
 	dir := t.TempDir()
 	rscriptPath := filepath.Join(dir, "tools", "Rscript-4.4")
@@ -352,6 +370,33 @@ func TestRUseCommandWritesResolvedRscript(t *testing.T) {
 	}
 	if cfg.Defaults.Rscript != rscriptPath {
 		t.Fatalf("Defaults.Rscript = %q, want %q", cfg.Defaults.Rscript, rscriptPath)
+	}
+	if cfg.Defaults.RVersion != "" {
+		t.Fatalf("Defaults.RVersion = %q, want empty", cfg.Defaults.RVersion)
+	}
+}
+
+func TestRUseCommandWritesRVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := project.Save(filepath.Join(dir, project.ConfigFileName), project.NewDefaultConfig(project.InitOptions{})); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return rUseCommand([]string{"--project-dir", dir, "4.4"})
+	}); err != nil {
+		t.Fatalf("rUseCommand() error = %v", err)
+	}
+
+	cfg, err := project.LoadEditable(filepath.Join(dir, project.ConfigFileName))
+	if err != nil {
+		t.Fatalf("LoadEditable() error = %v", err)
+	}
+	if cfg.Defaults.RVersion != "4.4" {
+		t.Fatalf("Defaults.RVersion = %q, want 4.4", cfg.Defaults.RVersion)
+	}
+	if cfg.Defaults.Rscript != "" {
+		t.Fatalf("Defaults.Rscript = %q, want empty", cfg.Defaults.Rscript)
 	}
 }
 

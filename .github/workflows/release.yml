@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    branches:
+      - main
+      - master
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: |
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push') ||
+      (github.event_name == 'workflow_dispatch' &&
+       (github.ref_name == 'main' || github.ref_name == 'master'))
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TZ: Asia/Shanghai
+    steps:
+      - name: Resolve release metadata
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            ref_name="${{ github.event.workflow_run.head_branch }}"
+            sha="${{ github.event.workflow_run.head_sha }}"
+          else
+            ref_name="${{ github.ref_name }}"
+            sha="${{ github.sha }}"
+          fi
+
+          tag="$(date +%F)"
+
+          echo "ref_name=$ref_name" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_name=rs $tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.meta.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Guard against moving the date tag backwards
+        id: guard
+        run: |
+          git fetch --tags origin
+          target_sha="${{ steps.meta.outputs.sha }}"
+          tag="${{ steps.meta.outputs.tag }}"
+
+          if git rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null; then
+            current_sha="$(git rev-parse "refs/tags/$tag^{commit}")"
+            if [ "$current_sha" != "$target_sha" ] && git merge-base --is-ancestor "$target_sha" "$current_sha"; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "reason=tag $tag already points to newer commit $current_sha" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Build release artifacts
+        if: steps.guard.outputs.skip != 'true'
+        run: bash scripts/ci/build-release-artifacts.sh dist "${{ steps.meta.outputs.tag }}"
+
+      - name: Move date tag to the tested revision
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags origin
+          git tag -f "${{ steps.meta.outputs.tag }}" "${{ steps.meta.outputs.sha }}"
+          git push --force origin "refs/tags/${{ steps.meta.outputs.tag }}"
+
+      - name: Write release notes
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          cat > release-notes.md <<EOF
+          Automated binary build for \`${{ steps.meta.outputs.tag }}\`.
+
+          - Branch: \`${{ steps.meta.outputs.ref_name }}\`
+          - Commit: \`${{ steps.meta.outputs.sha }}\`
+
+          This date-based tag is reused for later successful builds on the same day.
+          EOF
+
+      - name: Publish GitHub release
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          if gh release view "${{ steps.meta.outputs.tag }}" >/dev/null 2>&1; then
+            gh release edit "${{ steps.meta.outputs.tag }}" \
+              --title "${{ steps.meta.outputs.release_name }}" \
+              --notes-file release-notes.md
+            gh release upload "${{ steps.meta.outputs.tag }}" dist/* --clobber
+          else
+            gh release create "${{ steps.meta.outputs.tag }}" dist/* \
+              --title "${{ steps.meta.outputs.release_name }}" \
+              --notes-file release-notes.md
+          fi
+
+      - name: Report skipped publish
+        if: steps.guard.outputs.skip == 'true'
+        run: echo "${{ steps.guard.outputs.reason }}"

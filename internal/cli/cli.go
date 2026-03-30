@@ -145,6 +145,7 @@ func initCommand(args []string) error {
 	cacheDir := fs.String("cache-dir", ".rs-cache", "managed library cache directory written to rs.toml")
 	lockfile := fs.String("lockfile", "rs.lock.json", "lockfile path written to rs.toml")
 	rscript := fs.String("rscript", "", "default Rscript binary or path written to rs.toml")
+	rVersion := fs.String("r-version", "", "default R version selector written to rs.toml")
 	var fromScripts stringList
 	var fromDirs stringList
 	var includePackages stringList
@@ -190,6 +191,7 @@ func initCommand(args []string) error {
 		CacheDir:     *cacheDir,
 		Lockfile:     *lockfile,
 		Rscript:      *rscript,
+		RVersion:     *rVersion,
 		BiocPackages: biocPackages,
 	}
 	includeCRAN, includeBioc := rdeps.SplitBiocPackages(includePackages)
@@ -933,20 +935,31 @@ func rUseCommand(args []string) error {
 		return fmt.Errorf("no %s found from %s\nrun `rs init` first", project.ConfigFileName, startDir)
 	}
 
-	rscriptPath, err := rmanager.ResolveVersionOrPath(fs.Arg(0))
-	if err != nil {
-		return err
-	}
 	editable, err := project.LoadEditable(cfg.Path)
 	if err != nil {
 		return err
 	}
-	editable.Defaults.Rscript = rscriptPath
+	spec := fs.Arg(0)
+	if rmanager.LooksLikeVersionSpec(spec) && !strings.Contains(strings.ToLower(spec), "rscript") {
+		editable.Defaults.RVersion = spec
+		editable.Defaults.Rscript = ""
+	} else {
+		rscriptPath, err := rmanager.ResolveVersionOrPath(spec)
+		if err != nil {
+			return err
+		}
+		editable.Defaults.Rscript = rscriptPath
+		editable.Defaults.RVersion = ""
+	}
 	if err := project.Save(editable.Path, editable); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stdout, "updated %s (rscript = %s)\n", editable.Path, rscriptPath)
+	if editable.Defaults.RVersion != "" {
+		fmt.Fprintf(os.Stdout, "updated %s (r_version = %s)\n", editable.Path, editable.Defaults.RVersion)
+	} else {
+		fmt.Fprintf(os.Stdout, "updated %s (rscript = %s)\n", editable.Path, editable.Defaults.Rscript)
+	}
 	return nil
 }
 
@@ -988,13 +1001,24 @@ func rWhichCommand(args []string) error {
 			if err != nil {
 				return fmt.Errorf("resolve script config: %w", err)
 			}
-			configured = resolved.Rscript
+			if resolved.Rscript != "" {
+				configured = resolved.Rscript
+			} else {
+				configured = resolved.RVersion
+			}
 		} else {
-			configured = cfg.Defaults.Rscript
+			if cfg.Defaults.Rscript != "" {
+				configured = cfg.Defaults.Rscript
+			} else {
+				configured = cfg.Defaults.RVersion
+			}
 		}
 	}
 
-	rscriptPath, err := runner.ResolveRscriptPath("", configured)
+	if configured == "" {
+		configured = "Rscript"
+	}
+	rscriptPath, err := rmanager.ResolveVersionOrPath(configured)
 	if err != nil {
 		return err
 	}
@@ -1242,6 +1266,7 @@ Flags for "init":
   --cache-dir <dir>         cache directory to write into rs.toml
   --lockfile <path>         lockfile path to write into rs.toml
   --rscript <path|cmd>      default Rscript binary or path to write into rs.toml
+  --r-version <version>     default R version selector to write into rs.toml
   --from <path>             scan an existing R script and seed rs.toml (repeatable)
   --from-dir <dir>          scan all .R/.Rscript files under a directory (repeatable)
   --include <pkg>           add an extra project-level dependency (repeatable)
@@ -1282,7 +1307,7 @@ Flags for "lock":
 Flags for "r":
   list                      proxy rig list
   install <version>         proxy rig add <version>
-  use <version|path>        resolve an installed Rscript and write it to rs.toml
+  use <version|path>        write r_version or a resolved Rscript path to rs.toml
   which [dir|script]        print the currently selected Rscript path
 
 Flags for "list":

@@ -21,7 +21,7 @@ go build -o "$RS_BIN" ./cmd/rs
 
 echo "==> installing pak into isolated user library"
 mkdir -p "$R_LIBS_USER"
-Rscript -e 'options(repos = c(CRAN = "https://cloud.r-project.org")); install.packages("pak", lib = Sys.getenv("R_LIBS_USER"))'
+Rscript -e 'options(repos = c(CRAN = "https://cloud.r-project.org"), timeout = max(300, getOption("timeout"))); ok <- FALSE; err <- NULL; for (attempt in 1:3) { cat(sprintf("pak install attempt %d/3\n", attempt)); err <- tryCatch({ install.packages("pak", lib = Sys.getenv("R_LIBS_USER")); NULL }, error = function(e) e); if (is.null(err)) { ok <- TRUE; break }; message(conditionMessage(err)); if (attempt < 3) Sys.sleep(2) }; if (!ok) stop(err)'
 Rscript -e 'cat("pak=", requireNamespace("pak", quietly = TRUE), "\n", sep = "")' | tee "$TMP_DIR/pak-check.txt"
 grep -q 'pak=TRUE' "$TMP_DIR/pak-check.txt"
 

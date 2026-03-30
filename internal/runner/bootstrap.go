@@ -396,7 +396,7 @@ rs_bootstrap <- function() {
     return(invisible(NULL))
   }
 
-  if (!(ctx$backend %in% c("auto", "legacy", "pak"))) {
+  if (!(ctx$backend %in% c("auto", "legacy", "pak", "native"))) {
     stop(sprintf("unsupported install backend %s", ctx$backend))
   }
 
@@ -406,14 +406,11 @@ rs_bootstrap <- function() {
   if (identical(ctx$backend, "pak")) {
     return(rs_install_pak(ctx))
   }
+  if (identical(ctx$backend, "native")) {
+    stop("native backend must be executed from the Go installer")
+  }
 
-  tryCatch(
-    rs_install_pak(ctx),
-    error = function(err) {
-      message(sprintf("[rs] pak backend unavailable or failed; falling back to legacy: %s", conditionMessage(err)))
-      rs_install_legacy(ctx)
-    }
-  )
+  rs_install_legacy(ctx)
 }
 
 rs_parse_sources <- function(raw) {

@@ -16,6 +16,7 @@ type InitOptions struct {
 	CacheDir     string
 	Lockfile     string
 	Rscript      string
+	RVersion     string
 	Packages     []string
 	BiocPackages []string
 }
@@ -40,6 +41,7 @@ func NewDefaultConfig(opts InitOptions) Config {
 			CacheDir:     firstNonEmpty(opts.CacheDir, ".rs-cache"),
 			Lockfile:     firstNonEmpty(opts.Lockfile, "rs.lock.json"),
 			Rscript:      opts.Rscript,
+			RVersion:     opts.RVersion,
 			Packages:     mergeStrings(nil, opts.Packages),
 			BiocPackages: mergeStrings(nil, opts.BiocPackages),
 		},
@@ -57,6 +59,7 @@ func NewConfigFromScript(opts InitOptions, rootDir string, scriptPath string, wr
 		CacheDir: opts.CacheDir,
 		Lockfile: opts.Lockfile,
 		Rscript:  opts.Rscript,
+		RVersion: opts.RVersion,
 	}, rootDir, map[string]ScriptConfig{
 		scriptPath: {
 			Packages:     mergeStrings(nil, opts.Packages),
@@ -71,6 +74,7 @@ func NewConfigFromScripts(opts InitOptions, rootDir string, scriptConfigs map[st
 		CacheDir:     opts.CacheDir,
 		Lockfile:     opts.Lockfile,
 		Rscript:      opts.Rscript,
+		RVersion:     opts.RVersion,
 		Packages:     opts.Packages,
 		BiocPackages: opts.BiocPackages,
 	})
@@ -842,6 +846,7 @@ func scriptConfigEmpty(cfg ScriptConfig) bool {
 		cfg.CacheDir == "" &&
 		cfg.Lockfile == "" &&
 		cfg.Rscript == "" &&
+		cfg.RVersion == "" &&
 		len(cfg.Packages) == 0 &&
 		len(cfg.BiocPackages) == 0 &&
 		len(cfg.Sources) == 0
@@ -877,6 +882,11 @@ func appendScriptConfigLinesWithOrder(lines *[]string, cfg ScriptConfig, order [
 				*lines = append(*lines, "rscript = "+quoteString(cfg.Rscript)+trailingComment)
 				seen[key] = struct{}{}
 			}
+		case "r_version":
+			if cfg.RVersion != "" {
+				*lines = append(*lines, "r_version = "+quoteString(cfg.RVersion)+trailingComment)
+				seen[key] = struct{}{}
+			}
 		case "packages":
 			if len(cfg.Packages) > 0 {
 				*lines = append(*lines, "packages = "+renderStringArray(cfg.Packages)+trailingComment)
@@ -893,7 +903,7 @@ func appendScriptConfigLinesWithOrder(lines *[]string, cfg ScriptConfig, order [
 	for _, key := range order {
 		appendKnown(key)
 	}
-	for _, key := range []string{"repo", "cache_dir", "lockfile", "rscript", "packages", "bioc_packages"} {
+	for _, key := range []string{"repo", "cache_dir", "lockfile", "rscript", "r_version", "packages", "bioc_packages"} {
 		if _, ok := seen[key]; ok {
 			continue
 		}

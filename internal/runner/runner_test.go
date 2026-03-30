@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"gr/internal/installer"
 	"gr/internal/lockfile"
 	"gr/internal/project"
+	"gr/internal/rmanager"
 )
 
 func writeFakeRscript(t *testing.T, dir string) string {
@@ -34,6 +38,30 @@ fi
 echo "unexpected fake Rscript args: $*" >&2
 exit 1
 `
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
+	}
+	return path
+}
+
+func writeFakeRscriptWithVersion(t *testing.T, dir, version string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "Rscript")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-e" ]; then
+	cat <<'EOF'
+version	%s
+platform	x86_64-pc-linux-gnu
+arch	x86_64
+os	linux-gnu
+pkg_type	source
+EOF
+	exit 0
+fi
+echo "unexpected fake Rscript args: $*" >&2
+exit 1
+`, version)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
 	}
@@ -71,12 +99,12 @@ func TestInstallBackendUsesEnvironmentOverride(t *testing.T) {
 	}
 }
 
-func TestBootstrapSourceIncludesPakFallback(t *testing.T) {
+func TestBootstrapSourceIncludesInstallerBackends(t *testing.T) {
 	for _, want := range []string{
 		"RS_INSTALL_BACKEND",
 		"rs_install_pak",
 		"pak::pkg_install",
-		"falling back to legacy",
+		"native backend must be executed from the Go installer",
 		"local::",
 		"git::",
 		"github::",
@@ -84,6 +112,299 @@ func TestBootstrapSourceIncludesPakFallback(t *testing.T) {
 		if !strings.Contains(bootstrapSource, want) {
 			t.Fatalf("bootstrapSource missing %q", want)
 		}
+	}
+}
+
+func TestEnsureInstalledUsesNativeBackend(t *testing.T) {
+	oldNative := nativeInstall
+	oldBootstrap := bootstrapInstall
+	t.Cleanup(func() {
+		nativeInstall = oldNative
+		bootstrapInstall = oldBootstrap
+	})
+
+	calledNative := false
+	nativeInstall = func(req installer.Request) error {
+		calledNative = true
+		if req.Runtime.RVersion != "4.4.1" {
+			t.Fatalf("native runtime version = %q, want 4.4.1", req.Runtime.RVersion)
+		}
+		return nil
+	}
+	bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
+		t.Fatalf("bootstrapInstall called unexpectedly with backend %q", backend)
+		return nil
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "native")
+	err := EnsureInstalled(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		LibraryPath: t.TempDir(),
+		Interpreter: "fake-Rscript",
+		Runtime: RuntimeMetadata{
+			Interpreter: "fake-Rscript",
+			RVersion:    "4.4.1",
+		},
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("EnsureInstalled() error = %v", err)
+	}
+	if !calledNative {
+		t.Fatalf("nativeInstall was not called")
+	}
+}
+
+func TestEnsureInstalledAutoFallsBackToLegacy(t *testing.T) {
+	oldNative := nativeInstall
+	oldBootstrap := bootstrapInstall
+	t.Cleanup(func() {
+		nativeInstall = oldNative
+		bootstrapInstall = oldBootstrap
+	})
+
+	var stderr bytes.Buffer
+	nativeInstall = func(req installer.Request) error {
+		return errors.New("native exploded")
+	}
+	bootstrapCalled := ""
+	bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
+		bootstrapCalled = backend
+		return nil
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "auto")
+	err := EnsureInstalled(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		LibraryPath: t.TempDir(),
+		Interpreter: "fake-Rscript",
+		Runtime: RuntimeMetadata{
+			Interpreter: "fake-Rscript",
+			RVersion:    "4.4.1",
+		},
+		Stdout: &bytes.Buffer{},
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("EnsureInstalled() error = %v", err)
+	}
+	if bootstrapCalled != "legacy" {
+		t.Fatalf("bootstrapInstall backend = %q, want legacy", bootstrapCalled)
+	}
+	if !strings.Contains(stderr.String(), "native backend unavailable or failed; falling back to legacy: native exploded") {
+		t.Fatalf("fallback stderr = %q", stderr.String())
+	}
+}
+
+func TestResolveRunnableRscriptPathAutoInstallsDefaultInterpreter(t *testing.T) {
+	oldEnsure := ensureManagedRscript
+	oldResolve := resolveSelectedRscript
+	t.Cleanup(func() {
+		ensureManagedRscript = oldEnsure
+		resolveSelectedRscript = oldResolve
+	})
+
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		return "", errors.New("Rscript is not available on PATH: executable file not found")
+	}
+	var requested string
+	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
+		requested = selected
+		return "/tmp/managed/Rscript", nil
+	}
+
+	got, err := resolveRunnableRscriptPath("", "", io.Discard)
+	if err != nil {
+		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+	if got != "/tmp/managed/Rscript" {
+		t.Fatalf("resolveRunnableRscriptPath() = %q, want managed path", got)
+	}
+	if requested != "Rscript" {
+		t.Fatalf("ensureManagedRscript selected = %q, want Rscript", requested)
+	}
+}
+
+func TestResolveRunnableRscriptPathAutoInstallsVersionSpec(t *testing.T) {
+	oldEnsure := ensureManagedRscript
+	oldResolve := resolveSelectedRscript
+	t.Cleanup(func() {
+		ensureManagedRscript = oldEnsure
+		resolveSelectedRscript = oldResolve
+	})
+
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		return "", errors.New("requested Rscript \"4.4\" is not available: executable file not found")
+	}
+	var requested string
+	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
+		requested = selected
+		return "/tmp/managed/4.4/Rscript", nil
+	}
+
+	got, err := resolveRunnableRscriptPath("4.4", "", io.Discard)
+	if err != nil {
+		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+	if got != "/tmp/managed/4.4/Rscript" {
+		t.Fatalf("resolveRunnableRscriptPath() = %q, want managed version path", got)
+	}
+	if requested != "4.4" {
+		t.Fatalf("ensureManagedRscript selected = %q, want 4.4", requested)
+	}
+}
+
+func TestResolveRunnableRscriptPathDoesNotAutoInstallExplicitPath(t *testing.T) {
+	oldEnsure := ensureManagedRscript
+	oldResolve := resolveSelectedRscript
+	t.Cleanup(func() {
+		ensureManagedRscript = oldEnsure
+		resolveSelectedRscript = oldResolve
+	})
+
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		return "", fmt.Errorf("requested Rscript %q is not available: stat %s: no such file or directory", override, override)
+	}
+	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
+		t.Fatalf("ensureManagedRscript called unexpectedly with %q", selected)
+		return "", nil
+	}
+
+	_, err := resolveRunnableRscriptPath("/tmp/missing/Rscript", "", io.Discard)
+	if err == nil {
+		t.Fatalf("resolveRunnableRscriptPath() error = nil, want missing explicit path")
+	}
+	if !strings.Contains(err.Error(), "requested Rscript \"/tmp/missing/Rscript\" is not available") {
+		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+}
+
+func TestResolveInterpreterSelectionUsesConfiguredVersion(t *testing.T) {
+	oldResolve := resolveSelectedRscript
+	t.Cleanup(func() {
+		resolveSelectedRscript = oldResolve
+	})
+
+	dir := t.TempDir()
+	rscriptPath := writeFakeRscriptWithVersion(t, dir, "4.4.2")
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		if configValue != "4.4" {
+			t.Fatalf("configValue = %q, want 4.4", configValue)
+		}
+		return rscriptPath, nil
+	}
+
+	selection := resolveInterpreterSelection("", "", "4.4", dir, io.Discard, false)
+	if selection.Issue != nil {
+		t.Fatalf("selection.Issue = %v", selection.Issue)
+	}
+	if selection.Interpreter != rscriptPath {
+		t.Fatalf("selection.Interpreter = %q, want %q", selection.Interpreter, rscriptPath)
+	}
+	if selection.RequestedVer != "4.4" {
+		t.Fatalf("selection.RequestedVer = %q, want 4.4", selection.RequestedVer)
+	}
+}
+
+func TestResolveInterpreterSelectionRejectsRscriptVersionMismatch(t *testing.T) {
+	dir := t.TempDir()
+	rscriptPath := writeFakeRscriptWithVersion(t, dir, "4.5.1")
+
+	selection := resolveInterpreterSelection("", rscriptPath, "4.4", dir, io.Discard, false)
+	if selection.Issue == nil {
+		t.Fatalf("selection.Issue = nil, want version mismatch")
+	}
+	if !strings.Contains(selection.Issue.Error(), `configured r_version "4.4" does not match selected interpreter runtime 4.5.1`) {
+		t.Fatalf("selection.Issue = %v", selection.Issue)
+	}
+}
+
+func TestDoctorJSONOutputIncludesDependencyConflictDetails(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error {
+		return installer.ConstraintConflictError{
+			Package:     "cli",
+			Version:     "3.6.5",
+			RequiredBy:  "demo",
+			Operator:    ">=",
+			Requirement: "4.0.0",
+			Chain:       []string{"root", "demo"},
+		}
+	}
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "native")
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatalf("Doctor() error = nil, want blocking dependency conflict")
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if !slices.Contains(report.Errors, "dependency constraint conflict for cli: selected version 3.6.5 does not satisfy >= 4.0.0 required by demo (dependency path: root -> demo -> cli)") {
+		t.Fatalf("report.Errors = %v", report.Errors)
+	}
+	found := false
+	for _, detail := range report.ErrorDetails {
+		if detail.Kind == "dependency_conflict" && detail.Package == "cli" {
+			if !reflect.DeepEqual(detail.DependencyPath, []string{"root", "demo", "cli"}) {
+				t.Fatalf("detail.DependencyPath = %v", detail.DependencyPath)
+			}
+			if detail.Constraint != ">= 4.0.0" {
+				t.Fatalf("detail.Constraint = %q", detail.Constraint)
+			}
+			if detail.Selected != "3.6.5" {
+				t.Fatalf("detail.Selected = %q", detail.Selected)
+			}
+			if detail.RequiredBy != "demo" {
+				t.Fatalf("detail.RequiredBy = %q", detail.RequiredBy)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report.ErrorDetails = %v, want dependency conflict detail", report.ErrorDetails)
+	}
+}
+
+func TestParseDependencyConflictIssue(t *testing.T) {
+	detail, ok := parseDependencyConflictIssue("dependency constraint conflict for cli: selected version 3.6.5 does not satisfy >= 4.0.0 required by demo (dependency path: root -> demo -> cli)")
+	if !ok {
+		t.Fatalf("parseDependencyConflictIssue() ok = false")
+	}
+	if detail.Package != "cli" {
+		t.Fatalf("detail.Package = %q", detail.Package)
+	}
+	if detail.SelectedVersion != "3.6.5" {
+		t.Fatalf("detail.SelectedVersion = %q", detail.SelectedVersion)
+	}
+	if detail.Constraint != ">= 4.0.0" {
+		t.Fatalf("detail.Constraint = %q", detail.Constraint)
+	}
+	if detail.RequiredBy != "demo" {
+		t.Fatalf("detail.RequiredBy = %q", detail.RequiredBy)
+	}
+	if !reflect.DeepEqual(detail.DependencyPath, []string{"root", "demo", "cli"}) {
+		t.Fatalf("detail.DependencyPath = %v", detail.DependencyPath)
 	}
 }
 
@@ -1268,6 +1589,33 @@ func TestListJSONOutputIncludesAppliedAdjustments(t *testing.T) {
 	}
 }
 
+func TestListFailsOnConfiguredRVersionMismatch(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	configPath := filepath.Join(dir, "rs.toml")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	config := fmt.Sprintf("rscript = %q\nr_version = \"9.9\"\n", rscriptPath)
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	err := List(ListOptions{
+		ScriptPath: scriptPath,
+		JSON:       true,
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("List() error = nil, want r_version mismatch")
+	}
+	if !strings.Contains(err.Error(), `configured r_version "9.9" does not match selected interpreter runtime 4.4.1`) {
+		t.Fatalf("List() error = %v", err)
+	}
+}
+
 func TestDoctorPrintsAppliedAdjustments(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
@@ -1757,6 +2105,46 @@ func TestBuildDoctorNextStepsHealthyEnvironment(t *testing.T) {
 	}
 }
 
+func TestBuildDoctorNextStepsSuggestsRigBootstrapWhenMissing(t *testing.T) {
+	oldRigAvailable := rigAvailable
+	oldRigAdvice := rigBootstrapAdvice
+	t.Cleanup(func() {
+		rigAvailable = oldRigAvailable
+		rigBootstrapAdvice = oldRigAdvice
+	})
+
+	rigAvailable = func() bool { return false }
+	rigBootstrapAdvice = func() rmanager.RigBootstrapAdvice {
+		return rmanager.RigBootstrapAdvice{
+			ManualMessage: "install rig with Homebrew and rerun rs",
+			ManualCommand: "brew tap r-lib/rig && brew install --cask rig",
+			AutoEnableEnv: "RS_AUTO_INSTALL_RIG",
+		}
+	}
+
+	steps := buildDoctorNextSteps(dependencyPlan{
+		ScriptPath: "/tmp/project/report.R",
+		RequestedR: "Rscript",
+	}, errors.New("selected Rscript is not available"), false, nil, nil, nil)
+
+	if len(steps) < 3 {
+		t.Fatalf("len(steps) = %d, want rig bootstrap steps included (%v)", len(steps), steps)
+	}
+	foundManual := false
+	foundAuto := false
+	for _, step := range steps {
+		if step.Kind == "install_rig" && strings.Contains(step.Message, "brew tap r-lib/rig && brew install --cask rig") && step.Blocking {
+			foundManual = true
+		}
+		if step.Kind == "auto_install_rig" && step.Command == "RS_AUTO_INSTALL_RIG=1 rs run /tmp/project/report.R" && step.Blocking {
+			foundAuto = true
+		}
+	}
+	if !foundManual || !foundAuto {
+		t.Fatalf("steps = %#v, want both manual and auto rig guidance", steps)
+	}
+}
+
 func TestDoctorStatusOKWhenClean(t *testing.T) {
 	report := buildDoctorReport(
 		dependencyPlan{ScriptPath: "/tmp/project/report.R"},
@@ -1886,6 +2274,89 @@ func TestCheckJSONOutputOnFailure(t *testing.T) {
 	}
 	if len(report.InstalledIssueDetails) != 0 {
 		t.Fatalf("report.InstalledIssueDetails = %v, want none for missing lockfile", report.InstalledIssueDetails)
+	}
+	if len(report.PlanningIssues) != 0 {
+		t.Fatalf("report.PlanningIssues = %v, want none for missing lockfile", report.PlanningIssues)
+	}
+	if len(report.PlanningIssueDetails) != 0 {
+		t.Fatalf("report.PlanningIssueDetails = %v, want none for missing lockfile", report.PlanningIssueDetails)
+	}
+}
+
+func TestCheckJSONOutputIncludesPlanningConflictDetails(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error {
+		return installer.ConstraintConflictError{
+			Package:     "cli",
+			Version:     "3.6.5",
+			RequiredBy:  "demo",
+			Operator:    ">=",
+			Requirement: "4.0.0",
+			Chain:       []string{"root", "demo"},
+		}
+	}
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	cacheDir := filepath.Join(dir, "cache")
+	rscriptPath := writeFakeRscript(t, dir)
+	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "native")
+	var stdout bytes.Buffer
+	err := Check(CheckOptions{
+		ScriptPath:  scriptPath,
+		CacheDir:    cacheDir,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatalf("Check() error = nil, want planning conflict")
+	}
+
+	var report CheckReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if report.Valid {
+		t.Fatalf("report.Valid = true, want false")
+	}
+	if !slices.Contains(report.PlanningIssues, "dependency constraint conflict for cli: selected version 3.6.5 does not satisfy >= 4.0.0 required by demo (dependency path: root -> demo -> cli)") {
+		t.Fatalf("report.PlanningIssues = %v", report.PlanningIssues)
+	}
+	if len(report.InputIssues) != 0 {
+		t.Fatalf("report.InputIssues = %v, want none", report.InputIssues)
+	}
+	if len(report.InstalledIssues) != 0 {
+		t.Fatalf("report.InstalledIssues = %v, want none", report.InstalledIssues)
+	}
+	found := false
+	for _, detail := range report.PlanningIssueDetails {
+		if detail.Kind == "dependency_conflict" && detail.Package == "cli" {
+			if !reflect.DeepEqual(detail.DependencyPath, []string{"root", "demo", "cli"}) {
+				t.Fatalf("detail.DependencyPath = %v", detail.DependencyPath)
+			}
+			if detail.Constraint != ">= 4.0.0" {
+				t.Fatalf("detail.Constraint = %q", detail.Constraint)
+			}
+			if detail.Selected != "3.6.5" {
+				t.Fatalf("detail.Selected = %q", detail.Selected)
+			}
+			if detail.RequiredBy != "demo" {
+				t.Fatalf("detail.RequiredBy = %q", detail.RequiredBy)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report.PlanningIssueDetails = %v, want dependency conflict detail", report.PlanningIssueDetails)
 	}
 }
 

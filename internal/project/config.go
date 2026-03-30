@@ -12,7 +12,7 @@ import (
 
 const ConfigFileName = "rs.toml"
 
-var configKeys = []string{"repo", "cache_dir", "lockfile", "rscript", "packages", "bioc_packages"}
+var configKeys = []string{"repo", "cache_dir", "lockfile", "rscript", "r_version", "packages", "bioc_packages"}
 var sourceKeys = []string{"type", "host", "repo", "url", "ref", "path", "subdir", "token_env"}
 var sourceTypes = []string{"github", "git", "local"}
 var sectionPrefixes = []string{"scripts", "sources"}
@@ -23,6 +23,7 @@ type ScriptConfig struct {
 	CacheDir     string
 	Lockfile     string
 	Rscript      string
+	RVersion     string
 	Packages     []string
 	BiocPackages []string
 	Sources      map[string]SourceSpec
@@ -82,6 +83,7 @@ type ResolvedScriptConfig struct {
 	CacheDir     string
 	Lockfile     string
 	Rscript      string
+	RVersion     string
 	Packages     []string
 	BiocPackages []string
 	Sources      map[string]SourceSpec
@@ -452,6 +454,7 @@ func (c Config) ResolveForScript(scriptPath string) (ResolvedScriptConfig, error
 		CacheDir:     c.Defaults.CacheDir,
 		Lockfile:     c.Defaults.Lockfile,
 		Rscript:      c.Defaults.Rscript,
+		RVersion:     c.Defaults.RVersion,
 		Packages:     append([]string(nil), c.Defaults.Packages...),
 		BiocPackages: append([]string(nil), c.Defaults.BiocPackages...),
 		Sources:      cloneSourceMap(c.Sources),
@@ -486,6 +489,9 @@ func mergeScriptConfig(dst *ResolvedScriptConfig, key string, src ScriptConfig) 
 	}
 	if src.Rscript != "" {
 		dst.Rscript = src.Rscript
+	}
+	if src.RVersion != "" {
+		dst.RVersion = src.RVersion
 	}
 	dst.Packages = mergeStrings(dst.Packages, src.Packages)
 	dst.BiocPackages = mergeStrings(dst.BiocPackages, src.BiocPackages)
@@ -717,6 +723,12 @@ func assignLineValue(cfg *Config, scriptKey, key, rawValue string) error {
 			return err
 		}
 		target.Rscript = value
+	case "r_version":
+		value, err := parseStringValueForKey(key, rawValue)
+		if err != nil {
+			return err
+		}
+		target.RVersion = value
 	case "packages":
 		value, err := parseStringArrayValueForKey(key, rawValue)
 		if err != nil {

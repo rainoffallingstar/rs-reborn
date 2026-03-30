@@ -32,7 +32,8 @@ go build -o rs ./cmd/rs
 
 Continuous integration:
 
-- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux and macOS, a local-source drift end-to-end check, and a Linux `rig` integration check
+- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux and macOS, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and a Linux `rig` integration check
+- [`.github/workflows/release.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/release.yml) publishes date-tagged GitHub Release binaries after successful `main` or `master` CI runs; successful rebuilds later the same day reuse that date tag and refresh the assets
 - the CI helper scripts live under [`scripts/ci/`](/Volumes/DataCenter_01/GitHub/gr/scripts/ci)
 
 Initialize a project:
@@ -148,6 +149,8 @@ Manage interpreter versions and selection:
 ./rs r which
 ```
 
+When `Rscript` is missing, `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` try to install R automatically through `rig`. If `rig` itself is missing, `rs` now prints an OS-aware next step and also supports explicit rig bootstrapping with `RS_AUTO_INSTALL_RIG=1`. Once `rig` is available, `rs` asks it for `release` by default; set `RS_R_VERSION=4.4` (or another rig-compatible version selector) if you want to pin the bootstrap target on fresh machines.
+
 Compatibility alias:
 
 ```bash
@@ -185,6 +188,7 @@ Use a project config:
 repo = "https://cloud.r-project.org"
 cache_dir = ".rs-cache"
 lockfile = "rs.lock.json"
+r_version = "4.4"
 rscript = "tools/Rscript-4.4"
 packages = ["jsonlite", "cli"]
 bioc_packages = ["Biostrings"]
@@ -218,7 +222,7 @@ repo = "owner/report-specific-pkg"
 ref = "feature-branch"
 ```
 
-The root block defines project defaults. A `[scripts."relative/path.R"]` block can override or extend settings for one script, including `rscript` when one entrypoint must pin a different interpreter. A `[sources."packageName"]` block declares a project-wide non-CRAN installation source, and `[scripts."relative/path.R".sources."packageName"]` overrides that source for one script. `rs.toml` is validated when it is loaded, so malformed sections, contradictory source fields, repeated keys, and common typos now fail early with the offending section and line, plus supported-key or close-match hints when the fix is obvious.
+The root block defines project defaults. A `[scripts."relative/path.R"]` block can override or extend settings for one script, including `rscript` when one entrypoint must pin a specific interpreter path and `r_version` when one entrypoint should target a specific R line such as `4.4`. When both are set, `rs` expects the selected interpreter to match `r_version`. A `[sources."packageName"]` block declares a project-wide non-CRAN installation source, and `[scripts."relative/path.R".sources."packageName"]` overrides that source for one script. `rs.toml` is validated when it is loaded, so malformed sections, contradictory source fields, repeated keys, and common typos now fail early with the offending section and line, plus supported-key or close-match hints when the fix is obvious.
 
 ## Examples
 
@@ -278,13 +282,14 @@ The staged delivery plan lives at [`docs/roadmap.md`](/Volumes/DataCenter_01/Git
 - `cache_dir`
 - `lockfile`
 - `rscript`
+- `r_version`
 - `packages`
 - `bioc_packages`
 - `[sources."packageName"]`
 - `[scripts."relative/path.R"]`
 - `[scripts."relative/path.R".sources."packageName"]`
 
-Script blocks are matched against the script path relative to the directory that contains `rs.toml`. Script-specific packages are merged with the project defaults, while scalar settings like `repo`, `cache_dir`, `lockfile`, and `rscript` override the default value for that one script. Source blocks are keyed by package name, and script-local source blocks override project-wide ones.
+Script blocks are matched against the script path relative to the directory that contains `rs.toml`. Script-specific packages are merged with the project defaults, while scalar settings like `repo`, `cache_dir`, `lockfile`, `rscript`, and `r_version` override the default value for that one script. Source blocks are keyed by package name, and script-local source blocks override project-wide ones.
 
 `rs init` writes a starter `rs.toml`. With `--from path/to/script.R`, it first scans the script and seeds the config with detected packages. `--from-dir path/to/scripts/` does the same for every `.R` and `.Rscript` under a directory, skipping `.git` and `.rs-cache`. By default it drops R bundled base/recommended packages such as `stats` and `utils`, so the generated config only keeps installable dependencies. It also heuristically moves a curated set of common Bioconductor packages such as `DESeq2`, `Biostrings`, and `SummarizedExperiment` into `bioc_packages`. Pass `--include-bundled` if you want the raw scan result, `--exclude <pkg>` to remove an unwanted detected dependency, `--include <pkg>` to add a missing project-level dependency, and `--bioc-package <name>` to add an explicit project-level Bioconductor dependency. With one `--from`, the detected packages are written to the root `packages` array by default; `--write-script-block` instead writes them under `[scripts."relative/path.R"]`. When you pass multiple `--from` flags, use `--from-dir`, or otherwise resolve to multiple scripts, `rs init` automatically writes one script block per scanned file.
 
@@ -341,18 +346,30 @@ For those cases, `--package <name>` and `--bioc-package <name>` are the escape h
 It then writes a temporary `R_PROFILE_USER` file that:
 
 - prepends the managed library to `.libPaths()`
-- checks which packages are missing
-- calls `install.packages()` for CRAN packages
-- calls `remotes::install_github()` for packages declared with `type = "github"`
-- passes `subdir` through to GitHub installs when configured
-- passes `host` and `token_env` through for GitHub Enterprise or private repository installs
-- clones and installs packages declared with `type = "git"` and records the resolved commit
-- calls `R CMD INSTALL` for packages declared with `type = "local"`
-- calls `BiocManager::install()` for Bioconductor packages when needed
+- keeps the runtime library wiring in one place before `Rscript` starts
 
 Because the bootstrap happens before `Rscript script.R` starts, the script still sees normal `commandArgs()` behavior.
 
-By default the installer backend runs in `auto` mode. It first tries to use `pak` for CRAN, Bioconductor, local package sources, git package sources without `subdir`, and standard GitHub sources that only use `repo` / `ref` / `subdir`, then falls back to the legacy `install.packages()` / `BiocManager::install()` / source-specific flow if `pak` is unavailable, fails, or the dependency plan includes source types or settings that still rely on the existing installers such as custom GitHub hosts or `token_env`. You can override that behavior by setting `RS_INSTALL_BACKEND=legacy` or `RS_INSTALL_BACKEND=pak` in the environment before invoking `rs`.
+Package installation is now orchestrated primarily from Go. The `native` backend resolves CRAN and Bioconductor indexes, clones or checks out `git` and GitHub sources, computes local-source fingerprints, writes `.rs-source-meta`, and then shells out to `R CMD INSTALL` for the final install step. The older R bootstrap installers are still available as compatibility backends.
+
+Today the native backend covers the package source types that `rs` exposes in normal use:
+
+- CRAN packages
+- Bioconductor packages
+- `type = "local"` sources
+- `type = "git"` sources
+- standard `type = "github"` sources, including custom GitHub Enterprise hosts and `token_env` authentication
+
+That means the default install path no longer depends on `pak` for routine `lock`, `run`, `sync`, or `check` flows. `pak` is kept as an explicit compatibility backend and CI comparison path while the Go-native planner and installer continue to mature.
+
+By default the installer backend runs in `auto` mode, which now means `native` first with a fallback to `legacy` if the native path fails. You can override that behavior by setting `RS_INSTALL_BACKEND=native`, `RS_INSTALL_BACKEND=legacy`, or `RS_INSTALL_BACKEND=pak` before invoking `rs`. `pak` remains available as a transitional compatibility backend, but it is no longer the default install path.
+
+In practice the backend modes now mean:
+
+- `auto`: try the Go-native installer first, then fall back to `legacy`
+- `native`: require the Go-native installer and fail if it cannot complete
+- `legacy`: use the older R bootstrap install path directly
+- `pak`: use `pak` explicitly as a compatibility backend
 
 ### 5. Lock file
 
@@ -385,7 +402,7 @@ That still is not a full reproducibility story, but it is now enough to detect m
 If any of those drift, the command fails and points you back to `rs lock`.
 The human-readable failure output now also adds short grouped summaries for input drift and installed-library drift so you can quickly see whether the mismatch is coming from script/config changes, runtime changes, dependency-set changes, or source differences.
 
-`rs check --json` reports the same drift in a machine-friendly shape. Alongside the top-level `issues` array, it now also splits failures into `input_issues` and `installed_issues`, plus installed-side buckets such as `installed_missing_packages`, `installed_version_issues`, and `installed_source_issues`. It also exposes `installed_issue_details` with structured `kind`, `package`, `field`, and `message` values so automation can avoid reparsing human text.
+`rs check --json` reports the same drift in a machine-friendly shape. Alongside the top-level `issues` array, it now also splits failures into `planning_issues`, `input_issues`, and `installed_issues`, plus installed-side buckets such as `installed_missing_packages`, `installed_version_issues`, and `installed_source_issues`. It also exposes `planning_issue_details` and `installed_issue_details` with structured fields such as `kind`, `package`, `field`, `message`, and for dependency conflicts `dependency_path`, `constraint`, `selected_version`, and `required_by`, so automation can avoid reparsing human text.
 
 ### 7. Doctor Diagnostics
 
@@ -424,7 +441,9 @@ If you want this to grow from prototype into a real tool, the next steps are:
 
 ## Notes
 
-- `Rscript` must already be installed; by default `rs` resolves it from `PATH`, but you can pin a project interpreter with `rscript = "..."`, override it with `--rscript`, or use the thin `rig` integration under `rs r ...`
+- `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` automatically bootstrap R through `rig` when `Rscript` is missing; by default they install `release`, or you can override that bootstrap target with `RS_R_VERSION`
+- if `rig` is missing, `rs` prints an OS-specific install hint by default; set `RS_AUTO_INSTALL_RIG=1` to let `rs` bootstrap `rig` first and then continue with the R installation
+- you can still pin a project interpreter with `rscript = "..."`, override it with `--rscript`, or use the explicit `rs r ...` commands when you want full control
 - package installation supports CRAN, explicitly declared Bioconductor packages, GitHub sources, and local package sources
 - package installation also supports generic `git` sources with `url`, `ref`, and `subdir`
 - GitHub tokens are referenced by environment variable name via `token_env`; token values are never written to the lockfile
