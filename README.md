@@ -30,6 +30,19 @@ Build the CLI:
 go build -o rs ./cmd/rs
 ```
 
+Install the latest published binary into `$HOME/.cargo/bin`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.sh | bash
+```
+
+Optional overrides:
+
+```bash
+RS_INSTALL_TAG=2026-03-30 curl -fsSL https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.sh | bash
+RS_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.sh | bash
+```
+
 Continuous integration:
 
 - [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux and macOS, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and a Linux `rig` integration check
