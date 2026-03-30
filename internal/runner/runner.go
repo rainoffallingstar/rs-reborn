@@ -260,7 +260,8 @@ var nativeValidatePlan = func(req installer.Request) error {
 	return installer.Validate(req)
 }
 
-var resolveSelectedRscript = ResolveRscriptPath
+var resolveManagedRscript = rmanager.ResolveVersionOrPath
+var resolveSelectedRscript = resolveConfiguredInterpreterPath
 
 var ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
 	return rmanager.EnsureInstalledRscript(selected, io.Discard, stderr)
@@ -2985,6 +2986,17 @@ func ResolveRscriptPath(override, configValue string) (string, error) {
 		return "", fmt.Errorf("%s: %w", missingRscriptMessage(override, selected), err)
 	}
 	return path, nil
+}
+
+func resolveConfiguredInterpreterPath(override, configValue string) (string, error) {
+	selected := firstNonEmpty(override, configValue, "Rscript")
+	if !looksLikePath(selected) &&
+		!strings.EqualFold(selected, "Rscript") &&
+		!strings.EqualFold(selected, "Rscript.exe") &&
+		rmanager.LooksLikeVersionSpec(selected) {
+		return resolveManagedRscript(selected)
+	}
+	return ResolveRscriptPath(override, configValue)
 }
 
 func resolveRunnableRscriptPath(override, configValue string, stderr io.Writer) (string, error) {

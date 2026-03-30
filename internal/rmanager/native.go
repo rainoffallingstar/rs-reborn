@@ -274,9 +274,6 @@ func installMacOSBinary(version, targetDir string, stdout, stderr io.Writer) err
 	if err := nativeRemoveAll(extractRoot); err != nil {
 		return fmt.Errorf("prepare macOS package extraction dir: %w", err)
 	}
-	if err := nativeMkdirAll(extractRoot, 0o755); err != nil {
-		return fmt.Errorf("create macOS package extraction dir: %w", err)
-	}
 	if _, err := nativeLookPath("pkgutil"); err != nil {
 		return fmt.Errorf("macOS package extraction requires pkgutil: %w", err)
 	}

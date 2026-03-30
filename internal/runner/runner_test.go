@@ -398,15 +398,18 @@ func TestResolveRunnableRscriptPathSuggestsExplicitAutoInstallWhenDisabled(t *te
 
 func TestResolveInterpreterSelectionUsesConfiguredVersion(t *testing.T) {
 	oldResolve := resolveSelectedRscript
+	oldManaged := resolveManagedRscript
 	t.Cleanup(func() {
 		resolveSelectedRscript = oldResolve
+		resolveManagedRscript = oldManaged
 	})
 
 	dir := t.TempDir()
 	rscriptPath := writeFakeRscriptWithVersion(t, dir, "4.4.2")
-	resolveSelectedRscript = func(override, configValue string) (string, error) {
-		if configValue != "4.4" {
-			t.Fatalf("configValue = %q, want 4.4", configValue)
+	resolveSelectedRscript = resolveConfiguredInterpreterPath
+	resolveManagedRscript = func(spec string) (string, error) {
+		if spec != "4.4" {
+			t.Fatalf("spec = %q, want 4.4", spec)
 		}
 		return rscriptPath, nil
 	}
@@ -420,6 +423,29 @@ func TestResolveInterpreterSelectionUsesConfiguredVersion(t *testing.T) {
 	}
 	if selection.RequestedVer != "4.4" {
 		t.Fatalf("selection.RequestedVer = %q, want 4.4", selection.RequestedVer)
+	}
+}
+
+func TestResolveConfiguredInterpreterPathUsesVersionResolverForVersionSpecs(t *testing.T) {
+	oldManaged := resolveManagedRscript
+	t.Cleanup(func() {
+		resolveManagedRscript = oldManaged
+	})
+
+	want := "/tmp/managed/Rscript"
+	resolveManagedRscript = func(spec string) (string, error) {
+		if spec != "4.4" {
+			t.Fatalf("spec = %q, want 4.4", spec)
+		}
+		return want, nil
+	}
+
+	got, err := resolveConfiguredInterpreterPath("", "4.4")
+	if err != nil {
+		t.Fatalf("resolveConfiguredInterpreterPath() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("resolveConfiguredInterpreterPath() = %q, want %q", got, want)
 	}
 }
 
