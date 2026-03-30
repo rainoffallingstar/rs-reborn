@@ -61,16 +61,24 @@ This release adds basic multi-R support without expanding the tool beyond R:
 - override it per invocation with `--rscript`
 - inspect or update project selection with `rs r which` and `rs r use`
 
-### Thin `rig` integration
+### Native multi-R management
 
-For environments that already use [`rig`](https://github.com/r-lib/rig), `rs` now exposes:
+On macOS and Linux, `rs` now exposes:
 
 - `rs r list`
 - `rs r install <version>`
 - `rs r use <version>`
 - `rs r which`
 
-This is intentionally a thin integration layer, not a full first-party R installer.
+This is now a first-party native R manager with user-local installs, source-build fallback, and project-level interpreter selection.
+
+## Support Boundary
+
+This release is intended to be described conservatively:
+
+- runtime commands are supported on macOS and Linux
+- `rs r ...` is the supported native-manager path on macOS and Linux
+- Windows binaries may be published, but Windows remains best-effort until it is validated in CI and smoke-tested with multiple R installs
 
 ## Scope Boundaries
 

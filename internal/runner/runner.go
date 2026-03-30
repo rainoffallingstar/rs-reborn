@@ -266,8 +266,8 @@ var ensureManagedRscript = func(selected string, stderr io.Writer) (string, erro
 	return rmanager.EnsureInstalledRscript(selected, io.Discard, stderr)
 }
 
-var rigAvailable = rmanager.RigAvailable
-var rigBootstrapAdvice = rmanager.BootstrapAdvice
+var rManagerBootstrapAdvice = rmanager.BootstrapAdvice
+var autoInstallR = rmanager.AutoInstallREnabled
 
 type interpreterSelection struct {
 	Selected     string
@@ -2609,26 +2609,26 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 	}
 
 	if rscriptErr != nil {
-		advice := rigBootstrapAdvice()
-		if shouldSuggestRigBootstrap(plan.RequestedR) && !rigAvailable() {
+		advice := rManagerBootstrapAdvice()
+		if shouldSuggestNativeBootstrap(plan.RequestedR) {
 			add(NextStepDetail{
 				Category: "setup",
-				Kind:     "install_rig",
+				Kind:     "install_r",
 				Message:  advice.ManualMessageWithCommand(),
 				Blocking: true,
 			})
 			add(NextStepDetail{
 				Category: "setup",
-				Kind:     "auto_install_rig",
-				Message:  "explicitly allow rs to install rig automatically and rerun",
+				Kind:     "auto_install_r",
+				Message:  "explicitly allow rs to install R automatically and rerun",
 				Command:  fmt.Sprintf("%s=1 rs run %s", advice.AutoEnableEnv, plan.ScriptPath),
 				Blocking: true,
 			})
 		}
 		add(NextStepDetail{
 			Category: "setup",
-			Kind:     "install_r",
-			Message:  "install R and make sure Rscript is available on PATH before rerunning rs doctor or rs run",
+			Kind:     "configure_r",
+			Message:  "install R and make sure Rscript is available on PATH, or set rs.toml rscript manually before rerunning rs doctor or rs run",
 			Blocking: true,
 		})
 	}
@@ -2722,7 +2722,7 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 	return steps
 }
 
-func shouldSuggestRigBootstrap(requestedR string) bool {
+func shouldSuggestNativeBootstrap(requestedR string) bool {
 	requestedR = strings.TrimSpace(requestedR)
 	if requestedR == "" || strings.EqualFold(requestedR, "Rscript") || strings.EqualFold(requestedR, "Rscript.exe") {
 		return true
@@ -2999,6 +2999,10 @@ func resolveRunnableRscriptPath(override, configValue string, stderr io.Writer) 
 	}
 	if !strings.EqualFold(selected, "Rscript") && !strings.EqualFold(selected, "Rscript.exe") && !rmanager.LooksLikeVersionSpec(selected) {
 		return "", err
+	}
+	if !autoInstallR() {
+		advice := rManagerBootstrapAdvice()
+		return "", fmt.Errorf("%v\nnext step: %s\nexplicit auto-install: set %s=1 and retry", err, advice.ManualMessageWithCommand(), advice.AutoEnableEnv)
 	}
 
 	managed, managedErr := ensureManagedRscript(selected, stderr)
@@ -3335,18 +3339,10 @@ func EnsureInstalled(env ResolvedEnvironment) error {
 	switch backend {
 	case "native":
 		return ensureInstalledNative(env)
-	case "legacy", "pak":
+	case "pak":
 		return bootstrapInstall(env, backend)
 	case "auto":
-		if err := ensureInstalledNative(env); err != nil {
-			if env.Stderr != nil {
-				fmt.Fprintf(env.Stderr, "[rs] native backend unavailable or failed; falling back to legacy: %v\n", err)
-			}
-			if fallbackErr := bootstrapInstall(env, "legacy"); fallbackErr != nil {
-				return fmt.Errorf("native install failed: %v; legacy fallback failed: %w", err, fallbackErr)
-			}
-		}
-		return nil
+		return ensureInstalledNative(env)
 	default:
 		return fmt.Errorf("unsupported install backend %s", backend)
 	}

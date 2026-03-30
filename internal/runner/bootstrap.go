@@ -244,173 +244,23 @@ rs_install_pak <- function(ctx) {
   invisible(NULL)
 }
 
-rs_install_legacy <- function(ctx) {
-  options(repos = c(CRAN = ctx$repos))
-  installed <- rs_installed_names()
-
-  missing_cran <- setdiff(ctx$cran, installed)
-  if (length(missing_cran) > 0) {
-    message(sprintf("[rs] installing missing CRAN packages: %s", paste(missing_cran, collapse = ", ")))
-    utils::install.packages(missing_cran, lib = ctx$lib, repos = ctx$repos)
-    installed <- rs_installed_names()
-  }
-
-  if (nrow(ctx$sources) > 0) {
-    missing_sources <- ctx$sources[!(ctx$sources$package %in% installed), , drop = FALSE]
-    if (nrow(missing_sources) > 0) {
-      for (i in seq_len(nrow(missing_sources))) {
-        spec <- missing_sources[i, , drop = FALSE]
-        if (identical(spec$type[[1]], "github")) {
-          if (!"remotes" %in% installed) {
-            message("[rs] installing remotes")
-            utils::install.packages("remotes", lib = ctx$lib, repos = ctx$repos)
-            installed <- rs_installed_names()
-          }
-          target <- spec$repo[[1]]
-          if (nzchar(spec$ref[[1]])) {
-            message(sprintf("[rs] installing github package %s from %s@%s", spec$package[[1]], target, spec$ref[[1]]))
-          } else {
-            message(sprintf("[rs] installing github package %s from %s", spec$package[[1]], target))
-          }
-          remotes::install_github(
-            target,
-            ref = if (nzchar(spec$ref[[1]])) spec$ref[[1]] else NULL,
-            subdir = if (nzchar(spec$subdir[[1]])) spec$subdir[[1]] else NULL,
-            host = if (nzchar(spec$host[[1]])) spec$host[[1]] else "api.github.com",
-            auth_token = if (nzchar(spec$token_env[[1]])) Sys.getenv(spec$token_env[[1]]) else NULL,
-            lib = ctx$lib,
-            upgrade = "never",
-            dependencies = TRUE
-          )
-          installed_meta <- installed.packages(
-            lib.loc = .libPaths(),
-            fields = c("RemoteSha")
-          )
-          commit <- ""
-          if (spec$package[[1]] %in% rownames(installed_meta) && "RemoteSha" %in% colnames(installed_meta)) {
-            commit <- installed_meta[spec$package[[1]], "RemoteSha"]
-            if (is.na(commit)) {
-              commit <- ""
-            }
-          }
-          rs_write_source_metadata(
-            ctx$meta_dir,
-            spec$package[[1]],
-            spec$type[[1]],
-            if (nzchar(spec$host[[1]])) spec$host[[1]] else "api.github.com",
-            spec$repo[[1]],
-            spec$ref[[1]],
-            commit,
-            spec$subdir[[1]],
-            spec$fingerprint[[1]],
-            spec$fingerprint_kind[[1]]
-          )
-        } else if (identical(spec$type[[1]], "git")) {
-          clone_dir <- file.path(tempdir(), sprintf("rs-git-%s-%s", spec$package[[1]], as.integer(Sys.time())))
-          status <- system2("git", c("clone", spec$url[[1]], clone_dir))
-          if (!identical(status, 0L)) {
-            stop(sprintf("failed to clone git source %s from %s", spec$package[[1]], spec$url[[1]]))
-          }
-          on.exit(unlink(clone_dir, recursive = TRUE, force = TRUE), add = TRUE)
-          if (nzchar(spec$ref[[1]])) {
-            status <- system2("git", c("-C", clone_dir, "checkout", spec$ref[[1]]))
-            if (!identical(status, 0L)) {
-              stop(sprintf("failed to checkout ref %s for git source %s", spec$ref[[1]], spec$package[[1]]))
-            }
-          }
-          commit <- trimws(system2("git", c("-C", clone_dir, "rev-parse", "HEAD"), stdout = TRUE))
-          target <- if (nzchar(spec$subdir[[1]])) file.path(clone_dir, spec$subdir[[1]]) else clone_dir
-          message(sprintf("[rs] installing git package %s from %s", spec$package[[1]], spec$url[[1]]))
-          status <- system2(
-            file.path(R.home("bin"), "R"),
-            c("CMD", "INSTALL", "-l", ctx$lib, target)
-          )
-          if (!identical(status, 0L)) {
-            stop(sprintf("failed to install git package %s from %s", spec$package[[1]], spec$url[[1]]))
-          }
-          rs_write_source_metadata(
-            ctx$meta_dir,
-            spec$package[[1]],
-            spec$type[[1]],
-            "",
-            spec$url[[1]],
-            spec$ref[[1]],
-            commit,
-            spec$subdir[[1]],
-            spec$fingerprint[[1]],
-            spec$fingerprint_kind[[1]]
-          )
-        } else if (identical(spec$type[[1]], "local")) {
-          target <- spec$path[[1]]
-          message(sprintf("[rs] installing local package %s from %s", spec$package[[1]], target))
-          status <- system2(
-            file.path(R.home("bin"), "R"),
-            c("CMD", "INSTALL", "-l", ctx$lib, target)
-          )
-          if (!identical(status, 0L)) {
-            stop(sprintf("failed to install local package %s from %s", spec$package[[1]], target))
-          }
-          rs_write_source_metadata(
-            ctx$meta_dir,
-            spec$package[[1]],
-            spec$type[[1]],
-            "",
-            spec$path[[1]],
-            "",
-            "",
-            "",
-            spec$fingerprint[[1]],
-            spec$fingerprint_kind[[1]]
-          )
-        } else {
-          stop(sprintf("unsupported source type: %s", spec$type[[1]]))
-        }
-      }
-      installed <- rs_installed_names()
-    }
-  }
-
-  missing_bioc <- setdiff(ctx$bioc, installed)
-  if (length(missing_bioc) > 0) {
-    if (!"BiocManager" %in% installed) {
-      message("[rs] installing BiocManager")
-      utils::install.packages("BiocManager", lib = ctx$lib, repos = ctx$repos)
-    }
-    message(sprintf("[rs] installing missing Bioconductor packages: %s", paste(missing_bioc, collapse = ", ")))
-    BiocManager::install(
-      missing_bioc,
-      lib = ctx$lib,
-      ask = FALSE,
-      update = FALSE,
-      site_repository = character(),
-      repos = c(CRAN = ctx$repos)
-    )
-  }
-
-  invisible(NULL)
-}
-
 rs_bootstrap <- function() {
   ctx <- rs_bootstrap_context()
   if (!ctx$install) {
     return(invisible(NULL))
   }
 
-  if (!(ctx$backend %in% c("auto", "legacy", "pak", "native"))) {
+  if (!(ctx$backend %in% c("auto", "pak", "native"))) {
     stop(sprintf("unsupported install backend %s", ctx$backend))
   }
 
-  if (identical(ctx$backend, "legacy")) {
-    return(rs_install_legacy(ctx))
+  if (identical(ctx$backend, "auto") || identical(ctx$backend, "native")) {
+    stop("auto/native backend must be executed from the Go installer")
   }
   if (identical(ctx$backend, "pak")) {
     return(rs_install_pak(ctx))
   }
-  if (identical(ctx$backend, "native")) {
-    stop("native backend must be executed from the Go installer")
-  }
-
-  rs_install_legacy(ctx)
+  stop(sprintf("unsupported install backend %s", ctx$backend))
 }
 
 rs_parse_sources <- function(raw) {

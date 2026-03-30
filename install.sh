@@ -5,6 +5,7 @@ REPO_OWNER="rainoffallingstar"
 REPO_NAME="rs-reborn"
 BIN_DIR="${RS_INSTALL_DIR:-$HOME/.cargo/bin}"
 BIN_NAME="rs"
+BASE_URL="${RS_INSTALL_BASE_URL:-}"
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -96,7 +97,11 @@ if [ -z "$TAG" ]; then
 fi
 
 ASSET="rs_${TAG}_${OS}_${ARCH}.tar.gz"
-URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${TAG}/${ASSET}"
+if [ -n "$BASE_URL" ]; then
+  URL="${BASE_URL%/}/${ASSET}"
+else
+  URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${TAG}/${ASSET}"
+fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT

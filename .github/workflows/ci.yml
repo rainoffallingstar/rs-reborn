@@ -64,8 +64,8 @@ jobs:
       - name: Run CLI smoke coverage
         run: bash scripts/ci/e2e-smoke.sh
 
-  rig-guidance:
-    name: Rig Guidance (${{ matrix.os }})
+  r-bootstrap-guidance:
+    name: R Bootstrap Guidance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
@@ -82,8 +82,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run rig guidance E2E
-        run: bash scripts/ci/e2e-rig-guidance.sh
+      - name: Run R bootstrap guidance E2E
+        run: bash scripts/ci/e2e-r-bootstrap-guidance.sh
+
+  release-install-smoke:
+    name: Release Install Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run release install smoke E2E
+        run: bash scripts/ci/e2e-release-install.sh
 
   local-source-drift:
     name: Local Source Drift
@@ -320,8 +341,8 @@ jobs:
       - name: Run pak backend E2E
         run: bash scripts/ci/e2e-pak-backend.sh
 
-  rig-integration:
-    name: Rig Integration
+  native-r-manager:
+    name: Native R Manager
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -334,8 +355,5 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Install rig
-        run: bash scripts/ci/install-rig-linux.sh
-
-      - name: Run rig integration E2E
-        run: bash scripts/ci/e2e-rig.sh
+      - name: Run native R manager E2E
+        run: bash scripts/ci/e2e-r-manager.sh

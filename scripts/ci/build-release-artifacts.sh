@@ -24,6 +24,36 @@ platforms=(
   "windows arm64 zip"
 )
 
+if [ "${RS_RELEASE_ONLY_HOST:-}" = "1" ]; then
+  case "$(uname -s)" in
+    Linux)
+      host_os="linux"
+      ;;
+    Darwin)
+      host_os="darwin"
+      ;;
+    *)
+      echo "unsupported host operating system: $(uname -s)" >&2
+      exit 1
+      ;;
+  esac
+
+  case "$(uname -m)" in
+    x86_64|amd64)
+      host_arch="amd64"
+      ;;
+    arm64|aarch64)
+      host_arch="arm64"
+      ;;
+    *)
+      echo "unsupported host architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+
+  platforms=("$host_os $host_arch tar.gz")
+fi
+
 cd "$ROOT_DIR"
 
 for target in "${platforms[@]}"; do

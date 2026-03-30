@@ -1,0 +1,339 @@
+package rmanager
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func writeFakeManagedRscript(t *testing.T, root, version string) string {
+	t.Helper()
+
+	path := filepath.Join(root, "bin", rscriptExecutableName())
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(path), err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-e" ]; then
+	printf "%s"
+	exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`, version)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
+func TestResolveVersionOrPathAcceptsExplicitPath(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFakeManagedRscript(t, dir, "4.4.3")
+
+	got, err := ResolveVersionOrPath(path)
+	if err != nil {
+		t.Fatalf("ResolveVersionOrPath() error = %v", err)
+	}
+	if got != path {
+		t.Fatalf("ResolveVersionOrPath() = %q, want %q", got, path)
+	}
+}
+
+func TestResolveVersionOrPathUsesHighestInstalledManagedRelease(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(managerRootEnv, root)
+
+	oldPath := writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.4.3-"+runtime.GOOS+"-"+runtime.GOARCH), "4.4.3")
+	newPath := writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.5.2-"+runtime.GOOS+"-"+runtime.GOARCH), "4.5.2")
+
+	got, err := ResolveVersionOrPath("release")
+	if err != nil {
+		t.Fatalf("ResolveVersionOrPath() error = %v", err)
+	}
+	if got != newPath {
+		t.Fatalf("ResolveVersionOrPath() = %q, want %q (old=%q)", got, newPath, oldPath)
+	}
+}
+
+func TestResolveVersionOrPathUsesHighestInstalledPartialVersion(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(managerRootEnv, root)
+
+	oldPath := writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.4.2-"+runtime.GOOS+"-"+runtime.GOARCH), "4.4.2")
+	newPath := writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.4.5-"+runtime.GOOS+"-"+runtime.GOARCH), "4.4.5")
+
+	got, err := ResolveVersionOrPath("4.4")
+	if err != nil {
+		t.Fatalf("ResolveVersionOrPath() error = %v", err)
+	}
+	if got != newPath {
+		t.Fatalf("ResolveVersionOrPath() = %q, want %q (old=%q)", got, newPath, oldPath)
+	}
+}
+
+func TestResolveVersionOrPathRejectsUnsupportedSelector(t *testing.T) {
+	_, err := ResolveVersionOrPath("oldrel")
+	if err == nil {
+		t.Fatal("ResolveVersionOrPath() error = nil, want unsupported selector")
+	}
+	if !strings.Contains(err.Error(), `native R manager does not yet support selector "oldrel"`) {
+		t.Fatalf("ResolveVersionOrPath() error = %v", err)
+	}
+}
+
+func TestListShowsManagedAndExternalInstallations(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(managerRootEnv, root)
+
+	managedPath := writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.4.3-"+runtime.GOOS+"-"+runtime.GOARCH), "4.4.3")
+	externalRoot := t.TempDir()
+	externalPath := writeFakeManagedRscript(t, externalRoot, "4.3.2")
+	t.Cleanup(func() {
+		rscriptLookPath = execLookPath
+		nativeLookPath = execNativeLookPath
+	})
+	rscriptLookPath = func(file string) (string, error) { return "", fmt.Errorf("missing %s", file) }
+	nativeLookPath = func(file string) (string, error) {
+		if file == "Rscript" {
+			return externalPath, nil
+		}
+		return "", fmt.Errorf("missing %s", file)
+	}
+	if err := setCurrentInstall(filepath.Dir(filepath.Dir(managedPath))); err != nil {
+		t.Fatalf("setCurrentInstall() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := List(&stdout, io.Discard); err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "managed") || !strings.Contains(out, managedPath) {
+		t.Fatalf("List() output = %q, want managed entry", out)
+	}
+	if !strings.Contains(out, "external") || !strings.Contains(out, externalPath) {
+		t.Fatalf("List() output = %q, want external entry", out)
+	}
+}
+
+func TestLooksLikeVersionSpec(t *testing.T) {
+	for _, spec := range []string{"4.4", "4.5.3", "release", "oldrel", "devel", "4.4-arm64"} {
+		if !LooksLikeVersionSpec(spec) {
+			t.Fatalf("LooksLikeVersionSpec(%q) = false, want true", spec)
+		}
+	}
+	for _, spec := range []string{"Rscript", "custom-rscript", "/opt/R/bin/Rscript"} {
+		if LooksLikeVersionSpec(spec) {
+			t.Fatalf("LooksLikeVersionSpec(%q) = true, want false", spec)
+		}
+	}
+}
+
+func TestVersionMatchesSpec(t *testing.T) {
+	cases := []struct {
+		spec   string
+		actual string
+		want   bool
+	}{
+		{spec: "4.4", actual: "4.4.3", want: true},
+		{spec: "4.4.3", actual: "4.4.3", want: true},
+		{spec: "4.4.3", actual: "4.4.4", want: false},
+		{spec: "4.5", actual: "4.4.3", want: false},
+		{spec: "release", actual: "4.5.3", want: true},
+	}
+
+	for _, tc := range cases {
+		if got := VersionMatchesSpec(tc.spec, tc.actual); got != tc.want {
+			t.Fatalf("VersionMatchesSpec(%q, %q) = %v, want %v", tc.spec, tc.actual, got, tc.want)
+		}
+	}
+}
+
+func TestAutoInstallREnabledIgnoresLegacyRigAlias(t *testing.T) {
+	t.Setenv(autoInstallREnv, "")
+	t.Setenv("RS_AUTO_INSTALL_RIG", "1")
+
+	if AutoInstallREnabled() {
+		t.Fatalf("AutoInstallREnabled() = true, want false when only RS_AUTO_INSTALL_RIG is set")
+	}
+}
+
+func TestValidateVersionSelectorRejectsUnsupportedSelectors(t *testing.T) {
+	for _, spec := range []string{"oldrel", "devel", "next"} {
+		err := ValidateVersionSelector(spec)
+		if err == nil {
+			t.Fatalf("ValidateVersionSelector(%q) error = nil, want unsupported selector", spec)
+		}
+		if !strings.Contains(err.Error(), `native R manager does not yet support selector "`) {
+			t.Fatalf("ValidateVersionSelector(%q) error = %v", spec, err)
+		}
+	}
+}
+
+func TestResolveConcreteVersionUsesAvailableVersionsForPartialSelector(t *testing.T) {
+	oldClient := nativeHTTPClient
+	t.Cleanup(func() {
+		nativeHTTPClient = oldClient
+	})
+	nativeHTTPClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body := io.NopCloser(strings.NewReader(`{"r_versions":["next","4.5.3","4.4.7","4.4.2"]}`))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       body,
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	got, err := resolveConcreteVersion("4.4")
+	if err != nil {
+		t.Fatalf("resolveConcreteVersion() error = %v", err)
+	}
+	if got != "4.4.7" {
+		t.Fatalf("resolveConcreteVersion() = %q, want 4.4.7", got)
+	}
+}
+
+func TestDiscoverInstallationsMarksCurrentManagedInterpreter(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(managerRootEnv, root)
+
+	currentPath := writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.4.3-"+runtime.GOOS+"-"+runtime.GOARCH), "4.4.3")
+	otherPath := writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.5.1-"+runtime.GOOS+"-"+runtime.GOARCH), "4.5.1")
+	if err := setCurrentInstall(filepath.Dir(filepath.Dir(currentPath))); err != nil {
+		t.Fatalf("setCurrentInstall() error = %v", err)
+	}
+
+	installs, err := discoverInstallations()
+	if err != nil {
+		t.Fatalf("discoverInstallations() error = %v", err)
+	}
+	if len(installs) < 2 {
+		t.Fatalf("discoverInstallations() = %v, want at least 2 installs", installs)
+	}
+	if installs[0].RscriptPath != currentPath || !installs[0].Current || !installs[0].Managed {
+		t.Fatalf("discoverInstallations()[0] = %#v, want current managed install %q", installs[0], currentPath)
+	}
+	foundOther := false
+	for _, inst := range installs {
+		if inst.RscriptPath == otherPath && !inst.Current {
+			foundOther = true
+			break
+		}
+	}
+	if !foundOther {
+		t.Fatalf("discoverInstallations() = %v, want non-current secondary install %q", installs, otherPath)
+	}
+}
+
+func TestSelectInstallAction(t *testing.T) {
+	cases := []struct {
+		name   string
+		goos   string
+		distro linuxDistro
+		method InstallMethod
+		want   installAction
+		errSub string
+	}{
+		{name: "darwin auto", goos: "darwin", method: InstallMethodAuto, want: installActionMacOSBinary},
+		{name: "darwin source", goos: "darwin", method: InstallMethodSource, want: installActionSource},
+		{name: "linux binary", goos: "linux", distro: linuxDistro{ID: "ubuntu", VersionID: "2404"}, method: InstallMethodBinary, want: installActionLinuxBinary},
+		{name: "linux arch auto", goos: "linux", distro: linuxDistro{ID: "arch"}, method: InstallMethodAuto, want: installActionSource},
+		{name: "linux unsupported auto falls back to source", goos: "linux", distro: linuxDistro{ID: "gentoo", VersionID: "latest"}, method: InstallMethodAuto, want: installActionSource},
+		{name: "linux unsupported binary fails", goos: "linux", distro: linuxDistro{ID: "gentoo", VersionID: "latest"}, method: InstallMethodBinary, errSub: "unsupported Linux distribution"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := selectInstallAction(tc.goos, tc.distro, tc.method)
+			if tc.errSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.errSub) {
+					t.Fatalf("selectInstallAction() error = %v, want substring %q", err, tc.errSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("selectInstallAction() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("selectInstallAction() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPreflightSourceBuildMissingTools(t *testing.T) {
+	oldLookPath := nativeLookPath
+	t.Cleanup(func() {
+		nativeLookPath = oldLookPath
+	})
+	nativeLookPath = func(file string) (string, error) {
+		return "", fmt.Errorf("missing %s", file)
+	}
+
+	err := preflightSourceBuild()
+	if err == nil {
+		t.Fatal("preflightSourceBuild() error = nil, want missing tools")
+	}
+	for _, want := range []string{"gcc", "g++", "gfortran", "make", "curl", "xz"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("preflightSourceBuild() error = %v, want %q", err, want)
+		}
+	}
+}
+
+func TestPreflightSourceBuildArchHint(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Arch-specific source build hint only applies on Linux")
+	}
+	oldLookPath := nativeLookPath
+	oldReadFile := nativeReadFile
+	t.Cleanup(func() {
+		nativeLookPath = oldLookPath
+		nativeReadFile = oldReadFile
+	})
+	nativeLookPath = func(file string) (string, error) {
+		return "", fmt.Errorf("missing %s", file)
+	}
+	nativeReadFile = func(path string) ([]byte, error) {
+		if path == "/etc/os-release" {
+			return []byte("ID=arch\nID_LIKE=arch\nVERSION_ID=rolling\n"), nil
+		}
+		return nil, fmt.Errorf("unexpected read %s", path)
+	}
+
+	err := preflightSourceBuild()
+	if err == nil {
+		t.Fatal("preflightSourceBuild() error = nil, want Arch hint")
+	}
+	if !strings.Contains(err.Error(), "pacman -S --needed base-devel gcc-fortran curl xz bzip2 zlib readline pcre2 icu") {
+		t.Fatalf("preflightSourceBuild() error = %v", err)
+	}
+}
+
+func TestLinuxBinaryOSIdentifierRejectsUnsupportedDistro(t *testing.T) {
+	_, err := linuxBinaryOSIdentifier(linuxDistro{ID: "gentoo", VersionID: "latest"})
+	if err == nil {
+		t.Fatal("linuxBinaryOSIdentifier() error = nil, want unsupported distro")
+	}
+	if !strings.Contains(err.Error(), "unsupported Linux distribution gentoo latest") {
+		t.Fatalf("linuxBinaryOSIdentifier() error = %v", err)
+	}
+}
+
+var execLookPath = rscriptLookPath
+var execNativeLookPath = nativeLookPath
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}

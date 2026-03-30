@@ -95,9 +95,12 @@ jobs:
       - name: Write release notes
         if: steps.guard.outputs.skip != 'true'
         run: |
-          cat > release-notes.md <<EOF
-          Automated binary build for \`${{ steps.meta.outputs.tag }}\`.
+          cp docs/release-notes-v1-draft.md release-notes.md
+          cat >> release-notes.md <<EOF
 
+          ## Build Metadata
+
+          - Release tag: \`${{ steps.meta.outputs.tag }}\`
           - Branch: \`${{ steps.meta.outputs.ref_name }}\`
           - Commit: \`${{ steps.meta.outputs.sha }}\`
 

@@ -30,7 +30,7 @@ Build the CLI:
 go build -o rs ./cmd/rs
 ```
 
-Install the latest published binary into `$HOME/.cargo/bin`:
+Install the latest published binary into `$HOME/.cargo/bin` on macOS or Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.sh | bash
@@ -45,7 +45,7 @@ RS_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/rainoffa
 
 Continuous integration:
 
-- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux and macOS, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and a Linux `rig` integration check
+- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux and macOS, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and native multi-R manager integration checks
 - [`.github/workflows/release.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/release.yml) publishes date-tagged GitHub Release binaries after successful `main` or `master` CI runs; successful rebuilds later the same day reuse that date tag and refresh the assets
 - the CI helper scripts live under [`scripts/ci/`](/Volumes/DataCenter_01/GitHub/gr/scripts/ci)
 
@@ -158,11 +158,12 @@ Manage interpreter versions and selection:
 ```bash
 ./rs r list
 ./rs r install 4.4
+./rs r install --method source 4.4
 ./rs r use 4.4
 ./rs r which
 ```
 
-When `Rscript` is missing, `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` try to install R automatically through `rig`. If `rig` itself is missing, `rs` now prints an OS-aware next step and also supports explicit rig bootstrapping with `RS_AUTO_INSTALL_RIG=1`. Once `rig` is available, `rs` asks it for `release` by default; set `RS_R_VERSION=4.4` (or another rig-compatible version selector) if you want to pin the bootstrap target on fresh machines.
+On macOS and Linux, `rs` now includes a native multi-R manager. `rs r list` shows both `managed` and discovered `external` interpreters, `rs r install` installs a user-local managed R, and `rs r install --method auto|binary|source` lets you control artifact selection. When `Rscript` is missing, `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` print a next step by default and only auto-install R when you opt in with `RS_AUTO_INSTALL_R=1`. Set `RS_R_VERSION=4.4` if you want to pin the default bootstrap target on fresh machines. Windows binaries may still be published, but the native R manager is currently a macOS/Linux-first path; on Windows the safest v1 flow is still to point `rs` at an explicit `Rscript`.
 
 Compatibility alias:
 
@@ -363,7 +364,7 @@ It then writes a temporary `R_PROFILE_USER` file that:
 
 Because the bootstrap happens before `Rscript script.R` starts, the script still sees normal `commandArgs()` behavior.
 
-Package installation is now orchestrated primarily from Go. The `native` backend resolves CRAN and Bioconductor indexes, clones or checks out `git` and GitHub sources, computes local-source fingerprints, writes `.rs-source-meta`, and then shells out to `R CMD INSTALL` for the final install step. The older R bootstrap installers are still available as compatibility backends.
+Package installation is now orchestrated primarily from Go. The `native` backend resolves CRAN and Bioconductor indexes, clones or checks out `git` and GitHub sources, computes local-source fingerprints, writes `.rs-source-meta`, and then shells out to `R CMD INSTALL` for the final install step.
 
 Today the native backend covers the package source types that `rs` exposes in normal use:
 
@@ -375,13 +376,12 @@ Today the native backend covers the package source types that `rs` exposes in no
 
 That means the default install path no longer depends on `pak` for routine `lock`, `run`, `sync`, or `check` flows. `pak` is kept as an explicit compatibility backend and CI comparison path while the Go-native planner and installer continue to mature.
 
-By default the installer backend runs in `auto` mode, which now means `native` first with a fallback to `legacy` if the native path fails. You can override that behavior by setting `RS_INSTALL_BACKEND=native`, `RS_INSTALL_BACKEND=legacy`, or `RS_INSTALL_BACKEND=pak` before invoking `rs`. `pak` remains available as a transitional compatibility backend, but it is no longer the default install path.
+By default the installer backend runs in `auto` mode, which now means `native`. You can override that behavior by setting `RS_INSTALL_BACKEND=native` or `RS_INSTALL_BACKEND=pak` before invoking `rs`. `pak` remains available as a transitional compatibility backend, but it is no longer part of the default install path.
 
 In practice the backend modes now mean:
 
-- `auto`: try the Go-native installer first, then fall back to `legacy`
+- `auto`: use the Go-native installer
 - `native`: require the Go-native installer and fail if it cannot complete
-- `legacy`: use the older R bootstrap install path directly
 - `pak`: use `pak` explicitly as a compatibility backend
 
 ### 5. Lock file
@@ -454,8 +454,9 @@ If you want this to grow from prototype into a real tool, the next steps are:
 
 ## Notes
 
-- `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` automatically bootstrap R through `rig` when `Rscript` is missing; by default they install `release`, or you can override that bootstrap target with `RS_R_VERSION`
-- if `rig` is missing, `rs` prints an OS-specific install hint by default; set `RS_AUTO_INSTALL_RIG=1` to let `rs` bootstrap `rig` first and then continue with the R installation
+- `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` bootstrap R through the native manager on macOS and Linux; by default they print next steps, and if you set `RS_AUTO_INSTALL_R=1` they install the requested target
+- `rs r install <version> --method auto|binary|source` controls how managed R versions are installed; `auto` is the default and Arch Linux prefers source builds in that mode
+- the supported v1 path is macOS/Linux runtime plus the macOS/Linux native R manager; Windows remains best-effort unless you pin an explicit `Rscript`
 - you can still pin a project interpreter with `rscript = "..."`, override it with `--rscript`, or use the explicit `rs r ...` commands when you want full control
 - package installation supports CRAN, explicitly declared Bioconductor packages, GitHub sources, and local package sources
 - package installation also supports generic `git` sources with `url`, `ref`, and `subdir`

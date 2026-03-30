@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"gr/internal/project"
+	"gr/internal/rmanager"
 )
 
 func TestInitCommandFromScriptWritesRootPackages(t *testing.T) {
@@ -251,6 +252,37 @@ func TestInitCommandBiocPackageAddsProjectDefault(t *testing.T) {
 
 	if !reflect.DeepEqual(cfg.Defaults.BiocPackages, []string{"Biostrings"}) {
 		t.Fatalf("Defaults.BiocPackages = %v", cfg.Defaults.BiocPackages)
+	}
+}
+
+func TestRUseCommandRejectsUnsupportedNativeSelector(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{dir})
+	}); err != nil {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+
+	_, err := runWithCapturedStdout(t, func() error {
+		return rUseCommand([]string{"--project-dir", dir, "oldrel"})
+	})
+	if err == nil {
+		t.Fatal("rUseCommand() error = nil, want unsupported selector")
+	}
+	if !strings.Contains(err.Error(), `native R manager does not yet support selector "oldrel"`) {
+		t.Fatalf("rUseCommand() error = %v", err)
+	}
+
+	cfg, loadErr := project.LoadEditable(filepath.Join(dir, project.ConfigFileName))
+	if loadErr != nil {
+		t.Fatalf("LoadEditable() error = %v", loadErr)
+	}
+	if cfg.Defaults.RVersion != "" || cfg.Defaults.Rscript != "" {
+		t.Fatalf("config unexpectedly changed after rejected selector: %#v", cfg.Defaults)
+	}
+	if validateErr := rmanager.ValidateVersionSelector("oldrel"); validateErr == nil {
+		t.Fatal("ValidateVersionSelector(oldrel) error = nil, want unsupported selector")
 	}
 }
 

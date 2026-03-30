@@ -176,7 +176,7 @@ Suggested acceptance criteria:
 
 These ideas may be useful later, but they should not displace the roadmap above:
 
-- a first-party cross-platform R installer beyond the current thin `rig` integration
+- deeper platform coverage and hardening for the first-party cross-platform R installer
 - solving OS package manager dependencies directly
 - generalized multi-language execution beyond R
 - a plugin ecosystem or remote execution model

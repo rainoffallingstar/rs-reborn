@@ -92,10 +92,10 @@ func TestInstallBackendDefaultsToAuto(t *testing.T) {
 }
 
 func TestInstallBackendUsesEnvironmentOverride(t *testing.T) {
-	t.Setenv("RS_INSTALL_BACKEND", "legacy")
+	t.Setenv("RS_INSTALL_BACKEND", "pak")
 
-	if got := installBackend(); got != "legacy" {
-		t.Fatalf("installBackend() = %q, want legacy", got)
+	if got := installBackend(); got != "pak" {
+		t.Fatalf("installBackend() = %q, want pak", got)
 	}
 }
 
@@ -156,7 +156,7 @@ func TestEnsureInstalledUsesNativeBackend(t *testing.T) {
 	}
 }
 
-func TestEnsureInstalledAutoFallsBackToLegacy(t *testing.T) {
+func TestEnsureInstalledAutoUsesNativeWithoutFallback(t *testing.T) {
 	oldNative := nativeInstall
 	oldBootstrap := bootstrapInstall
 	t.Cleanup(func() {
@@ -164,13 +164,11 @@ func TestEnsureInstalledAutoFallsBackToLegacy(t *testing.T) {
 		bootstrapInstall = oldBootstrap
 	})
 
-	var stderr bytes.Buffer
 	nativeInstall = func(req installer.Request) error {
 		return errors.New("native exploded")
 	}
-	bootstrapCalled := ""
 	bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
-		bootstrapCalled = backend
+		t.Fatalf("bootstrapInstall called unexpectedly with backend %q", backend)
 		return nil
 	}
 
@@ -184,30 +182,105 @@ func TestEnsureInstalledAutoFallsBackToLegacy(t *testing.T) {
 			RVersion:    "4.4.1",
 		},
 		Stdout: &bytes.Buffer{},
-		Stderr: &stderr,
+		Stderr: &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("EnsureInstalled() error = nil, want native failure")
+	}
+	if !strings.Contains(err.Error(), "native exploded") {
+		t.Fatalf("EnsureInstalled() error = %v, want native failure propagated", err)
+	}
+}
+
+func TestEnsureInstalledExplicitPakUsesBootstrap(t *testing.T) {
+	oldNative := nativeInstall
+	oldBootstrap := bootstrapInstall
+	t.Cleanup(func() {
+		nativeInstall = oldNative
+		bootstrapInstall = oldBootstrap
+	})
+
+	nativeInstall = func(req installer.Request) error {
+		t.Fatal("nativeInstall called unexpectedly")
+		return nil
+	}
+	bootstrapCalled := ""
+	bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
+		bootstrapCalled = backend
+		return nil
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "pak")
+	err := EnsureInstalled(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		LibraryPath: t.TempDir(),
+		Interpreter: "fake-Rscript",
+		Runtime: RuntimeMetadata{
+			Interpreter: "fake-Rscript",
+			RVersion:    "4.4.1",
+		},
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
 	})
 	if err != nil {
 		t.Fatalf("EnsureInstalled() error = %v", err)
 	}
-	if bootstrapCalled != "legacy" {
-		t.Fatalf("bootstrapInstall backend = %q, want legacy", bootstrapCalled)
-	}
-	if !strings.Contains(stderr.String(), "native backend unavailable or failed; falling back to legacy: native exploded") {
-		t.Fatalf("fallback stderr = %q", stderr.String())
+	if bootstrapCalled != "pak" {
+		t.Fatalf("bootstrapInstall backend = %q, want pak", bootstrapCalled)
 	}
 }
 
-func TestResolveRunnableRscriptPathAutoInstallsDefaultInterpreter(t *testing.T) {
+func TestEnsureInstalledExplicitLegacyIsUnsupported(t *testing.T) {
+	oldNative := nativeInstall
+	oldBootstrap := bootstrapInstall
+	t.Cleanup(func() {
+		nativeInstall = oldNative
+		bootstrapInstall = oldBootstrap
+	})
+
+	nativeInstall = func(req installer.Request) error {
+		t.Fatal("nativeInstall called unexpectedly")
+		return nil
+	}
+	bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
+		t.Fatalf("bootstrapInstall called unexpectedly with backend %q", backend)
+		return nil
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "legacy")
+	err := EnsureInstalled(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		LibraryPath: t.TempDir(),
+		Interpreter: "fake-Rscript",
+		Runtime: RuntimeMetadata{
+			Interpreter: "fake-Rscript",
+			RVersion:    "4.4.1",
+		},
+		Stdout: &bytes.Buffer{},
+		Stderr: &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("EnsureInstalled() error = nil, want unsupported backend")
+	}
+	if !strings.Contains(err.Error(), "unsupported install backend legacy") {
+		t.Fatalf("EnsureInstalled() error = %v", err)
+	}
+}
+
+func TestResolveRunnableRscriptPathAutoInstallsDefaultInterpreterWhenEnabled(t *testing.T) {
 	oldEnsure := ensureManagedRscript
 	oldResolve := resolveSelectedRscript
+	oldAutoInstall := autoInstallR
 	t.Cleanup(func() {
 		ensureManagedRscript = oldEnsure
 		resolveSelectedRscript = oldResolve
+		autoInstallR = oldAutoInstall
 	})
 
 	resolveSelectedRscript = func(override, configValue string) (string, error) {
 		return "", errors.New("Rscript is not available on PATH: executable file not found")
 	}
+	autoInstallR = func() bool { return true }
 	var requested string
 	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
 		requested = selected
@@ -226,17 +299,20 @@ func TestResolveRunnableRscriptPathAutoInstallsDefaultInterpreter(t *testing.T) 
 	}
 }
 
-func TestResolveRunnableRscriptPathAutoInstallsVersionSpec(t *testing.T) {
+func TestResolveRunnableRscriptPathAutoInstallsVersionSpecWhenEnabled(t *testing.T) {
 	oldEnsure := ensureManagedRscript
 	oldResolve := resolveSelectedRscript
+	oldAutoInstall := autoInstallR
 	t.Cleanup(func() {
 		ensureManagedRscript = oldEnsure
 		resolveSelectedRscript = oldResolve
+		autoInstallR = oldAutoInstall
 	})
 
 	resolveSelectedRscript = func(override, configValue string) (string, error) {
 		return "", errors.New("requested Rscript \"4.4\" is not available: executable file not found")
 	}
+	autoInstallR = func() bool { return true }
 	var requested string
 	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
 		requested = selected
@@ -276,6 +352,46 @@ func TestResolveRunnableRscriptPathDoesNotAutoInstallExplicitPath(t *testing.T) 
 		t.Fatalf("resolveRunnableRscriptPath() error = nil, want missing explicit path")
 	}
 	if !strings.Contains(err.Error(), "requested Rscript \"/tmp/missing/Rscript\" is not available") {
+		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+}
+
+func TestResolveRunnableRscriptPathSuggestsExplicitAutoInstallWhenDisabled(t *testing.T) {
+	oldEnsure := ensureManagedRscript
+	oldResolve := resolveSelectedRscript
+	oldAutoInstall := autoInstallR
+	oldAdvice := rManagerBootstrapAdvice
+	t.Cleanup(func() {
+		ensureManagedRscript = oldEnsure
+		resolveSelectedRscript = oldResolve
+		autoInstallR = oldAutoInstall
+		rManagerBootstrapAdvice = oldAdvice
+	})
+
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		return "", errors.New("Rscript is not available on PATH: executable file not found")
+	}
+	autoInstallR = func() bool { return false }
+	rManagerBootstrapAdvice = func() rmanager.RBootstrapAdvice {
+		return rmanager.RBootstrapAdvice{
+			ManualMessage: "install a managed R version with rs",
+			ManualCommand: "rs r install 4.4",
+			AutoEnableEnv: "RS_AUTO_INSTALL_R",
+		}
+	}
+	ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
+		t.Fatalf("ensureManagedRscript called unexpectedly with %q", selected)
+		return "", nil
+	}
+
+	_, err := resolveRunnableRscriptPath("", "", io.Discard)
+	if err == nil {
+		t.Fatalf("resolveRunnableRscriptPath() error = nil, want explicit guidance")
+	}
+	if !strings.Contains(err.Error(), "next step: install a managed R version with rs: rs r install 4.4") {
+		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "explicit auto-install: set RS_AUTO_INSTALL_R=1 and retry") {
 		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
 	}
 }
@@ -2105,20 +2221,17 @@ func TestBuildDoctorNextStepsHealthyEnvironment(t *testing.T) {
 	}
 }
 
-func TestBuildDoctorNextStepsSuggestsRigBootstrapWhenMissing(t *testing.T) {
-	oldRigAvailable := rigAvailable
-	oldRigAdvice := rigBootstrapAdvice
+func TestBuildDoctorNextStepsSuggestsNativeBootstrapWhenMissing(t *testing.T) {
+	oldRManagerAdvice := rManagerBootstrapAdvice
 	t.Cleanup(func() {
-		rigAvailable = oldRigAvailable
-		rigBootstrapAdvice = oldRigAdvice
+		rManagerBootstrapAdvice = oldRManagerAdvice
 	})
 
-	rigAvailable = func() bool { return false }
-	rigBootstrapAdvice = func() rmanager.RigBootstrapAdvice {
-		return rmanager.RigBootstrapAdvice{
-			ManualMessage: "install rig with Homebrew and rerun rs",
-			ManualCommand: "brew tap r-lib/rig && brew install --cask rig",
-			AutoEnableEnv: "RS_AUTO_INSTALL_RIG",
+	rManagerBootstrapAdvice = func() rmanager.RBootstrapAdvice {
+		return rmanager.RBootstrapAdvice{
+			ManualMessage: "install a managed R version with rs",
+			ManualCommand: "rs r install 4.4",
+			AutoEnableEnv: "RS_AUTO_INSTALL_R",
 		}
 	}
 
@@ -2128,20 +2241,20 @@ func TestBuildDoctorNextStepsSuggestsRigBootstrapWhenMissing(t *testing.T) {
 	}, errors.New("selected Rscript is not available"), false, nil, nil, nil)
 
 	if len(steps) < 3 {
-		t.Fatalf("len(steps) = %d, want rig bootstrap steps included (%v)", len(steps), steps)
+		t.Fatalf("len(steps) = %d, want native bootstrap steps included (%v)", len(steps), steps)
 	}
 	foundManual := false
 	foundAuto := false
 	for _, step := range steps {
-		if step.Kind == "install_rig" && strings.Contains(step.Message, "brew tap r-lib/rig && brew install --cask rig") && step.Blocking {
+		if step.Kind == "install_r" && strings.Contains(step.Message, "rs r install 4.4") && step.Blocking {
 			foundManual = true
 		}
-		if step.Kind == "auto_install_rig" && step.Command == "RS_AUTO_INSTALL_RIG=1 rs run /tmp/project/report.R" && step.Blocking {
+		if step.Kind == "auto_install_r" && step.Command == "RS_AUTO_INSTALL_R=1 rs run /tmp/project/report.R" && step.Blocking {
 			foundAuto = true
 		}
 	}
 	if !foundManual || !foundAuto {
-		t.Fatalf("steps = %#v, want both manual and auto rig guidance", steps)
+		t.Fatalf("steps = %#v, want both manual and auto native-R guidance", steps)
 	}
 }
 

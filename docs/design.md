@@ -37,7 +37,7 @@ The tool is organized around a few workflows instead of one giant command surfac
 - `rs lock <script.R>`: install and refresh the lockfile
 - `rs check <script.R>`: validate current state against the expected plan and lockfile
 - `rs doctor <script.R>`: report setup problems before install or execution
-- `rs r <list|install|use|which>`: thin interpreter-management helpers backed by `rig` plus project-level interpreter selection
+- `rs r <list|install|use|which>`: native interpreter-management helpers plus project-level interpreter selection
 - `rs scan <script.R>`: show the raw static dependency detection result
 - `rs list <script.R>`: show the final merged dependency plan without installing
 - `rs init`, `rs add`, `rs remove`: manage `rs.toml`
@@ -106,7 +106,7 @@ This gives three levels of control without introducing a heavy schema:
 2. checked-in project defaults in `rs.toml`
 3. command-line adjustments for one-off runs
 
-Interpreter selection follows the same layering. By default `rs` uses `Rscript` from `PATH`. A project can pin `rscript = "..."` in `rs.toml`, one script can override that in its own block, and a single invocation can still override both with `--rscript`. The helper surface under `rs r ...` is intentionally thin: it proxies `rig list` and `rig add`, resolves an installed `Rscript` for `rs r use`, and writes the chosen interpreter back into `rs.toml`.
+Interpreter selection follows the same layering. By default `rs` uses `Rscript` from `PATH`. A project can pin `rscript = "..."` in `rs.toml`, one script can override that in its own block, and a single invocation can still override both with `--rscript`. The helper surface under `rs r ...` is now first-party: it lists managed and external interpreters, installs user-local R versions, resolves an installed `Rscript` for `rs r use`, and writes the chosen interpreter back into `rs.toml`.
 
 For editable configs, the rewrite path now also carries lightweight formatting metadata: the top-of-file preamble is preserved, comments attached to existing sections and fields are replayed, inline trailing comments are kept, and existing root-key, top-level source/script, root-source, and script-block ordering is reused when possible. This is still intentionally modest, but it reduces unnecessary diff churn for common `rs add` and `rs remove` workflows. The parser now also validates malformed config more aggressively on load, surfacing section-aware line numbers, supported-key hints, and close-match suggestions for common key, type, and section-name typos. The current goal is predictable low-diff rewrites, not byte-for-byte formatting preservation for every hand-edited file.
 
@@ -168,9 +168,9 @@ To keep that limitation manageable, the CLI exposes explicit escape hatches:
 
 That split exists because installation mechanisms differ:
 
-- CRAN packages install with `install.packages()`
-- Bioconductor packages install with `BiocManager::install()`
-- GitHub, generic git, and local tarballs install via source-specific code paths
+- CRAN and Bioconductor packages come from different repository indexes
+- GitHub, generic git, and local packages carry source-specific identity metadata
+- the Go-native installer resolves and stages all of these source types, then uses `R CMD INSTALL` for the final install step
 
 The project now also keeps a curated known-Bioconductor package list and uses it in detection and resolution. That means packages like `DESeq2` and `Biostrings` are treated as Bioconductor dependencies even when the user runs a script directly without an existing `rs.toml`.
 
@@ -208,12 +208,11 @@ At runtime, `rs` writes a temporary `R_PROFILE_USER` file and launches `Rscript`
 The bootstrap profile is responsible for:
 
 - prepending the managed library to `.libPaths()`
-- checking which packages are already installed
-- installing missing CRAN packages
-- installing missing Bioconductor packages
-- dispatching custom source installs for GitHub, git, and local packages
+- keeping the runtime library wiring in one place before `Rscript` or `R` starts
 
 This approach was chosen over wrapping user scripts with generated R code because it preserves normal `commandArgs()` behavior and keeps the user's script as the real entrypoint.
+
+Package installation now happens outside that profile in the Go runtime. The native installer resolves CRAN and Bioconductor indexes, stages GitHub/git/local sources, records source metadata, and shells out to `R CMD INSTALL` for the final package build/install step. `pak` remains available as an explicit compatibility backend, but the automatic path is now native.
 
 The runtime is also inspected explicitly before managed library selection. That lets the tool fold runtime compatibility into the cache key instead of assuming that the same dependency plan is always ABI-compatible across interpreters or platforms.
 

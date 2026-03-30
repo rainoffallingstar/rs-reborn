@@ -903,13 +903,19 @@ func rListCommand(args []string) error {
 func rInstallCommand(args []string) error {
 	fs := flag.NewFlagSet("r install", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	method := fs.String("method", string(rmanager.InstallMethodAuto), "install method: auto, binary, or source")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs r install <version>")
+		return errors.New("usage: rs r install [--method auto|binary|source] <version>")
 	}
-	return rmanager.Install(fs.Arg(0), os.Stdout, os.Stderr)
+	return rmanager.InstallWithOptions(rmanager.InstallOptions{
+		Version: fs.Arg(0),
+		Method:  rmanager.InstallMethod(strings.TrimSpace(*method)),
+		Stdout:  os.Stdout,
+		Stderr:  os.Stderr,
+	})
 }
 
 func rUseCommand(args []string) error {
@@ -941,6 +947,9 @@ func rUseCommand(args []string) error {
 	}
 	spec := fs.Arg(0)
 	if rmanager.LooksLikeVersionSpec(spec) && !strings.Contains(strings.ToLower(spec), "rscript") {
+		if err := rmanager.ValidateVersionSelector(spec); err != nil {
+			return err
+		}
 		editable.Defaults.RVersion = spec
 		editable.Defaults.Rscript = ""
 	} else {
@@ -1305,8 +1314,8 @@ Flags for "lock":
   --verbose                 print dependency and cache details before locking
 
 Flags for "r":
-  list                      proxy rig list
-  install <version>         proxy rig add <version>
+  list                      list managed and discovered external R installations
+  install <version>         install an R version with the selected manager backend
   use <version|path>        write r_version or a resolved Rscript path to rs.toml
   which [dir|script]        print the currently selected Rscript path
 
