@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"gr/internal/progresscmd"
 	"gr/internal/project"
 	"gr/internal/rdeps"
 )
@@ -79,6 +80,10 @@ type nativeInstaller struct {
 	installedPackages map[string]installedPackage
 	requirements      map[string][]constraintRequest
 	selectedVersions  map[string]string
+}
+
+func (i *nativeInstaller) stage(label string) {
+	progresscmd.Stage(i.stderr, label)
 }
 
 type plannedPackage struct {
@@ -916,16 +921,16 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 func (i *nativeInstaller) runRCommandInstall(target string) error {
 	cmd := exec.Command(i.rBinary, "CMD", "INSTALL", "-l", i.req.LibraryPath, target)
 	cmd.Dir = i.req.WorkDir
-	cmd.Stdout = i.stdout
-	cmd.Stderr = i.stderr
 	cmd.Env = withLibraryEnv(os.Environ(), i.req.LibraryPath)
-	if err := cmd.Run(); err != nil {
+	label := fmt.Sprintf("installing R package %s", filepath.Base(target))
+	if err := progresscmd.Run(cmd, label, i.stderr, i.stderr); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (i *nativeInstaller) download(rawURL, name string) (string, error) {
+	i.stage("downloading " + name)
 	resp, err := getWithRetry(i.httpClient, rawURL)
 	if err != nil {
 		return "", err
@@ -942,7 +947,7 @@ func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 	}
 	defer file.Close()
 
-	if _, err := io.Copy(file, resp.Body); err != nil {
+	if err := progresscmd.Copy(file, resp.Body, resp.ContentLength, "downloading "+name, i.stderr); err != nil {
 		return "", err
 	}
 	return target, nil
@@ -959,11 +964,11 @@ func (i *nativeInstaller) cloneGitSource(rawURL, ref, pkg, tokenEnv string) (str
 	}
 
 	cloneDir := filepath.Join(i.tempRoot, fmt.Sprintf("%s-src-%d", pkg, time.Now().UnixNano()))
-	if err := runCommand(i.req.WorkDir, i.stdout, i.stderr, "git", "clone", cloneURL, cloneDir); err != nil {
+	if err := runCommand(i.req.WorkDir, i.stderr, i.stderr, "cloning "+pkg+" source", "git", "clone", cloneURL, cloneDir); err != nil {
 		return "", fmt.Errorf("clone %s from %s: %w", pkg, rawURL, err)
 	}
 	if ref != "" {
-		if err := runCommand(i.req.WorkDir, i.stdout, i.stderr, "git", "-C", cloneDir, "checkout", ref); err != nil {
+		if err := runCommand(i.req.WorkDir, i.stderr, i.stderr, "checking out "+pkg+"@"+ref, "git", "-C", cloneDir, "checkout", ref); err != nil {
 			return "", fmt.Errorf("checkout %s for %s: %w", ref, pkg, err)
 		}
 	}
@@ -1109,6 +1114,7 @@ func (i *nativeInstaller) ensureCRANIndex() error {
 	if i.cranIndex != nil {
 		return nil
 	}
+	i.stage("fetching CRAN package index")
 	index, err := fetchRepoIndex(i.httpClient, strings.TrimRight(i.req.Repo, "/"), sourceCRAN)
 	if err != nil {
 		return fmt.Errorf("load CRAN index: %w", err)
@@ -1125,6 +1131,7 @@ func (i *nativeInstaller) ensureCRANArchiveCandidates(name string) error {
 
 	baseURL := strings.TrimRight(i.req.Repo, "/")
 	archiveURL := baseURL + "/src/contrib/Archive/" + name + "/"
+	i.stage("checking CRAN archive for " + name)
 	resp, err := getWithRetry(i.httpClient, archiveURL)
 	if err != nil {
 		return err
@@ -1154,6 +1161,7 @@ func (i *nativeInstaller) ensureBiocMainIndex() error {
 	if i.biocLoaded {
 		return nil
 	}
+	i.stage("fetching Bioconductor package index")
 	records, err := fetchRepoIndex(i.httpClient, biocMainRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor)
 	if err != nil {
 		return fmt.Errorf("load Bioconductor index: %w", err)
@@ -1167,6 +1175,7 @@ func (i *nativeInstaller) ensureBiocAnnotationIndex() error {
 	if i.biocAnnLoaded {
 		return nil
 	}
+	i.stage("fetching Bioconductor annotation index")
 	records, err := fetchRepoIndex(i.httpClient, biocAnnotationRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor)
 	if err != nil {
 		return fmt.Errorf("load Bioconductor annotation index: %w", err)
@@ -1180,6 +1189,7 @@ func (i *nativeInstaller) ensureBiocExperimentIndex() error {
 	if i.biocExpLoaded {
 		return nil
 	}
+	i.stage("fetching Bioconductor experiment index")
 	records, err := fetchRepoIndex(i.httpClient, biocExperimentRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor)
 	if err != nil {
 		return fmt.Errorf("load Bioconductor experiment index: %w", err)
@@ -1718,12 +1728,10 @@ func withLibraryEnv(env []string, libraryPath string) []string {
 	return filtered
 }
 
-func runCommand(workDir string, stdout, stderr io.Writer, name string, args ...string) error {
+func runCommand(workDir string, progress, errors io.Writer, label string, name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = workDir
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	return cmd.Run()
+	return progresscmd.Run(cmd, label, progress, errors)
 }
 
 func gitOutput(repoDir string, args ...string) (string, error) {

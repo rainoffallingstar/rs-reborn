@@ -18,6 +18,7 @@ import (
 
 	"gr/internal/installer"
 	"gr/internal/lockfile"
+	"gr/internal/progresscmd"
 	"gr/internal/project"
 	"gr/internal/rdeps"
 	"gr/internal/rmanager"
@@ -281,13 +282,12 @@ type interpreterSelection struct {
 
 var bootstrapInstall = func(env ResolvedEnvironment, backend string) error {
 	cmd := exec.Command(env.Interpreter, "-e", `source(Sys.getenv("RS_BOOTSTRAP_FILE")); rs_bootstrap()`)
-	cmd.Stdout = env.Stdout
-	cmd.Stderr = env.Stderr
 	cmd.Stdin = os.Stdin
 	cmd.Dir = filepath.Dir(env.ScriptPath)
 	cmd.Env = append(runtimeEnv(env, true), "RS_BOOTSTRAP_AUTORUN=false", "RS_INSTALL_BACKEND="+backend)
 
-	if err := cmd.Run(); err != nil {
+	label := fmt.Sprintf("installing packages via %s backend", backend)
+	if err := progresscmd.Run(cmd, label, env.Stderr, env.Stderr); err != nil {
 		return fmt.Errorf("install packages: %w", err)
 	}
 	return nil
@@ -1038,7 +1038,7 @@ func List(opts ListOptions) error {
 		opts.Stderr = os.Stderr
 	}
 
-	plan, err := resolveDependencyPlan(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath)
+	plan, err := resolveDependencyPlanWithProgress(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath, opts.Stderr)
 	if err != nil {
 		return err
 	}
@@ -1421,7 +1421,7 @@ func Doctor(opts DoctorOptions) error {
 		return fmt.Errorf("%s is a directory, expected an R script", opts.ScriptPath)
 	}
 
-	plan, err := resolveDependencyPlan(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath)
+	plan, err := resolveDependencyPlanWithProgress(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath, opts.Stderr)
 	if err != nil {
 		return err
 	}
@@ -1615,6 +1615,10 @@ func Doctor(opts DoctorOptions) error {
 }
 
 func resolveDependencyPlan(scriptPath string, extraDeps, extraBiocDeps, excludeDeps []string, repoOverride, cacheDirOverride, rscriptOverride string) (dependencyPlan, error) {
+	return resolveDependencyPlanWithProgress(scriptPath, extraDeps, extraBiocDeps, excludeDeps, repoOverride, cacheDirOverride, rscriptOverride, io.Discard)
+}
+
+func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDeps, excludeDeps []string, repoOverride, cacheDirOverride, rscriptOverride string, progress io.Writer) (dependencyPlan, error) {
 	info, err := os.Stat(scriptPath)
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("stat script: %w", err)
@@ -1623,21 +1627,25 @@ func resolveDependencyPlan(scriptPath string, extraDeps, extraBiocDeps, excludeD
 		return dependencyPlan{}, fmt.Errorf("%s is a directory, expected an R script", scriptPath)
 	}
 
+	progresscmd.Stage(progress, "discovering project config")
 	projectCfg, _, err := project.Discover(filepath.Dir(scriptPath))
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("discover project config: %w", err)
 	}
+	progresscmd.Stage(progress, "resolving script configuration")
 	scriptCfg, err := projectCfg.ResolveForScript(scriptPath)
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("resolve script config: %w", err)
 	}
 
 	repo := firstNonEmpty(repoOverride, scriptCfg.Repo, "https://cloud.r-project.org")
+	progresscmd.Stage(progress, "scanning script dependencies")
 	selection := resolveInterpreterSelection(rscriptOverride, scriptCfg.Rscript, scriptCfg.RVersion, filepath.Dir(scriptPath), io.Discard, false)
 	detectedDeps, err := ScanScript(scriptPath)
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("scan script: %w", err)
 	}
+	progresscmd.Stage(progress, "resolving interpreter and managed library plan")
 	cranDeps, biocDeps := resolveManagedPackageSets(detectedDeps, scriptCfg.Packages, scriptCfg.BiocPackages, extraDeps, extraBiocDeps, excludeDeps)
 	sourceDeps := selectSourceDeps(scriptCfg.Sources, cranDeps, biocDeps)
 	cranDeps = filterManagedDeps(cranDeps, sourceDeps, biocDeps)
@@ -3132,11 +3140,13 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		opts.Stderr = os.Stderr
 	}
 
+	progresscmd.Stage(opts.Stderr, "discovering project config")
 	projectCfg, _, err := project.Discover(filepath.Dir(opts.ScriptPath))
 	if err != nil {
 		return ResolvedEnvironment{}, fmt.Errorf("discover project config: %w", err)
 	}
 
+	progresscmd.Stage(opts.Stderr, "resolving script configuration")
 	scriptCfg, err := projectCfg.ResolveForScript(opts.ScriptPath)
 	if err != nil {
 		return ResolvedEnvironment{}, fmt.Errorf("resolve script config: %w", err)
@@ -3144,6 +3154,7 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 
 	repo := firstNonEmpty(opts.Repo, scriptCfg.Repo, "https://cloud.r-project.org")
 
+	progresscmd.Stage(opts.Stderr, "scanning script dependencies")
 	detectedDeps, err := ScanScript(opts.ScriptPath)
 	if err != nil {
 		return ResolvedEnvironment{}, fmt.Errorf("scan script: %w", err)
@@ -3167,6 +3178,7 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		lockfilePath = defaultLockfilePath(projectCfg.RootDir, opts.ScriptPath)
 	}
 
+	progresscmd.Stage(opts.Stderr, "resolving interpreter and managed library")
 	selection := resolveInterpreterSelection(opts.RscriptPath, scriptCfg.Rscript, scriptCfg.RVersion, filepath.Dir(opts.ScriptPath), opts.Stderr, opts.AutoInstallR)
 	if selection.Issue != nil {
 		return ResolvedEnvironment{}, selection.Issue

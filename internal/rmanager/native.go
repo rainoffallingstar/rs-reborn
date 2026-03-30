@@ -19,6 +19,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gr/internal/progresscmd"
 )
 
 var (
@@ -335,7 +337,7 @@ func installMacOSBinary(version, targetDir string, stdout, stderr io.Writer) err
 	}
 	downloadURL := macOSPkgURL(version)
 	pkgPath := filepath.Join(archiveDir, filepath.Base(downloadURL))
-	if err := downloadFile(downloadURL, pkgPath); err != nil {
+	if err := downloadFile(downloadURL, pkgPath, "downloading macOS R "+version+" package", stderr); err != nil {
 		return fmt.Errorf("download macOS R package: %w", err)
 	}
 	extractRoot := filepath.Join(archiveDir, "pkg-"+sanitizeVersion(version))
@@ -345,10 +347,9 @@ func installMacOSBinary(version, targetDir string, stdout, stderr io.Writer) err
 	if _, err := nativeLookPath("pkgutil"); err != nil {
 		return fmt.Errorf("macOS package extraction requires pkgutil: %w", err)
 	}
+	progresscmd.Stage(stderr, "expanding macOS R "+version+" package")
 	expandCmd := nativeCommand("pkgutil", "--expand-full", pkgPath, extractRoot)
-	expandCmd.Stdout = stdout
-	expandCmd.Stderr = stderr
-	if err := expandCmd.Run(); err != nil {
+	if err := progresscmd.Run(expandCmd, "expanding macOS R "+version+" package", stderr, stderr); err != nil {
 		return fmt.Errorf("expand macOS package: %w", err)
 	}
 
@@ -371,7 +372,7 @@ func installLinuxBinary(version string, distro linuxDistro, targetDir string, st
 	}
 	url := linuxBinaryURL(version, osID)
 	archivePath := filepath.Join(archiveDir, filepath.Base(url))
-	if err := downloadFile(url, archivePath); err != nil {
+	if err := downloadFile(url, archivePath, "downloading Linux R "+version+" binary", stderr); err != nil {
 		return fmt.Errorf("download Linux R binary: %w", err)
 	}
 	extractDir := filepath.Join(archiveDir, "linux-"+sanitizeVersion(version))
@@ -381,6 +382,7 @@ func installLinuxBinary(version string, distro linuxDistro, targetDir string, st
 	if err := nativeMkdirAll(extractDir, 0o755); err != nil {
 		return fmt.Errorf("create Linux extraction dir: %w", err)
 	}
+	progresscmd.Stage(stderr, "extracting Linux R "+version+" binary")
 	if err := extractTarGz(archivePath, extractDir); err != nil {
 		return fmt.Errorf("extract Linux R binary: %w", err)
 	}
@@ -401,7 +403,7 @@ func installFromSource(version, targetDir string, stdout, stderr io.Writer) erro
 	}
 	url := sourceTarballURL(version)
 	archivePath := filepath.Join(archiveDir, filepath.Base(url))
-	if err := downloadFile(url, archivePath); err != nil {
+	if err := downloadFile(url, archivePath, "downloading R "+version+" source", stderr); err != nil {
 		return fmt.Errorf("download R source: %w", err)
 	}
 	sourceRoot := filepath.Join(archiveDir, "src-"+sanitizeVersion(version))
@@ -411,6 +413,7 @@ func installFromSource(version, targetDir string, stdout, stderr io.Writer) erro
 	if err := nativeMkdirAll(sourceRoot, 0o755); err != nil {
 		return fmt.Errorf("create source extraction dir: %w", err)
 	}
+	progresscmd.Stage(stderr, "extracting R "+version+" source")
 	if err := extractTarGz(archivePath, sourceRoot); err != nil {
 		return fmt.Errorf("extract R source: %w", err)
 	}
@@ -428,10 +431,8 @@ func installFromSource(version, targetDir string, stdout, stderr io.Writer) erro
 	} {
 		cmd := nativeCommand(cmdArgs[0], cmdArgs[1:]...)
 		cmd.Dir = srcDir
-		cmd.Stdout = stdout
-		cmd.Stderr = stderr
 		cmd.Stdin = os.Stdin
-		if err := cmd.Run(); err != nil {
+		if err := progresscmd.Run(cmd, sourceBuildStepLabel(version, cmdArgs), stderr, stderr); err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(cmdArgs, " "), err)
 		}
 	}
@@ -439,6 +440,17 @@ func installFromSource(version, targetDir string, stdout, stderr io.Writer) erro
 		return fmt.Errorf("managed source-built R is missing %s: %w", filepath.Join(targetDir, "bin", rscriptExecutableName()), err)
 	}
 	return nil
+}
+
+func sourceBuildStepLabel(version string, cmdArgs []string) string {
+	switch {
+	case len(cmdArgs) > 0 && cmdArgs[0] == "./configure":
+		return fmt.Sprintf("configuring R %s source build", version)
+	case len(cmdArgs) > 1 && cmdArgs[0] == "make" && cmdArgs[1] == "install":
+		return fmt.Sprintf("installing R %s source build", version)
+	default:
+		return fmt.Sprintf("compiling R %s source build", version)
+	}
 }
 
 func sourceConfigureArgs(targetDir string) []string {
@@ -770,7 +782,7 @@ func availableVersions() ([]string, error) {
 	return out, nil
 }
 
-func downloadFile(url, destination string) error {
+func downloadFile(url, destination string, label string, progress io.Writer) error {
 	if err := nativeMkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		return fmt.Errorf("create download dir: %w", err)
 	}
@@ -791,7 +803,7 @@ func downloadFile(url, destination string) error {
 		return fmt.Errorf("create download file: %w", err)
 	}
 	defer file.Close()
-	if _, err := io.Copy(file, resp.Body); err != nil {
+	if err := progresscmd.Copy(file, resp.Body, resp.ContentLength, label, progress); err != nil {
 		return fmt.Errorf("write download file: %w", err)
 	}
 	return nil
