@@ -344,7 +344,7 @@ jobs:
   native-r-manager:
     name: Native R Manager (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -358,6 +358,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Install system dependencies for Ubuntu source fallback
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran libbz2-dev libcurl4-openssl-dev libicu-dev liblzma-dev libpcre2-dev libreadline-dev xorg-dev zlib1g-dev
 
       - name: Run native R manager E2E
         run: bash scripts/ci/e2e-r-manager.sh
