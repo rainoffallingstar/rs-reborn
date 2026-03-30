@@ -342,9 +342,13 @@ jobs:
         run: bash scripts/ci/e2e-pak-backend.sh
 
   native-r-manager:
-    name: Native R Manager
-    runs-on: ubuntu-latest
+    name: Native R Manager (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -357,3 +361,25 @@ jobs:
 
       - name: Run native R manager E2E
         run: bash scripts/ci/e2e-r-manager.sh
+
+  native-r-manager-source:
+    name: Native R Manager Source
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install system dependencies for R source builds
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran libbz2-dev libcurl4-openssl-dev libicu-dev liblzma-dev libpcre2-dev libreadline-dev xorg-dev zlib1g-dev
+
+      - name: Run native R manager source E2E
+        run: bash scripts/ci/e2e-r-manager-source.sh

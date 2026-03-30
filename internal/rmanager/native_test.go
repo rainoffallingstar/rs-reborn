@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -393,6 +394,42 @@ R_DOC_DIR=/opt/R/4.4.3/lib/R/doc
 	}
 	if strings.Contains(text, "/opt/R/4.4.3/${libnn}/R") || strings.Contains(text, "/opt/R/4.4.3/${libnn_fallback}/R") {
 		t.Fatalf("launcher = %q, want linux fallback paths removed", text)
+	}
+	if strings.Contains(text, "elif [ -x") {
+		t.Fatalf("launcher = %q, want nested distro fallback block removed", text)
+	}
+	if bashPath, err := exec.LookPath("bash"); err == nil {
+		cmd := exec.Command(bashPath, "-n", launcherPath)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("rewritten launcher failed bash -n: %v\n%s", err, output)
+		}
+	}
+}
+
+func TestSourceConfigureArgs(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "managed-r")
+	args := sourceConfigureArgs(target)
+	if len(args) < 2 {
+		t.Fatalf("sourceConfigureArgs() = %v, want configure command and prefix", args)
+	}
+	if args[0] != "./configure" {
+		t.Fatalf("sourceConfigureArgs()[0] = %q, want ./configure", args[0])
+	}
+	if args[1] != "--prefix="+target {
+		t.Fatalf("sourceConfigureArgs()[1] = %q, want --prefix=%s", args[1], target)
+	}
+	hasWithoutX := false
+	for _, arg := range args[2:] {
+		if arg == "--without-x" {
+			hasWithoutX = true
+			break
+		}
+	}
+	if runtime.GOOS == "darwin" && !hasWithoutX {
+		t.Fatalf("sourceConfigureArgs() = %v, want --without-x on darwin", args)
+	}
+	if runtime.GOOS != "darwin" && hasWithoutX {
+		t.Fatalf("sourceConfigureArgs() = %v, do not want --without-x outside darwin", args)
 	}
 }
 

@@ -397,7 +397,7 @@ func installFromSource(version, targetDir string, stdout, stderr io.Writer) erro
 		return fmt.Errorf("create managed R target dir: %w", err)
 	}
 	for _, cmdArgs := range [][]string{
-		{"./configure", "--prefix=" + targetDir},
+		sourceConfigureArgs(targetDir),
 		{"make", "-j2"},
 		{"make", "install"},
 	} {
@@ -414,6 +414,14 @@ func installFromSource(version, targetDir string, stdout, stderr io.Writer) erro
 		return fmt.Errorf("managed source-built R is missing %s: %w", filepath.Join(targetDir, "bin", rscriptExecutableName()), err)
 	}
 	return nil
+}
+
+func sourceConfigureArgs(targetDir string) []string {
+	args := []string{"./configure", "--prefix=" + targetDir}
+	if runtime.GOOS == "darwin" {
+		args = append(args, "--without-x")
+	}
+	return args
 }
 
 func managedInstallPaths(version string) (string, string, error) {
@@ -998,25 +1006,36 @@ func rewriteManagedRLauncher(path, targetDir string) error {
 		return fmt.Errorf("read R launcher: %w", err)
 	}
 	lines := strings.Split(string(data), "\n")
-	for idx, line := range lines {
+	out := make([]string, 0, len(lines))
+	for idx := 0; idx < len(lines); idx++ {
+		line := lines[idx]
 		switch {
 		case strings.HasPrefix(line, "R_HOME_DIR="):
-			lines[idx] = "R_HOME_DIR=" + shellSingleQuote(targetDir)
+			out = append(out, "R_HOME_DIR="+shellSingleQuote(targetDir))
 		case strings.HasPrefix(line, "R_SHARE_DIR="):
-			lines[idx] = "R_SHARE_DIR=" + shellSingleQuote(filepath.Join(targetDir, "share"))
+			out = append(out, "R_SHARE_DIR="+shellSingleQuote(filepath.Join(targetDir, "share")))
 		case strings.HasPrefix(line, "R_INCLUDE_DIR="):
-			lines[idx] = "R_INCLUDE_DIR=" + shellSingleQuote(filepath.Join(targetDir, "include"))
+			out = append(out, "R_INCLUDE_DIR="+shellSingleQuote(filepath.Join(targetDir, "include")))
 		case strings.HasPrefix(line, "R_DOC_DIR="):
-			lines[idx] = "R_DOC_DIR=" + shellSingleQuote(filepath.Join(targetDir, "doc"))
-		case strings.HasPrefix(line, `if test "${R_HOME_DIR}" = "`):
-			lines[idx] = `if test "${R_HOME_DIR}" = ` + shellSingleQuote(targetDir) + `; then`
-		case strings.Contains(line, `/Library/Frameworks/${libnn}/R"`), strings.Contains(line, `/Library/Frameworks/${libnn_fallback}/R"`),
-			strings.Contains(line, `/opt/R/`) && strings.Contains(line, `${libnn}`),
-			strings.Contains(line, `/opt/R/`) && strings.Contains(line, `${libnn_fallback}`):
-			lines[idx] = "\t     ## managed rs installs do not use system framework fallback paths"
+			out = append(out, "R_DOC_DIR="+shellSingleQuote(filepath.Join(targetDir, "doc")))
+		case isManagedLauncherFallbackBlockStart(line):
+			end, err := skipShellIfBlock(lines, idx)
+			if err != nil {
+				return fmt.Errorf("parse R launcher fallback block: %w", err)
+			}
+			out = append(out,
+				`if test "${R_HOME_DIR}" = `+shellSingleQuote(targetDir)+`; then`,
+				"  :",
+				"fi",
+			)
+			idx = end
+		case isManagedLauncherFallbackLine(line):
+			continue
+		default:
+			out = append(out, line)
 		}
 	}
-	content := strings.Join(lines, "\n")
+	content := strings.Join(out, "\n")
 	info, err := nativeStat(path)
 	if err != nil {
 		return fmt.Errorf("stat R launcher: %w", err)
@@ -1025,6 +1044,37 @@ func rewriteManagedRLauncher(path, targetDir string) error {
 		return fmt.Errorf("write R launcher: %w", err)
 	}
 	return nil
+}
+
+func isManagedLauncherFallbackBlockStart(line string) bool {
+	if !strings.HasPrefix(line, `if test "${R_HOME_DIR}" = "`) {
+		return false
+	}
+	return strings.Contains(line, "/opt/R/") || strings.Contains(line, "/Library/Frameworks/")
+}
+
+func isManagedLauncherFallbackLine(line string) bool {
+	return strings.Contains(line, `/Library/Frameworks/${libnn}/R"`) ||
+		strings.Contains(line, `/Library/Frameworks/${libnn_fallback}/R"`) ||
+		(strings.Contains(line, `/opt/R/`) && strings.Contains(line, `${libnn}`)) ||
+		(strings.Contains(line, `/opt/R/`) && strings.Contains(line, `${libnn_fallback}`))
+}
+
+func skipShellIfBlock(lines []string, start int) (int, error) {
+	depth := 1
+	for idx := start + 1; idx < len(lines); idx++ {
+		trimmed := strings.TrimSpace(lines[idx])
+		if strings.HasPrefix(trimmed, "if ") {
+			depth++
+		}
+		if trimmed == "fi" {
+			depth--
+			if depth == 0 {
+				return idx, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("unterminated shell if block starting at line %d", start+1)
 }
 
 func rewriteMacOSRenviron(path, targetDir string) error {

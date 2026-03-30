@@ -139,7 +139,8 @@ The current GitHub Actions workflow is split into these release-facing jobs:
 - `native-github`: end-to-end verification of standard GitHub sources on the native installer
 - `native-bioc`: end-to-end verification of Bioconductor installs on the native installer
 - `pak-backend`: explicit compatibility coverage for the `pak` backend
-- `native-r-manager`: Linux smoke coverage for `rs r list/install/use/which`
+- `native-r-manager`: macOS and Linux smoke coverage for `rs r list/install/use/which`
+- `native-r-manager-source`: Ubuntu end-to-end verification of explicit `rs r install --method source`
 
 ## Final Human Sign-Off Before Tagging
 
