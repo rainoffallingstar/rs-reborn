@@ -37,6 +37,7 @@ var (
 	nativeStat       = os.Stat
 	nativeWalkDir    = filepath.WalkDir
 	nativeTempDir    = os.MkdirTemp
+	nativeInstallSrc = installFromSource
 )
 
 const versionsIndexURL = "https://cdn.posit.co/r/versions.json"
@@ -273,32 +274,56 @@ func installConcreteVersion(version, selector string, method InstallMethod, targ
 	case installActionSource:
 		return installFromSource(version, targetDir, stdout, stderr)
 	case installActionMacOSBinary:
-		if err := installMacOSBinary(version, targetDir, stdout, stderr); err != nil {
-			if method == InstallMethodAuto {
-				if stderr != nil {
-					fmt.Fprintf(stderr, "[rs] macOS binary install for R %s failed; falling back to source build\n", version)
-				}
-				_ = nativeRemoveAll(targetDir)
-				return installFromSource(version, targetDir, stdout, stderr)
-			}
-			return err
-		}
-		if err := sanityCheckManagedR(targetDir); err != nil {
-			if method == InstallMethodAuto {
-				if stderr != nil {
-					fmt.Fprintf(stderr, "[rs] macOS binary install for R %s was not runnable; falling back to source build\n", version)
-				}
-				_ = nativeRemoveAll(targetDir)
-				return installFromSource(version, targetDir, stdout, stderr)
-			}
-			return fmt.Errorf("managed macOS R install is not runnable: %w", err)
-		}
-		return nil
+		return installBinaryWithFallback(
+			version,
+			method,
+			targetDir,
+			stdout,
+			stderr,
+			"macOS",
+			func() error {
+				return installMacOSBinary(version, targetDir, stdout, stderr)
+			},
+		)
 	case installActionLinuxBinary:
-		return installLinuxBinary(version, distro, targetDir, stdout, stderr)
+		return installBinaryWithFallback(
+			version,
+			method,
+			targetDir,
+			stdout,
+			stderr,
+			"Linux",
+			func() error {
+				return installLinuxBinary(version, distro, targetDir, stdout, stderr)
+			},
+		)
 	default:
 		return fmt.Errorf("unsupported install action %q", action)
 	}
+}
+
+func installBinaryWithFallback(version string, method InstallMethod, targetDir string, stdout, stderr io.Writer, platform string, install func() error) error {
+	if err := install(); err != nil {
+		if method == InstallMethodAuto {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "[rs] %s binary install for R %s failed; falling back to source build\n", platform, version)
+			}
+			_ = nativeRemoveAll(targetDir)
+			return nativeInstallSrc(version, targetDir, stdout, stderr)
+		}
+		return err
+	}
+	if err := sanityCheckManagedR(targetDir); err != nil {
+		if method == InstallMethodAuto {
+			if stderr != nil {
+				fmt.Fprintf(stderr, "[rs] %s binary install for R %s was not runnable; falling back to source build\n", platform, version)
+			}
+			_ = nativeRemoveAll(targetDir)
+			return nativeInstallSrc(version, targetDir, stdout, stderr)
+		}
+		return fmt.Errorf("managed %s R install is not runnable: %w", platform, err)
+	}
+	return nil
 }
 
 var errBinaryProviderUnsupported = errors.New("binary R provider does not support this platform")

@@ -433,6 +433,48 @@ func TestSourceConfigureArgs(t *testing.T) {
 	}
 }
 
+func TestInstallBinaryWithFallbackFallsBackOnUnrunnableBinaryInAutoMode(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "managed-r")
+	if err := os.MkdirAll(filepath.Join(target, "bin"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	rscriptPath := filepath.Join(target, "bin", rscriptExecutableName())
+	if err := os.WriteFile(rscriptPath, []byte("#!/bin/sh\nexit 127\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	var stderr bytes.Buffer
+	fallbackCalled := false
+	oldCommand := nativeCommand
+	oldInstallSrc := nativeInstallSrc
+	t.Cleanup(func() {
+		nativeCommand = oldCommand
+		nativeInstallSrc = oldInstallSrc
+	})
+	nativeCommand = func(name string, args ...string) *exec.Cmd {
+		switch {
+		case name == rscriptPath:
+			return exec.Command("/bin/sh", "-c", "exit 127")
+		default:
+			return exec.Command(name, args...)
+		}
+	}
+	nativeInstallSrc = func(version, targetDir string, stdout, stderr io.Writer) error {
+		fallbackCalled = true
+		return nil
+	}
+
+	if err := installBinaryWithFallback("4.4.3", InstallMethodAuto, target, io.Discard, &stderr, "Linux", func() error { return nil }); err != nil {
+		t.Fatalf("installBinaryWithFallback() error = %v", err)
+	}
+	if !fallbackCalled {
+		t.Fatal("installBinaryWithFallback() did not trigger source fallback")
+	}
+	if !strings.Contains(stderr.String(), "Linux binary install for R 4.4.3 was not runnable; falling back to source build") {
+		t.Fatalf("stderr = %q, want auto fallback message", stderr.String())
+	}
+}
+
 var execLookPath = rscriptLookPath
 var execNativeLookPath = nativeLookPath
 
