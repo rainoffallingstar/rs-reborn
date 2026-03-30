@@ -329,6 +329,73 @@ func TestLinuxBinaryOSIdentifierRejectsUnsupportedDistro(t *testing.T) {
 	}
 }
 
+func TestResolveMacOSInstallRootUsesExpandedPkgTree(t *testing.T) {
+	root := t.TempDir()
+	rscriptPath := filepath.Join(root, "R-fw.pkg", "Payload", "R.framework", "Versions", "4.4-arm64", "Resources", "bin", rscriptExecutableName())
+	if err := os.MkdirAll(filepath.Dir(rscriptPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(rscriptPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	gotRoot, gotMode, err := resolveMacOSInstallRoot(root, filepath.Join(root, "scratch-payload"), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("resolveMacOSInstallRoot() error = %v", err)
+	}
+	wantRoot := filepath.Join(root, "R-fw.pkg", "Payload", "R.framework", "Versions", "4.4-arm64", "Resources")
+	if gotRoot != wantRoot {
+		t.Fatalf("resolveMacOSInstallRoot() root = %q, want %q", gotRoot, wantRoot)
+	}
+	if gotMode != "resources" {
+		t.Fatalf("resolveMacOSInstallRoot() mode = %q, want resources", gotMode)
+	}
+}
+
+func TestRewriteManagedRLauncherRewritesLinuxPrefix(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "managed-r")
+	launcherPath := filepath.Join(target, "bin", "R")
+	if err := os.MkdirAll(filepath.Dir(launcherPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	launcher := `#!/bin/bash
+R_HOME_DIR=/opt/R/4.4.3/lib/R
+if test "${R_HOME_DIR}" = "/opt/R/4.4.3/lib/R"; then
+   if [ -x "/opt/R/4.4.3/${libnn}/R/bin/exec/R" ]; then
+      R_HOME_DIR="/opt/R/4.4.3/${libnn}/R"
+   elif [ -x "/opt/R/4.4.3/${libnn_fallback}/R/bin/exec/R" ]; then
+      R_HOME_DIR="/opt/R/4.4.3/${libnn_fallback}/R"
+   fi
+fi
+R_SHARE_DIR=/opt/R/4.4.3/lib/R/share
+R_INCLUDE_DIR=/opt/R/4.4.3/lib/R/include
+R_DOC_DIR=/opt/R/4.4.3/lib/R/doc
+`
+	if err := os.WriteFile(launcherPath, []byte(launcher), 0o755); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if err := rewriteManagedRLauncher(launcherPath, target); err != nil {
+		t.Fatalf("rewriteManagedRLauncher() error = %v", err)
+	}
+
+	data, err := os.ReadFile(launcherPath)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "R_HOME_DIR="+shellSingleQuote(target)) {
+		t.Fatalf("launcher = %q, want rewritten R_HOME_DIR", text)
+	}
+	if !strings.Contains(text, "R_SHARE_DIR="+shellSingleQuote(filepath.Join(target, "share"))) {
+		t.Fatalf("launcher = %q, want rewritten R_SHARE_DIR", text)
+	}
+	if strings.Contains(text, "/opt/R/4.4.3/${libnn}/R") || strings.Contains(text, "/opt/R/4.4.3/${libnn_fallback}/R") {
+		t.Fatalf("launcher = %q, want linux fallback paths removed", text)
+	}
+}
+
 var execLookPath = rscriptLookPath
 var execNativeLookPath = nativeLookPath
 

@@ -112,11 +112,34 @@ func nativeInstallWithOptions(opts InstallOptions) error {
 		return err
 	}
 	if info, err := nativeStat(filepath.Join(targetDir, "bin", rscriptExecutableName())); err == nil && !info.IsDir() {
-		fmt.Fprintf(opts.Stdout, "R %s is already installed at %s\n", concrete, targetDir)
-		if _, err := nativeStat(currentPointerPath()); errors.Is(err, os.ErrNotExist) {
-			_ = setCurrentInstall(targetDir)
+		if err := repairManagedInstall(targetDir); err != nil {
+			if runtime.GOOS == "darwin" {
+				return fmt.Errorf("repair managed macOS R install: %w", err)
+			}
+			return fmt.Errorf("repair managed R install: %w", err)
 		}
-		return nil
+		if err := sanityCheckManagedR(targetDir); err != nil {
+			if method == InstallMethodAuto {
+				if opts.Stderr != nil {
+					if runtime.GOOS == "darwin" {
+						fmt.Fprintf(opts.Stderr, "[rs] existing managed macOS R %s is not runnable after repair; rebuilding from source\n", concrete)
+					} else {
+						fmt.Fprintf(opts.Stderr, "[rs] existing managed R %s is not runnable after repair; rebuilding from source\n", concrete)
+					}
+				}
+				if err := nativeRemoveAll(targetDir); err != nil {
+					return fmt.Errorf("remove broken managed R install: %w", err)
+				}
+			} else {
+				return fmt.Errorf("existing managed R install is not runnable: %w", err)
+			}
+		} else {
+			fmt.Fprintf(opts.Stdout, "R %s is already installed at %s\n", concrete, targetDir)
+			if _, err := nativeStat(currentPointerPath()); errors.Is(err, os.ErrNotExist) {
+				_ = setCurrentInstall(targetDir)
+			}
+			return nil
+		}
 	}
 
 	if err := nativeMkdirAll(filepath.Dir(metaPath), 0o755); err != nil {
@@ -250,7 +273,27 @@ func installConcreteVersion(version, selector string, method InstallMethod, targ
 	case installActionSource:
 		return installFromSource(version, targetDir, stdout, stderr)
 	case installActionMacOSBinary:
-		return installMacOSBinary(version, targetDir, stdout, stderr)
+		if err := installMacOSBinary(version, targetDir, stdout, stderr); err != nil {
+			if method == InstallMethodAuto {
+				if stderr != nil {
+					fmt.Fprintf(stderr, "[rs] macOS binary install for R %s failed; falling back to source build\n", version)
+				}
+				_ = nativeRemoveAll(targetDir)
+				return installFromSource(version, targetDir, stdout, stderr)
+			}
+			return err
+		}
+		if err := sanityCheckManagedR(targetDir); err != nil {
+			if method == InstallMethodAuto {
+				if stderr != nil {
+					fmt.Fprintf(stderr, "[rs] macOS binary install for R %s was not runnable; falling back to source build\n", version)
+				}
+				_ = nativeRemoveAll(targetDir)
+				return installFromSource(version, targetDir, stdout, stderr)
+			}
+			return fmt.Errorf("managed macOS R install is not runnable: %w", err)
+		}
+		return nil
 	case installActionLinuxBinary:
 		return installLinuxBinary(version, distro, targetDir, stdout, stderr)
 	default:
@@ -285,18 +328,7 @@ func installMacOSBinary(version, targetDir string, stdout, stderr io.Writer) err
 	}
 
 	payloadDir := filepath.Join(extractRoot, "payload")
-	if err := nativeMkdirAll(payloadDir, 0o755); err != nil {
-		return fmt.Errorf("create macOS payload dir: %w", err)
-	}
-	payloadPath, err := findPayloadFile(extractRoot)
-	if err != nil {
-		return err
-	}
-	if err := extractPkgPayload(payloadPath, payloadDir, stdout, stderr); err != nil {
-		return err
-	}
-
-	root, mode, err := normalizeExtractedRoot(payloadDir)
+	root, mode, err := resolveMacOSInstallRoot(extractRoot, payloadDir, stdout, stderr)
 	if err != nil {
 		return err
 	}
@@ -809,15 +841,290 @@ func installNormalizedRoot(root, mode, targetDir string) error {
 	}
 	switch mode {
 	case "resources":
+		if err := repairManagedInstall(targetDir); err != nil {
+			return err
+		}
 		if _, err := nativeStat(filepath.Join(targetDir, "bin", rscriptExecutableName())); err != nil {
 			return fmt.Errorf("normalized macOS install is missing %s: %w", filepath.Join(targetDir, "bin", rscriptExecutableName()), err)
 		}
 	default:
+		if err := repairManagedInstall(targetDir); err != nil {
+			return err
+		}
 		if _, err := nativeStat(filepath.Join(targetDir, "bin", rscriptExecutableName())); err != nil {
 			return fmt.Errorf("normalized install is missing %s: %w", filepath.Join(targetDir, "bin", rscriptExecutableName()), err)
 		}
 	}
 	return nil
+}
+
+func repairManagedInstall(targetDir string) error {
+	if runtime.GOOS == "darwin" {
+		if err := relinkMacOSInstallNames(targetDir); err != nil {
+			return err
+		}
+	}
+	return rewriteManagedLaunchers(targetDir)
+}
+
+func relinkMacOSInstallNames(targetDir string) error {
+	if _, err := nativeLookPath("otool"); err != nil {
+		return fmt.Errorf("macOS install relinking requires otool: %w", err)
+	}
+	if _, err := nativeLookPath("install_name_tool"); err != nil {
+		return fmt.Errorf("macOS install relinking requires install_name_tool: %w", err)
+	}
+	return nativeWalkDir(targetDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		return rewriteMacOSInstallNames(path, targetDir)
+	})
+}
+
+func rewriteMacOSInstallNames(path, targetDir string) error {
+	deps, err := macOSLoadCommands(path, "-L")
+	if err != nil || len(deps) == 0 {
+		return nil
+	}
+
+	oldRoot := ""
+	for _, dep := range deps {
+		if root, ok := macOSResourcesRoot(dep); ok {
+			oldRoot = root
+			break
+		}
+	}
+	if oldRoot == "" {
+		return nil
+	}
+
+	args := make([]string, 0, len(deps)*3+3)
+	if ids, err := macOSLoadCommands(path, "-D"); err == nil && len(ids) > 0 {
+		id := ids[0]
+		if strings.HasPrefix(id, oldRoot) {
+			args = append(args, "-id", targetDir+strings.TrimPrefix(id, oldRoot))
+		}
+	}
+	for _, dep := range deps {
+		if strings.HasPrefix(dep, oldRoot) {
+			args = append(args, "-change", dep, targetDir+strings.TrimPrefix(dep, oldRoot))
+		}
+	}
+	if len(args) == 0 {
+		return nil
+	}
+	args = append(args, path)
+	cmd := nativeCommand("install_name_tool", args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("rewrite macOS install names for %s: %v: %s", path, err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func macOSLoadCommands(path string, flag string) ([]string, error) {
+	cmd := nativeCommand("otool", flag, path)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(string(output), "\n")
+	out := make([]string, 0, len(lines))
+	for idx, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if idx == 0 {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		out = append(out, fields[0])
+	}
+	return out, nil
+}
+
+func macOSResourcesRoot(path string) (string, bool) {
+	marker := "/Resources"
+	idx := strings.Index(filepath.ToSlash(path), marker)
+	if idx == -1 {
+		return "", false
+	}
+	root := filepath.FromSlash(filepath.ToSlash(path)[:idx+len(marker)])
+	if strings.Contains(filepath.ToSlash(root), "/Library/Frameworks/R.framework/Versions/") {
+		return root, true
+	}
+	return "", false
+}
+
+func rewriteManagedLaunchers(targetDir string) error {
+	if err := rewriteManagedRLauncher(filepath.Join(targetDir, "bin", "R"), targetDir); err != nil {
+		return err
+	}
+	if runtime.GOOS == "darwin" {
+		if err := rewriteMacOSRenviron(filepath.Join(targetDir, "etc", "Renviron"), targetDir); err != nil {
+			return err
+		}
+	}
+	if err := installManagedRscriptWrapper(filepath.Join(targetDir, "bin", "Rscript"), targetDir); err != nil {
+		return err
+	}
+	topLevelRscript := filepath.Join(targetDir, "Rscript")
+	if _, err := nativeStat(topLevelRscript); err == nil {
+		_ = nativeRemoveAll(topLevelRscript)
+		if err := nativeSymlink(filepath.Join("bin", "Rscript"), topLevelRscript); err != nil {
+			return fmt.Errorf("create top-level Rscript symlink: %w", err)
+		}
+	}
+	return nil
+}
+
+func rewriteManagedRLauncher(path, targetDir string) error {
+	data, err := nativeReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read R launcher: %w", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	for idx, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "R_HOME_DIR="):
+			lines[idx] = "R_HOME_DIR=" + shellSingleQuote(targetDir)
+		case strings.HasPrefix(line, "R_SHARE_DIR="):
+			lines[idx] = "R_SHARE_DIR=" + shellSingleQuote(filepath.Join(targetDir, "share"))
+		case strings.HasPrefix(line, "R_INCLUDE_DIR="):
+			lines[idx] = "R_INCLUDE_DIR=" + shellSingleQuote(filepath.Join(targetDir, "include"))
+		case strings.HasPrefix(line, "R_DOC_DIR="):
+			lines[idx] = "R_DOC_DIR=" + shellSingleQuote(filepath.Join(targetDir, "doc"))
+		case strings.HasPrefix(line, `if test "${R_HOME_DIR}" = "`):
+			lines[idx] = `if test "${R_HOME_DIR}" = ` + shellSingleQuote(targetDir) + `; then`
+		case strings.Contains(line, `/Library/Frameworks/${libnn}/R"`), strings.Contains(line, `/Library/Frameworks/${libnn_fallback}/R"`),
+			strings.Contains(line, `/opt/R/`) && strings.Contains(line, `${libnn}`),
+			strings.Contains(line, `/opt/R/`) && strings.Contains(line, `${libnn_fallback}`):
+			lines[idx] = "\t     ## managed rs installs do not use system framework fallback paths"
+		}
+	}
+	content := strings.Join(lines, "\n")
+	info, err := nativeStat(path)
+	if err != nil {
+		return fmt.Errorf("stat R launcher: %w", err)
+	}
+	if err := nativeWriteFile(path, []byte(content), info.Mode()); err != nil {
+		return fmt.Errorf("write R launcher: %w", err)
+	}
+	return nil
+}
+
+func rewriteMacOSRenviron(path, targetDir string) error {
+	data, err := nativeReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read macOS Renviron: %w", err)
+	}
+	content := string(data)
+	content = strings.ReplaceAll(content, `/Library/Frameworks/R.framework/Resources/bin/qpdf`, filepath.Join(targetDir, "bin", "qpdf"))
+	info, err := nativeStat(path)
+	if err != nil {
+		return fmt.Errorf("stat macOS Renviron: %w", err)
+	}
+	if err := nativeWriteFile(path, []byte(content), info.Mode()); err != nil {
+		return fmt.Errorf("write macOS Renviron: %w", err)
+	}
+	return nil
+}
+
+func installManagedRscriptWrapper(path, targetDir string) error {
+	info, err := nativeStat(path)
+	if err != nil {
+		return fmt.Errorf("stat Rscript launcher: %w", err)
+	}
+	wrapper := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+
+R_HOME_DIR=%s
+export R_HOME="$R_HOME_DIR"
+export R_SHARE_DIR="$R_HOME/share"
+export R_INCLUDE_DIR="$R_HOME/include"
+export R_DOC_DIR="$R_HOME/doc"
+
+r_args=(--no-echo --no-restore)
+script=""
+script_args=()
+
+while (($#)); do
+  case "$1" in
+    --help)
+      cat <<'EOF'
+Usage: Rscript [options] file [args]
+   or: Rscript [options] -e expr [-e expr2 ...] [args]
+EOF
+      exit 0
+      ;;
+    --version)
+      exec "$R_HOME_DIR/bin/R" --version
+      ;;
+    --verbose|--default-packages=*)
+      r_args+=("$1")
+      shift
+      ;;
+    -e)
+      if (($# < 2)); then
+        echo "option '-e' requires a non-empty argument" >&2
+        exit 1
+      fi
+      r_args+=("-e" "$2")
+      shift 2
+      ;;
+    --)
+      shift
+      script_args=("$@")
+      break
+      ;;
+    -*)
+      r_args+=("$1")
+      shift
+      ;;
+    *)
+      script="$1"
+      shift
+      script_args=("$@")
+      break
+      ;;
+  esac
+done
+
+if [[ -n "$script" ]]; then
+  if ((${#script_args[@]})); then
+    exec "$R_HOME_DIR/bin/R" "${r_args[@]}" --file="$script" --args "${script_args[@]}"
+  fi
+  exec "$R_HOME_DIR/bin/R" "${r_args[@]}" --file="$script"
+fi
+
+if ((${#script_args[@]})); then
+  exec "$R_HOME_DIR/bin/R" "${r_args[@]}" --args "${script_args[@]}"
+fi
+
+exec "$R_HOME_DIR/bin/R" "${r_args[@]}"
+`, shellSingleQuote(targetDir))
+	if err := nativeWriteFile(path, []byte(wrapper), info.Mode()); err != nil {
+		return fmt.Errorf("write Rscript wrapper: %w", err)
+	}
+	return nil
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func copyTree(src, dst string) error {
@@ -1164,6 +1471,14 @@ func inspectRscriptVersion(path string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+func sanityCheckManagedR(targetDir string) error {
+	path := filepath.Join(targetDir, "bin", rscriptExecutableName())
+	if _, err := inspectRscriptVersion(path); err != nil {
+		return err
+	}
+	return nil
+}
+
 func nativeRExecutableName() string {
 	if runtime.GOOS == "windows" {
 		return "R.exe"
@@ -1172,27 +1487,122 @@ func nativeRExecutableName() string {
 }
 
 func findPayloadFile(root string) (string, error) {
-	var payload string
+	entries, err := findPayloadEntries(root)
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir {
+			return entry.Path, nil
+		}
+	}
+	return "", fmt.Errorf("could not find file-backed Payload inside macOS package")
+}
+
+type payloadEntry struct {
+	Path  string
+	IsDir bool
+}
+
+func findPayloadEntries(root string) ([]payloadEntry, error) {
+	var entries []payloadEntry
 	err := nativeWalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
-			return nil
-		}
 		if filepath.Base(path) == "Payload" {
-			payload = path
-			return io.EOF
+			entries = append(entries, payloadEntry{
+				Path:  path,
+				IsDir: d.IsDir(),
+			})
 		}
 		return nil
 	})
-	if errors.Is(err, io.EOF) && payload != "" {
-		return payload, nil
-	}
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return "", fmt.Errorf("could not find Payload inside macOS package")
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("could not find Payload inside macOS package")
+	}
+	slices.SortFunc(entries, func(left, right payloadEntry) int {
+		leftScore := payloadPriority(left.Path)
+		rightScore := payloadPriority(right.Path)
+		if leftScore != rightScore {
+			if leftScore > rightScore {
+				return -1
+			}
+			return 1
+		}
+		if left.IsDir != right.IsDir {
+			if left.IsDir {
+				return -1
+			}
+			return 1
+		}
+		return strings.Compare(left.Path, right.Path)
+	})
+	return entries, nil
+}
+
+func payloadPriority(path string) int {
+	lower := strings.ToLower(filepath.ToSlash(path))
+	switch {
+	case strings.Contains(lower, "/r-fw.pkg/"):
+		return 40
+	case strings.Contains(lower, "/r.pkg/"), strings.Contains(lower, "/r-core.pkg/"):
+		return 30
+	case strings.Contains(lower, "/r-app.pkg/"):
+		return 20
+	case strings.Contains(lower, "/tcltk.pkg/"):
+		return 10
+	case strings.Contains(lower, "/texinfo.pkg/"):
+		return 5
+	default:
+		return 0
+	}
+}
+
+func resolveMacOSInstallRoot(extractRoot, payloadDir string, stdout, stderr io.Writer) (string, string, error) {
+	if root, mode, err := normalizeExtractedRoot(extractRoot); err == nil {
+		return root, mode, nil
+	}
+
+	entries, err := findPayloadEntries(extractRoot)
+	if err != nil {
+		return "", "", err
+	}
+
+	var lastErr error
+	for _, entry := range entries {
+		if entry.IsDir {
+			root, mode, err := normalizeExtractedRoot(entry.Path)
+			if err == nil {
+				return root, mode, nil
+			}
+			lastErr = err
+			continue
+		}
+
+		if err := nativeRemoveAll(payloadDir); err != nil {
+			return "", "", fmt.Errorf("prepare macOS payload dir: %w", err)
+		}
+		if err := nativeMkdirAll(payloadDir, 0o755); err != nil {
+			return "", "", fmt.Errorf("create macOS payload dir: %w", err)
+		}
+		if err := extractPkgPayload(entry.Path, payloadDir, stdout, stderr); err != nil {
+			lastErr = err
+			continue
+		}
+		root, mode, err := normalizeExtractedRoot(payloadDir)
+		if err == nil {
+			return root, mode, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("could not find %s in expanded macOS package", rscriptExecutableName())
+	}
+	return "", "", lastErr
 }
 
 func extractPkgPayload(payloadPath, destination string, stdout, stderr io.Writer) error {
