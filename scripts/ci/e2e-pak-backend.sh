@@ -36,7 +36,7 @@ echo "==> initialize project and force pak backend"
 
 echo "==> run through pak backend"
 "$RS_BIN" lock "$SCRIPT_PATH" 2>&1 | tee "$TMP_DIR/lock.txt"
-grep -q 'installing via pak:' "$TMP_DIR/lock.txt"
+grep -Eq 'installing via pak:|installing packages via pak backend' "$TMP_DIR/lock.txt"
 if grep -q 'falling back to legacy' "$TMP_DIR/lock.txt"; then
   echo "unexpected legacy fallback while RS_INSTALL_BACKEND=pak"
   cat "$TMP_DIR/lock.txt"
