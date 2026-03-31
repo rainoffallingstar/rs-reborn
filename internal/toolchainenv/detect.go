@@ -234,6 +234,17 @@ func candidateForPreset(name, home string) (Candidate, error) {
 	if err != nil {
 		return Candidate{}, err
 	}
+	suggestedInitCommand := fmt.Sprintf("rs init --toolchain-preset %s", name)
+	originalPrefixes := append([]string(nil), prefixes...)
+	originalPkgConfig := append([]string(nil), pkgConfig...)
+	actualPrefixes, actualPkgConfig := detectedCandidatePaths(name, prefixes, pkgConfig)
+	if len(actualPrefixes) > 0 {
+		prefixes = actualPrefixes
+		pkgConfig = actualPkgConfig
+		if !slices.Equal(originalPrefixes, actualPrefixes) || !slices.Equal(originalPkgConfig, actualPkgConfig) {
+			suggestedInitCommand = explicitInitCommand(actualPrefixes, actualPkgConfig)
+		}
+	}
 	existingPrefixes := existingTemplatePaths(prefixes)
 	existingPkgConfig := existingTemplatePaths(pkgConfig)
 	return Candidate{
@@ -242,11 +253,35 @@ func candidateForPreset(name, home string) (Candidate, error) {
 		PkgConfigPath:         pkgConfig,
 		ExistingPrefixes:      existingPrefixes,
 		ExistingPkgConfigPath: existingPkgConfig,
-		SuggestedInitCommand:  fmt.Sprintf("rs init --toolchain-preset %s", name),
+		SuggestedInitCommand:  suggestedInitCommand,
 		SuggestedSetupCommand: suggestedSetupCommand(name, prefixes),
 		SuggestedSetupNote:    suggestedSetupNote(name, prefixes),
 		Complete:              len(existingPrefixes) == len(prefixes) && len(existingPkgConfig) == len(pkgConfig),
 	}, nil
+}
+
+func detectedCandidatePaths(name string, prefixes, pkgConfig []string) ([]string, []string) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+	switch name {
+	case "enva":
+		envName := strings.TrimSpace(filepath.Base(prefixes[0]))
+		if envName == "" {
+			return nil, nil
+		}
+		actualPrefixes := discoverEnvaEnvironmentPrefixes(os.Environ(), envName)
+		if len(actualPrefixes) == 0 {
+			return nil, nil
+		}
+		actualPkgConfig := pkgConfigPathsForPrefixes(actualPrefixes)
+		if len(existingTemplatePaths(actualPrefixes)) == 0 && len(existingTemplatePaths(actualPkgConfig)) == 0 {
+			return nil, nil
+		}
+		return actualPrefixes, actualPkgConfig
+	default:
+		return nil, nil
+	}
 }
 
 func resolveBootstrappedCandidate(candidate Candidate, env []string) *Candidate {

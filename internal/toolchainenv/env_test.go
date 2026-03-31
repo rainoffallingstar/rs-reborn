@@ -444,6 +444,57 @@ func TestBootstrapResolvesAdoptedEnvaPrefix(t *testing.T) {
 	}
 }
 
+func TestRecommendedCandidatePrefersAdoptedEnvaOverMamba(t *testing.T) {
+	oldOutput := detectOutput
+	t.Cleanup(func() {
+		detectOutput = oldOutput
+	})
+
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	envaPath := writeToolExecutable(t, binDir, "enva")
+	writeToolExecutable(t, binDir, "mamba")
+	t.Setenv("PATH", binDir)
+
+	actualPrefix := filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")
+	for _, path := range []string{
+		actualPrefix,
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps", "lib", "pkgconfig"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps", "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	detectOutput = func(name string, args []string, env []string) (string, error) {
+		if name != envaPath {
+			t.Fatalf("name = %q, want %q", name, envaPath)
+		}
+		if !reflect.DeepEqual(args, []string{"list"}) {
+			t.Fatalf("args = %v, want [list]", args)
+		}
+		return "Name | Owner | Prefixes\nrs-sysdeps | rattler | " + actualPrefix + "\n", nil
+	}
+
+	candidate, err := RecommendedCandidate(dir)
+	if err != nil {
+		t.Fatalf("RecommendedCandidate() error = %v", err)
+	}
+	if candidate == nil || candidate.Preset != "enva" {
+		t.Fatalf("candidate = %#v, want enva", candidate)
+	}
+	if !reflect.DeepEqual(candidate.ToolchainPrefixes, []string{actualPrefix}) {
+		t.Fatalf("candidate.ToolchainPrefixes = %v", candidate.ToolchainPrefixes)
+	}
+	if candidate.SuggestedInitCommand != "rs init --toolchain-prefix "+actualPrefix+" --pkg-config-path "+filepath.Join(actualPrefix, "lib", "pkgconfig")+" --pkg-config-path "+filepath.Join(actualPrefix, "share", "pkgconfig") {
+		t.Fatalf("candidate.SuggestedInitCommand = %q", candidate.SuggestedInitCommand)
+	}
+}
+
 func TestResolvePresetSupportsEnvaMambaAndConda(t *testing.T) {
 	dir := t.TempDir()
 
@@ -523,6 +574,60 @@ func TestCandidateFromEnvironmentHeuristicallyMatchesAdoptedEnvaPrefix(t *testin
 	}
 	if !reflect.DeepEqual(candidate.ToolchainPrefixes, []string{actualPrefix}) {
 		t.Fatalf("candidate.ToolchainPrefixes = %v", candidate.ToolchainPrefixes)
+	}
+}
+
+func TestMergeWithDetectedUsesAdoptedEnvaPrefixWhenUnset(t *testing.T) {
+	oldOutput := detectOutput
+	t.Cleanup(func() {
+		detectOutput = oldOutput
+	})
+
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	envaPath := writeToolExecutable(t, binDir, "enva")
+	writeToolExecutable(t, binDir, "mamba")
+	t.Setenv("PATH", binDir)
+
+	actualPrefix := filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")
+	for _, path := range []string{
+		actualPrefix,
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps", "lib", "pkgconfig"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps", "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	detectOutput = func(name string, args []string, env []string) (string, error) {
+		if name != envaPath {
+			t.Fatalf("name = %q, want %q", name, envaPath)
+		}
+		if !reflect.DeepEqual(args, []string{"list"}) {
+			t.Fatalf("args = %v, want [list]", args)
+		}
+		return "Name | Owner | Prefixes\nrs-sysdeps | rattler | " + actualPrefix + "\n", nil
+	}
+
+	prefixes, pkgConfig, candidate, err := MergeWithDetected(nil, nil, dir)
+	if err != nil {
+		t.Fatalf("MergeWithDetected() error = %v", err)
+	}
+	if candidate == nil || candidate.Preset != "enva" {
+		t.Fatalf("candidate = %#v, want enva", candidate)
+	}
+	if !reflect.DeepEqual(prefixes, []string{actualPrefix}) {
+		t.Fatalf("prefixes = %v", prefixes)
+	}
+	if !reflect.DeepEqual(pkgConfig, []string{
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+	}) {
+		t.Fatalf("pkgConfig = %v", pkgConfig)
 	}
 }
 
