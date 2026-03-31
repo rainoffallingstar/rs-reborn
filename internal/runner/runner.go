@@ -3807,6 +3807,7 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 	return installer.Request{
 		Interpreter: env.Interpreter,
 		WorkDir:     filepath.Dir(env.ScriptPath),
+		CacheRoot:   env.CacheRoot,
 		LibraryPath: env.LibraryPath,
 		Repo:        env.Repo,
 		Environment: toolchainenv.Apply(os.Environ(), effectivePrefixes, effectivePkgConfig),

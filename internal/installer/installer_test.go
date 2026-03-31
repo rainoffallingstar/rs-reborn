@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"reflect"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -272,6 +274,67 @@ func TestBuildInstallCommandWrapsEnvaToolchainRun(t *testing.T) {
 	want := []string{"run", "rs-sysdeps", "--", "/usr/bin/R", "CMD", "INSTALL", "-l", filepath.Join(dir, "lib"), filepath.Join(dir, "pkg.tar.gz")}
 	if !reflect.DeepEqual(cmd.Args[1:], want) {
 		t.Fatalf("cmd.Args = %v, want %v", cmd.Args[1:], want)
+	}
+	if !slices.Contains(cmd.Env, "MAKEFLAGS=-j"+strconv.Itoa(defaultInstallJobs())) {
+		t.Fatalf("cmd.Env missing default MAKEFLAGS: %v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, "CMAKE_BUILD_PARALLEL_LEVEL="+strconv.Itoa(defaultInstallJobs())) {
+		t.Fatalf("cmd.Env missing default CMAKE_BUILD_PARALLEL_LEVEL: %v", cmd.Env)
+	}
+}
+
+func TestBuildInstallCommandPreservesExplicitParallelBuildEnv(t *testing.T) {
+	dir := t.TempDir()
+	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "lib"), []string{
+		"PATH=/usr/bin",
+		"MAKEFLAGS=-j32",
+		"CMAKE_BUILD_PARALLEL_LEVEL=32",
+	}, filepath.Join(dir, "pkg.tar.gz"))
+	if err != nil {
+		t.Fatalf("buildInstallCommand() error = %v", err)
+	}
+	if !slices.Contains(cmd.Env, "MAKEFLAGS=-j32") || !slices.Contains(cmd.Env, "CMAKE_BUILD_PARALLEL_LEVEL=32") {
+		t.Fatalf("cmd.Env = %v", cmd.Env)
+	}
+	if slices.Contains(cmd.Env, "MAKEFLAGS=-j"+strconv.Itoa(defaultInstallJobs())) {
+		t.Fatalf("cmd.Env should preserve explicit MAKEFLAGS: %v", cmd.Env)
+	}
+}
+
+func TestDownloadReusesPersistentCache(t *testing.T) {
+	dir := t.TempDir()
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte("archive-bytes"))
+	}))
+	defer server.Close()
+
+	inst := nativeInstaller{
+		tempRoot:     filepath.Join(dir, "tmp"),
+		downloadRoot: filepath.Join(dir, "downloads"),
+		stderr:       io.Discard,
+		httpClient:   server.Client(),
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+
+	first, err := inst.download(server.URL+"/pkg.tar.gz", "pkg_1.0.0.tar.gz")
+	if err != nil {
+		t.Fatalf("download(first) error = %v", err)
+	}
+	second, err := inst.download(server.URL+"/pkg.tar.gz", "pkg_1.0.0.tar.gz")
+	if err != nil {
+		t.Fatalf("download(second) error = %v", err)
+	}
+	if first != second {
+		t.Fatalf("download paths differ: %q vs %q", first, second)
+	}
+	if hits != 1 {
+		t.Fatalf("download server hits = %d, want 1", hits)
 	}
 }
 

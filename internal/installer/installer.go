@@ -55,6 +55,7 @@ type Runtime struct {
 type Request struct {
 	Interpreter string
 	WorkDir     string
+	CacheRoot   string
 	LibraryPath string
 	Repo        string
 	Environment []string
@@ -71,6 +72,7 @@ type nativeInstaller struct {
 
 	rBinary           string
 	tempRoot          string
+	downloadRoot      string
 	metaDir           string
 	stdout            io.Writer
 	stderr            io.Writer
@@ -276,6 +278,10 @@ func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {
 	}
 
 	metaDir := filepath.Join(req.LibraryPath, ".rs-source-meta")
+	downloadRoot := filepath.Join(tempRoot, "downloads")
+	if strings.TrimSpace(req.CacheRoot) != "" {
+		downloadRoot = filepath.Join(req.CacheRoot, "downloads")
+	}
 	if prepareLibrary {
 		if err := os.MkdirAll(metaDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create source metadata dir: %w", err)
@@ -288,6 +294,7 @@ func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {
 	inst := nativeInstaller{
 		req:               req,
 		tempRoot:          tempRoot,
+		downloadRoot:      downloadRoot,
 		metaDir:           metaDir,
 		stdout:            stdout,
 		stderr:            stderr,
@@ -299,6 +306,9 @@ func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {
 		requirements:      map[string][]constraintRequest{},
 		cranArchiveLoaded: map[string]bool{},
 		selectedVersions:  map[string]string{},
+	}
+	if err := os.MkdirAll(inst.downloadRoot, 0o755); err != nil {
+		return nil, fmt.Errorf("create download cache dir: %w", err)
 	}
 
 	if req.Runtime.RVersion == "" {
@@ -1008,7 +1018,7 @@ func (i *nativeInstaller) runRCommandInstall(target string) error {
 }
 
 func buildInstallCommand(rBinary, workDir, libraryPath string, env []string, target string) (*exec.Cmd, error) {
-	installEnv := withLibraryEnv(env, libraryPath)
+	installEnv := withInstallEnv(withLibraryEnv(env, libraryPath))
 	wrappedName, wrappedArgs, wrappedEnv, _, err := toolchainenv.WrapCommand(
 		rBinary,
 		[]string{"CMD", "INSTALL", "-l", libraryPath, target},
@@ -1024,6 +1034,12 @@ func buildInstallCommand(rBinary, workDir, libraryPath string, env []string, tar
 }
 
 func (i *nativeInstaller) download(rawURL, name string) (string, error) {
+	target := filepath.Join(i.downloadRoot, downloadCacheName(rawURL, name))
+	if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 {
+		progresscmd.Stage(i.stderr, "reusing cached "+name)
+		return target, nil
+	}
+
 	i.stage("downloading " + name)
 	resp, err := getWithRetry(i.httpClient, rawURL)
 	if err != nil {
@@ -1034,7 +1050,6 @@ func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 		return "", fmt.Errorf("unexpected HTTP %d from %s", resp.StatusCode, rawURL)
 	}
 
-	target := filepath.Join(i.tempRoot, name)
 	file, err := os.Create(target)
 	if err != nil {
 		return "", err
@@ -1045,6 +1060,11 @@ func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 		return "", err
 	}
 	return target, nil
+}
+
+func downloadCacheName(rawURL, name string) string {
+	sum := sha256.Sum256([]byte(rawURL))
+	return fmt.Sprintf("%x-%s", sum[:8], name)
 }
 
 func (i *nativeInstaller) cloneGitSource(rawURL, ref, pkg, tokenEnv string) (string, error) {
@@ -2094,6 +2114,43 @@ func withLibraryEnv(env []string, libraryPath string) []string {
 	}
 	filtered = append(filtered, "R_LIBS="+libraryPath, "R_LIBS_USER="+libraryPath)
 	return filtered
+}
+
+func withInstallEnv(env []string) []string {
+	if len(env) == 0 {
+		env = os.Environ()
+	}
+	filtered := make([]string, 0, len(env)+4)
+	hasMakeflags := false
+	hasCMake := false
+	for _, entry := range env {
+		switch {
+		case strings.HasPrefix(entry, "MAKEFLAGS="):
+			hasMakeflags = true
+		case strings.HasPrefix(entry, "CMAKE_BUILD_PARALLEL_LEVEL="):
+			hasCMake = true
+		}
+		filtered = append(filtered, entry)
+	}
+	jobs := strconv.Itoa(defaultInstallJobs())
+	if !hasMakeflags {
+		filtered = append(filtered, "MAKEFLAGS=-j"+jobs)
+	}
+	if !hasCMake {
+		filtered = append(filtered, "CMAKE_BUILD_PARALLEL_LEVEL="+jobs)
+	}
+	return filtered
+}
+
+func defaultInstallJobs() int {
+	jobs := runtime.NumCPU()
+	if jobs < 1 {
+		return 1
+	}
+	if jobs > 8 {
+		return 8
+	}
+	return jobs
 }
 
 func runCommand(workDir string, progress, errors io.Writer, label string, name string, args ...string) error {

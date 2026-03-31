@@ -578,9 +578,11 @@ func TestRuntimeEnvAutoDetectsToolchainWhenUnset(t *testing.T) {
 func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 	prefix := testCommandPath("/opt/demo")
 	pkgConfig := filepath.Join(prefix, "custom-pkgconfig")
+	cacheRoot := t.TempDir()
 	req, err := installerRequestFromEnvironment(ResolvedEnvironment{
 		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
 		Interpreter: "/tmp/Rscript",
+		CacheRoot:   cacheRoot,
 		LibraryPath: t.TempDir(),
 		Repo:        "https://cloud.r-project.org",
 		Runtime: RuntimeMetadata{
@@ -592,6 +594,9 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 	}, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("installerRequestFromEnvironment() error = %v", err)
+	}
+	if req.CacheRoot != cacheRoot {
+		t.Fatalf("req.CacheRoot = %q, want %q", req.CacheRoot, cacheRoot)
 	}
 	var sawPrefix, sawPkg bool
 	for _, entry := range req.Environment {
