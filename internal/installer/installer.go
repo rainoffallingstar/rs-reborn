@@ -994,14 +994,31 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 }
 
 func (i *nativeInstaller) runRCommandInstall(target string) error {
-	cmd := exec.Command(i.rBinary, "CMD", "INSTALL", "-l", i.req.LibraryPath, target)
-	cmd.Dir = i.req.WorkDir
-	cmd.Env = withLibraryEnv(i.req.Environment, i.req.LibraryPath)
+	cmd, err := buildInstallCommand(i.rBinary, i.req.WorkDir, i.req.LibraryPath, i.req.Environment, target)
+	if err != nil {
+		return err
+	}
 	label := fmt.Sprintf("installing R package %s", filepath.Base(target))
 	if err := progresscmd.Run(cmd, label, i.stderr, i.stderr); err != nil {
 		return err
 	}
 	return nil
+}
+
+func buildInstallCommand(rBinary, workDir, libraryPath string, env []string, target string) (*exec.Cmd, error) {
+	installEnv := withLibraryEnv(env, libraryPath)
+	wrappedName, wrappedArgs, wrappedEnv, _, err := toolchainenv.WrapCommand(
+		rBinary,
+		[]string{"CMD", "INSTALL", "-l", libraryPath, target},
+		installEnv,
+	)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(wrappedName, wrappedArgs...)
+	cmd.Dir = workDir
+	cmd.Env = wrappedEnv
+	return cmd, nil
 }
 
 func (i *nativeInstaller) download(rawURL, name string) (string, error) {

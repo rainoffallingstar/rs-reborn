@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"gr/internal/project"
+	"gr/internal/toolchainenv"
 )
 
 func setTestHomeDir(t *testing.T, dir string) {
@@ -221,6 +222,41 @@ func TestGitHubCloneURLSupportsEnterpriseHost(t *testing.T) {
 	}
 	if host != "github.example.com/api/v3" {
 		t.Fatalf("host = %q", host)
+	}
+}
+
+func TestBuildInstallCommandWrapsEnvaToolchainRun(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	envaName := "enva"
+	if installerGOOS == "windows" {
+		envaName += ".exe"
+	}
+	envaPath := filepath.Join(binDir, envaName)
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(binDir) error = %v", err)
+	}
+	if err := os.WriteFile(envaPath, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(enva) error = %v", err)
+	}
+
+	prefix := filepath.Join(dir, ".local", "share", "rattler", "envs", "rs-sysdeps")
+	env := toolchainenv.Apply([]string{"PATH=" + binDir}, []string{prefix}, []string{
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+	})
+
+	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "lib"), env, filepath.Join(dir, "pkg.tar.gz"))
+	if err != nil {
+		t.Fatalf("buildInstallCommand() error = %v", err)
+	}
+	if cmd.Path != envaPath {
+		t.Fatalf("cmd.Path = %q, want %q", cmd.Path, envaPath)
+	}
+	want := []string{"run", "rs-sysdeps", "--", "/usr/bin/R", "CMD", "INSTALL", "-l", filepath.Join(dir, "lib"), filepath.Join(dir, "pkg.tar.gz")}
+	if !reflect.DeepEqual(cmd.Args[1:], want) {
+		t.Fatalf("cmd.Args = %v, want %v", cmd.Args[1:], want)
 	}
 }
 

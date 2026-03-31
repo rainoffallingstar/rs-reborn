@@ -10,6 +10,28 @@ import (
 	"testing"
 )
 
+func setTestHomeDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
+func writeToolExecutable(t *testing.T, dir, name string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", dir, err)
+	}
+	fileName := name
+	if runtime.GOOS == "windows" {
+		fileName += ".exe"
+	}
+	path := filepath.Join(dir, fileName)
+	if err := os.WriteFile(path, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
 func TestApplyPrependsPrefixesAndPkgConfigPaths(t *testing.T) {
 	root := filepath.Join(string(filepath.Separator), "opt", "demo")
 	customPkg := filepath.Join(string(filepath.Separator), "custom", "pkgconfig")
@@ -397,5 +419,78 @@ func TestResolvePresetSupportsEnvaMambaAndConda(t *testing.T) {
 	}
 	if !reflect.DeepEqual(prefixes, []string{filepath.Join(dir, ".conda", "envs", "rs-sysdeps")}) {
 		t.Fatalf("ResolvePreset(conda) prefixes = %v", prefixes)
+	}
+}
+
+func TestCandidateFromPathsMatchesEnvaPreset(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+
+	prefixes, pkgConfig, err := ResolvePreset("enva", dir)
+	if err != nil {
+		t.Fatalf("ResolvePreset(enva) error = %v", err)
+	}
+	candidate, err := CandidateFromPaths(prefixes, pkgConfig, "")
+	if err != nil {
+		t.Fatalf("CandidateFromPaths() error = %v", err)
+	}
+	if candidate == nil || candidate.Preset != "enva" {
+		t.Fatalf("candidate = %#v, want enva", candidate)
+	}
+}
+
+func TestWrapCommandUsesEnvaRunForManagedToolchain(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	envaPath := writeToolExecutable(t, binDir, "enva")
+
+	prefixes, pkgConfig, err := ResolvePreset("enva", dir)
+	if err != nil {
+		t.Fatalf("ResolvePreset(enva) error = %v", err)
+	}
+	env := Apply([]string{"PATH=" + binDir}, prefixes, pkgConfig)
+
+	name, args, _, wrapped, err := WrapCommand("R", []string{"CMD", "INSTALL", "pkg.tar.gz"}, env)
+	if err != nil {
+		t.Fatalf("WrapCommand() error = %v", err)
+	}
+	if !wrapped {
+		t.Fatal("WrapCommand() wrapped = false, want true")
+	}
+	if name != envaPath {
+		t.Fatalf("name = %q, want %q", name, envaPath)
+	}
+	wantArgs := []string{"run", "rs-sysdeps", "--", "R", "CMD", "INSTALL", "pkg.tar.gz"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestWrapCommandUsesMicromambaRunForManagedToolchain(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	micromambaPath := writeToolExecutable(t, binDir, "micromamba")
+
+	prefixes, pkgConfig, err := ResolvePreset("micromamba", dir)
+	if err != nil {
+		t.Fatalf("ResolvePreset(micromamba) error = %v", err)
+	}
+	env := Apply([]string{"PATH=" + binDir}, prefixes, pkgConfig)
+
+	name, args, _, wrapped, err := WrapCommand("R", []string{"CMD", "INSTALL", "pkg.tar.gz"}, env)
+	if err != nil {
+		t.Fatalf("WrapCommand() error = %v", err)
+	}
+	if !wrapped {
+		t.Fatal("WrapCommand() wrapped = false, want true")
+	}
+	if name != micromambaPath {
+		t.Fatalf("name = %q, want %q", name, micromambaPath)
+	}
+	wantArgs := []string{"run", "-p", prefixes[0], "--", "R", "CMD", "INSTALL", "pkg.tar.gz"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Fatalf("args = %v, want %v", args, wantArgs)
 	}
 }
