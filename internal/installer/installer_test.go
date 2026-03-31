@@ -456,6 +456,19 @@ func TestInstallPlanLayersIgnoresDependenciesOutsidePlan(t *testing.T) {
 	}
 }
 
+func TestCanParallelInstallPurePackagesDisablesWindows(t *testing.T) {
+	oldGOOS := installerGOOS
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+	})
+	installerGOOS = "windows"
+
+	inst := nativeInstaller{stderr: io.Discard}
+	if inst.canParallelInstallPurePackages() {
+		t.Fatal("canParallelInstallPurePackages() = true, want false on windows")
+	}
+}
+
 func TestDownloadReusesPersistentCache(t *testing.T) {
 	dir := t.TempDir()
 	var hits int

@@ -288,6 +288,9 @@ func Install(req Request) error {
 }
 
 func (i *nativeInstaller) canParallelInstallPurePackages() bool {
+	if installerGOOS == "windows" {
+		return false
+	}
 	if writerIsTTY(i.stderr) {
 		return false
 	}
