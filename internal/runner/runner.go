@@ -3879,12 +3879,13 @@ for (pkg in pkgs) {
   }
 }`
 
-	cmd := exec.Command(env.Interpreter, "-e", script)
-	cmd.Stderr = env.Stderr
-	cmd.Dir = filepath.Dir(env.ScriptPath)
-	cmd.Env = append(runtimeEnv(env, false), "RS_ALL_DEPS="+strings.Join(allDeps(env), ","))
-
-	output, err := cmd.Output()
+	output, err := runRIntrospectionScript(
+		env.Interpreter,
+		filepath.Dir(env.ScriptPath),
+		env.Stderr,
+		script,
+		append(runtimeEnv(env, false), "RS_ALL_DEPS="+strings.Join(allDeps(env), ",")),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("inspect installed packages: %w", err)
 	}
@@ -3908,6 +3909,10 @@ for (pkg in pkgs) {
 
 	packages := make([]lockfile.Package, 0, len(lines))
 	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
 		fields := strings.Split(line, "\t")
 		if len(fields) < 2 {
 			continue
@@ -4841,33 +4846,7 @@ cat("arch\t", R.version$arch, "\n", sep = "")
 cat("os\t", R.version$os, "\n", sep = "")
 cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")
 `
-	tempDir := ""
-	if info, err := os.Stat(workDir); err == nil && info.IsDir() {
-		tempDir = workDir
-	}
-	tmpFile, err := os.CreateTemp(tempDir, "rs-inspect-*.R")
-	if err != nil {
-		return RuntimeMetadata{}, fmt.Errorf("prepare runtime inspection script: %w", err)
-	}
-	tmpPath := tmpFile.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmpFile.WriteString(script); err != nil {
-		_ = tmpFile.Close()
-		return RuntimeMetadata{}, fmt.Errorf("write runtime inspection script: %w", err)
-	}
-	if err := tmpFile.Close(); err != nil {
-		return RuntimeMetadata{}, fmt.Errorf("close runtime inspection script: %w", err)
-	}
-
-	cmd := exec.Command(interpreter, "--vanilla", tmpPath)
-	if tempDir != "" {
-		cmd.Dir = tempDir
-	}
-	if stderr != nil {
-		cmd.Stderr = stderr
-	}
-
-	output, err := cmd.Output()
+	output, err := runRIntrospectionScript(interpreter, workDir, stderr, script, nil)
 	if err != nil {
 		return RuntimeMetadata{}, fmt.Errorf("inspect R runtime: %w", err)
 	}
@@ -4877,6 +4856,7 @@ cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")
 		InterpreterKind: classifyInterpreterKind(interpreter),
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -4884,6 +4864,7 @@ cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")
 		if !ok {
 			continue
 		}
+		value = strings.TrimSpace(value)
 		switch key {
 		case "version":
 			meta.RVersion = value
@@ -4898,6 +4879,43 @@ cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")
 		}
 	}
 	return meta, nil
+}
+
+func runRIntrospectionScript(interpreter, workDir string, stderr io.Writer, script string, env []string) ([]byte, error) {
+	tempDir := ""
+	if info, err := os.Stat(workDir); err == nil && info.IsDir() {
+		tempDir = workDir
+	}
+	tmpFile, err := os.CreateTemp(tempDir, "rs-inspect-*.R")
+	if err != nil {
+		return nil, fmt.Errorf("prepare R introspection script: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmpFile.WriteString(script); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("write R introspection script: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("close R introspection script: %w", err)
+	}
+
+	cmd := exec.Command(interpreter, "--vanilla", tmpPath)
+	if tempDir != "" {
+		cmd.Dir = tempDir
+	}
+	if stderr != nil {
+		cmd.Stderr = stderr
+	}
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return output, nil
 }
 
 func classifyInterpreterKind(interpreter string) string {

@@ -167,6 +167,9 @@ path = "vendor/scriptpkg_0.2.0.tar.gz"
 		t.Fatalf("Defaults.RVersion = %q", cfg.Defaults.RVersion)
 	}
 	absDemo := filepath.Join(string(filepath.Separator), "opt", "demo")
+	if runtime.GOOS == "windows" && !filepath.IsAbs(absDemo) {
+		absDemo = filepath.Join(dir, "opt", "demo")
+	}
 	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{filepath.Join(dir, ".toolchain"), absDemo}) {
 		t.Fatalf("Defaults.ToolchainPrefixes = %v", cfg.Defaults.ToolchainPrefixes)
 	}

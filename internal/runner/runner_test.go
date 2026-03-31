@@ -176,13 +176,13 @@ EOF
 chmod +x "$prefix/bin/pkg-config"
 `
 	windowsScript := `@echo off
-setlocal EnableDelayedExpansion
+setlocal
 set "prefix="
 :parse
 if "%~1"=="" goto doneparse
 if /I "%~1"=="-p" (
+	set "prefix=%~2"
 	shift
-	set "prefix=%~1"
 )
 shift
 goto parse
@@ -1964,7 +1964,7 @@ func TestCollectSourceAvailabilityIssues(t *testing.T) {
 		"missinggit": {
 			Package: "missinggit",
 			Type:    "git",
-			URL:     "file://" + filepath.Join(dir, "missing-repo"),
+			URL:     testFileURL(filepath.Join(dir, "missing-repo")),
 		},
 		"remotegit": {
 			Package: "remotegit",
@@ -3768,7 +3768,7 @@ func TestCollectProjectScriptPathsSkipsCacheDirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collectProjectScriptPaths() error = %v", err)
 	}
-	if len(paths) != 1 || !strings.HasSuffix(paths[0], "scripts/a.R") {
+	if len(paths) != 1 || paths[0] != filepath.Join(dir, "scripts", "a.R") {
 		t.Fatalf("collectProjectScriptPaths() = %v", paths)
 	}
 }
