@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ var (
 	installerGOOS     = runtime.GOOS
 	installerLookPath = exec.LookPath
 	installerReadFile = os.ReadFile
+	installerRunCmd   = func(cmd *exec.Cmd) error { return cmd.Run() }
 )
 
 type Runtime struct {
@@ -1912,6 +1914,15 @@ func ensureLinuxSourceBuildTools(pkg string, env []string) error {
 	}
 	missing := missingLinuxSourceBuildTools(env)
 	if len(missing) == 0 {
+		if err := verifyLinuxSourceToolchain(env); err != nil {
+			return fmt.Errorf(
+				"package %s requires Linux source build tools, but the detected C/C++ toolchain could not compile a test program\nnext step: verify the active compiler toolchain can link executables (for example with `%s`)\nnext step: %s\nprobe: %s",
+				pkg,
+				strings.TrimSpace(toolchainProbeExample(env)),
+				rootlessToolchainAdvice(),
+				err,
+			)
+		}
 		return nil
 	}
 	advice := linuxSourceBuildAdvice()
@@ -1948,6 +1959,79 @@ func findInstallerTool(name string, env []string) (string, error) {
 		return installerLookPath(name)
 	}
 	return toolchainenv.FindInPath(name, env)
+}
+
+func verifyLinuxSourceToolchain(env []string) error {
+	tmpDir, err := os.MkdirTemp("", "gr-toolchain-smoke-*")
+	if err != nil {
+		return fmt.Errorf("prepare toolchain smoke test: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	sourcePath := filepath.Join(tmpDir, "main.cpp")
+	outputPath := filepath.Join(tmpDir, "main")
+	if err := os.WriteFile(sourcePath, []byte("int main() { return 0; }\n"), 0o644); err != nil {
+		return fmt.Errorf("write toolchain smoke source: %w", err)
+	}
+
+	name, args, wrappedEnv, wrapped, err := toolchainenv.WrapCommand("g++", []string{sourcePath, "-o", outputPath}, env)
+	if err != nil {
+		return fmt.Errorf("prepare toolchain smoke command: %w", err)
+	}
+	if !wrapped {
+		resolved, err := findInstallerTool("g++", env)
+		if err != nil {
+			return fmt.Errorf("resolve g++ for toolchain smoke test: %w", err)
+		}
+		name = resolved
+	}
+	cmd := exec.Command(name, args...)
+	cmd.Dir = tmpDir
+	cmd.Env = wrappedEnv
+	output, runErr := cmd.CombinedOutput()
+	if runErr == nil {
+		return nil
+	}
+	summary := strings.TrimSpace(string(output))
+	if summary == "" {
+		summary = runErr.Error()
+	} else {
+		lines := strings.Split(summary, "\n")
+		if len(lines) > 8 {
+			lines = lines[:8]
+		}
+		summary = strings.Join(lines, " | ")
+	}
+	return fmt.Errorf("%s: %s", shellQuoteCommand(name, args), summary)
+}
+
+func toolchainProbeExample(env []string) string {
+	candidate, err := toolchainenv.CandidateFromEnvironment(env)
+	if err != nil || candidate == nil {
+		return `g++ smoke.cpp -o smoke`
+	}
+	switch candidate.Preset {
+	case "enva":
+		return `enva run rs-sysdeps -- g++ smoke.cpp -o smoke`
+	case "micromamba", "mamba", "conda":
+		if len(candidate.ToolchainPrefixes) > 0 {
+			return fmt.Sprintf(`%s run -p "%s" -- g++ smoke.cpp -o smoke`, candidate.Preset, candidate.ToolchainPrefixes[0])
+		}
+	}
+	return `g++ smoke.cpp -o smoke`
+}
+
+func shellQuoteCommand(name string, args []string) string {
+	parts := append([]string{name}, args...)
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.ContainsAny(part, " \t\"'") {
+			quoted = append(quoted, strconv.Quote(part))
+			continue
+		}
+		quoted = append(quoted, part)
+	}
+	return strings.Join(quoted, " ")
 }
 
 func linuxSourceBuildAdvice() string {

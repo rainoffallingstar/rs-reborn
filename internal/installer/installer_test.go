@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -23,6 +24,20 @@ func setTestHomeDir(t *testing.T, dir string) {
 	t.Helper()
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
+}
+
+func writeTestCommand(t *testing.T, dir, name, unixScript, windowsScript string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	script := unixScript
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+		script = windowsScript
+	}
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
 }
 
 func TestParseDependenciesDropsRAndVersionConstraints(t *testing.T) {
@@ -407,6 +422,47 @@ func TestEnsureLinuxSourceBuildToolsUsesDistroAdvice(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "rs doctor --toolchain-only") {
 		t.Fatalf("ensureLinuxSourceBuildTools() error missing toolchain-only guidance = %v", err)
+	}
+}
+
+func TestEnsureLinuxSourceBuildToolsFailsWhenCompilerCannotLink(t *testing.T) {
+	oldGOOS := installerGOOS
+	oldReadFile := installerReadFile
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+		installerReadFile = oldReadFile
+	})
+	installerGOOS = "linux"
+	installerReadFile = func(path string) ([]byte, error) {
+		if path != "/etc/os-release" {
+			return nil, errors.New("unexpected path")
+		}
+		return []byte("ID=ubuntu\n"), nil
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(binDir) error = %v", err)
+	}
+	successUnix := "#!/bin/sh\nexit 0\n"
+	successWindows := "@echo off\r\nexit /b 0\r\n"
+	failUnix := "#!/bin/sh\necho linker missing 1>&2\nexit 1\n"
+	failWindows := "@echo off\r\necho linker missing 1>&2\r\nexit /b 1\r\n"
+	writeTestCommand(t, binDir, "gcc", successUnix, successWindows)
+	writeTestCommand(t, binDir, "gfortran", successUnix, successWindows)
+	writeTestCommand(t, binDir, "make", successUnix, successWindows)
+	writeTestCommand(t, binDir, "g++", failUnix, failWindows)
+
+	err := ensureLinuxSourceBuildTools("stringi", []string{"PATH=" + binDir})
+	if err == nil {
+		t.Fatal("ensureLinuxSourceBuildTools() error = nil, want compiler smoke failure")
+	}
+	if !strings.Contains(err.Error(), "could not compile a test program") {
+		t.Fatalf("ensureLinuxSourceBuildTools() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "linker missing") {
+		t.Fatalf("ensureLinuxSourceBuildTools() error missing compiler stderr = %v", err)
 	}
 }
 
