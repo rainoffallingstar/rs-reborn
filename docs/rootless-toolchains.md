@@ -114,14 +114,14 @@ rs init --toolchain-preset enva
 rs doctor --toolchain-only
 ```
 
-`rs toolchain bootstrap enva` generates and runs a small temporary `conda-forge` YAML that creates an `rs-sysdeps` environment under `~/.local/share/rattler/envs/rs-sysdeps`, then `rs` wires that prefix into native builds.
+`rs toolchain bootstrap enva` generates and runs a small temporary `conda-forge` YAML that creates an `rs-sysdeps` environment under `~/.local/share/rattler/envs/rs-sysdeps` with compilers, binutils, and a compatible Linux sysroot, then `rs` wires that prefix into native builds.
 
 ### micromamba
 
 If micromamba, mamba, or Conda is already allowed on your machine, these remain supported compatibility bootstrap paths:
 
 ```bash
-micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers pkg-config make
+micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make
 rs init --toolchain-preset micromamba
 rs doctor --toolchain-only
 ```

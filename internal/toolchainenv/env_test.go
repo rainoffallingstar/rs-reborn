@@ -334,7 +334,7 @@ func TestBootstrapCandidateAutoFallsBackToMambaThenConda(t *testing.T) {
 	if candidate == nil || candidate.Preset != "mamba" {
 		t.Fatalf("candidate = %#v, want mamba", candidate)
 	}
-	if !strings.Contains(candidate.SuggestedSetupCommand, `" create -y -p "`) || !strings.Contains(candidate.SuggestedSetupCommand, "compilers pkg-config make") {
+	if !strings.Contains(candidate.SuggestedSetupCommand, `" create -y -p "`) || !strings.Contains(candidate.SuggestedSetupCommand, "compilers binutils sysroot_linux-64=2.17 pkg-config make") {
 		t.Fatalf("candidate.SuggestedSetupCommand = %q", candidate.SuggestedSetupCommand)
 	}
 
@@ -348,7 +348,7 @@ func TestBootstrapCandidateAutoFallsBackToMambaThenConda(t *testing.T) {
 	if candidate == nil || candidate.Preset != "conda" {
 		t.Fatalf("candidate = %#v, want conda", candidate)
 	}
-	if !strings.Contains(candidate.SuggestedSetupCommand, `" create -y -p "`) || !strings.Contains(candidate.SuggestedSetupCommand, "compilers pkg-config make") {
+	if !strings.Contains(candidate.SuggestedSetupCommand, `" create -y -p "`) || !strings.Contains(candidate.SuggestedSetupCommand, "compilers binutils sysroot_linux-64=2.17 pkg-config make") {
 		t.Fatalf("candidate.SuggestedSetupCommand = %q", candidate.SuggestedSetupCommand)
 	}
 }

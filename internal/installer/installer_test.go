@@ -353,6 +353,66 @@ func TestBuildInstallCommandPreservesExplicitCompilerOverrides(t *testing.T) {
 	}
 }
 
+func TestBuildInstallCommandPrefersCondaTargetCompilers(t *testing.T) {
+	oldGOOS := installerGOOS
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+	})
+	installerGOOS = "linux"
+
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(binDir) error = %v", err)
+	}
+	micromambaName := "micromamba"
+	if runtime.GOOS == "windows" {
+		micromambaName += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(binDir, micromambaName), []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(micromamba) error = %v", err)
+	}
+
+	prefix := filepath.Join(dir, "micromamba", "envs", "rs-sysdeps")
+	prefixBin := filepath.Join(prefix, "bin")
+	if err := os.MkdirAll(prefixBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll(prefixBin) error = %v", err)
+	}
+	for _, name := range []string{
+		"ccache",
+		"x86_64-conda-linux-gnu-gcc",
+		"x86_64-conda-linux-gnu-c++",
+		"x86_64-conda-linux-gnu-gfortran",
+	} {
+		fileName := name
+		if runtime.GOOS == "windows" {
+			fileName += ".exe"
+		}
+		if err := os.WriteFile(filepath.Join(prefixBin, fileName), []byte("binary"), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", fileName, err)
+		}
+	}
+
+	env := toolchainenv.Apply([]string{"PATH=" + binDir}, []string{prefix}, []string{
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+	})
+	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "cache"), filepath.Join(dir, "lib"), env, filepath.Join(dir, "pkg.tar.gz"))
+	if err != nil {
+		t.Fatalf("buildInstallCommand() error = %v", err)
+	}
+	if !slices.Contains(cmd.Env, "CC=ccache x86_64-conda-linux-gnu-gcc") {
+		t.Fatalf("cmd.Env missing target CC: %v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, "CXX=ccache x86_64-conda-linux-gnu-c++") {
+		t.Fatalf("cmd.Env missing target CXX: %v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, "FC=ccache x86_64-conda-linux-gnu-gfortran") {
+		t.Fatalf("cmd.Env missing target FC: %v", cmd.Env)
+	}
+}
+
 func TestInstallPlanLayersPreservesDependencyLayers(t *testing.T) {
 	planned := map[string]plannedPackage{
 		"jsonlite": {Name: "jsonlite"},

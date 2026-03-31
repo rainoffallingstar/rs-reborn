@@ -2179,12 +2179,19 @@ func ensureLinuxSourceBuildTools(pkg string, env []string) error {
 }
 
 func missingLinuxSourceBuildTools(env []string) []string {
-	required := []string{"gcc", "g++", "gfortran", "make"}
-	missing := make([]string, 0, len(required))
-	for _, tool := range required {
-		if _, err := findInstallerTool(tool, env); err != nil {
-			missing = append(missing, tool)
-		}
+	choice := preferredLinuxCompilerChoice(env)
+	missing := []string{}
+	if choice.C == "" {
+		missing = append(missing, "gcc")
+	}
+	if choice.CXX == "" {
+		missing = append(missing, "g++")
+	}
+	if choice.FC == "" {
+		missing = append(missing, "gfortran")
+	}
+	if _, err := findInstallerTool("make", env); err != nil {
+		missing = append(missing, "make")
 	}
 	return missing
 }
@@ -2209,14 +2216,19 @@ func verifyLinuxSourceToolchain(env []string) error {
 		return fmt.Errorf("write toolchain smoke source: %w", err)
 	}
 
-	name, args, wrappedEnv, wrapped, err := toolchainenv.WrapCommand("g++", []string{sourcePath, "-o", outputPath}, env)
+	choice := preferredLinuxCompilerChoice(env)
+	compiler := choice.CXX
+	if compiler == "" {
+		compiler = "g++"
+	}
+	name, args, wrappedEnv, wrapped, err := toolchainenv.WrapCommand(compiler, []string{sourcePath, "-o", outputPath}, env)
 	if err != nil {
 		return fmt.Errorf("prepare toolchain smoke command: %w", err)
 	}
 	if !wrapped {
-		resolved, err := findInstallerTool("g++", env)
+		resolved, err := findInstallerTool(compiler, env)
 		if err != nil {
-			return fmt.Errorf("resolve g++ for toolchain smoke test: %w", err)
+			return fmt.Errorf("resolve %s for toolchain smoke test: %w", compiler, err)
 		}
 		name = resolved
 	}
@@ -2241,19 +2253,24 @@ func verifyLinuxSourceToolchain(env []string) error {
 }
 
 func toolchainProbeExample(env []string) string {
+	choice := preferredLinuxCompilerChoice(env)
+	compiler := choice.CXX
+	if compiler == "" {
+		compiler = "g++"
+	}
 	candidate, err := toolchainenv.CandidateFromEnvironment(env)
 	if err != nil || candidate == nil {
-		return `g++ smoke.cpp -o smoke`
+		return fmt.Sprintf(`%s smoke.cpp -o smoke`, compiler)
 	}
 	switch candidate.Preset {
 	case "enva":
-		return `enva run rs-sysdeps -- g++ smoke.cpp -o smoke`
+		return fmt.Sprintf(`enva run rs-sysdeps -- %s smoke.cpp -o smoke`, compiler)
 	case "micromamba", "mamba", "conda":
 		if len(candidate.ToolchainPrefixes) > 0 {
-			return fmt.Sprintf(`%s run -p "%s" -- g++ smoke.cpp -o smoke`, candidate.Preset, candidate.ToolchainPrefixes[0])
+			return fmt.Sprintf(`%s run -p "%s" -- %s smoke.cpp -o smoke`, candidate.Preset, candidate.ToolchainPrefixes[0], compiler)
 		}
 	}
-	return `g++ smoke.cpp -o smoke`
+	return fmt.Sprintf(`%s smoke.cpp -o smoke`, compiler)
 }
 
 func shellQuoteCommand(name string, args []string) string {
@@ -2335,11 +2352,12 @@ func withInstallEnv(env []string, cacheRoot string) []string {
 	if len(env) == 0 {
 		env = os.Environ()
 	}
-	filtered := make([]string, 0, len(env)+8)
+	filtered := make([]string, 0, len(env)+10)
 	hasMakeflags := false
 	hasCMake := false
 	hasCC := false
 	hasCXX := false
+	hasFC := false
 	hasCCacheDir := false
 	hasSCCacheDir := false
 	for _, entry := range env {
@@ -2352,6 +2370,8 @@ func withInstallEnv(env []string, cacheRoot string) []string {
 			hasCC = true
 		case strings.HasPrefix(entry, "CXX="):
 			hasCXX = true
+		case strings.HasPrefix(entry, "FC="):
+			hasFC = true
 		case strings.HasPrefix(entry, "CCACHE_DIR="):
 			hasCCacheDir = true
 		case strings.HasPrefix(entry, "SCCACHE_DIR="):
@@ -2366,13 +2386,25 @@ func withInstallEnv(env []string, cacheRoot string) []string {
 	if !hasCMake {
 		filtered = append(filtered, "CMAKE_BUILD_PARALLEL_LEVEL="+jobs)
 	}
+	choice := preferredLinuxCompilerChoice(filtered)
 	launcher, ok := compilerLauncher(filtered)
-	if ok && (!hasCC || !hasCXX) {
+	if ok && (!hasCC || !hasCXX || (!hasFC && choice.FC != "")) {
 		if !hasCC {
-			filtered = append(filtered, "CC="+launcher+" gcc")
+			cc := "gcc"
+			if choice.C != "" {
+				cc = choice.C
+			}
+			filtered = append(filtered, "CC="+launcher+" "+cc)
 		}
 		if !hasCXX {
-			filtered = append(filtered, "CXX="+launcher+" g++")
+			cxx := "g++"
+			if choice.CXX != "" {
+				cxx = choice.CXX
+			}
+			filtered = append(filtered, "CXX="+launcher+" "+cxx)
+		}
+		if !hasFC && choice.FC != "" {
+			filtered = append(filtered, "FC="+launcher+" "+choice.FC)
 		}
 		switch launcher {
 		case "ccache":
@@ -2383,6 +2415,16 @@ func withInstallEnv(env []string, cacheRoot string) []string {
 			if cacheRoot != "" && !hasSCCacheDir {
 				filtered = append(filtered, "SCCACHE_DIR="+filepath.Join(cacheRoot, "sccache"))
 			}
+		}
+	} else {
+		if !hasCC && choice.C != "" {
+			filtered = append(filtered, "CC="+choice.C)
+		}
+		if !hasCXX && choice.CXX != "" {
+			filtered = append(filtered, "CXX="+choice.CXX)
+		}
+		if !hasFC && choice.FC != "" {
+			filtered = append(filtered, "FC="+choice.FC)
 		}
 	}
 	return filtered
@@ -2400,19 +2442,121 @@ func defaultInstallJobs() int {
 }
 
 func compilerLauncher(env []string) (string, bool) {
+	choice := preferredLinuxCompilerChoice(env)
+	cc := "gcc"
+	if choice.C != "" {
+		cc = choice.C
+	}
+	cxx := "g++"
+	if choice.CXX != "" {
+		cxx = choice.CXX
+	}
 	for _, launcher := range []string{"ccache", "sccache"} {
 		if _, err := findInstallerTool(launcher, env); err != nil {
 			continue
 		}
-		if _, err := findInstallerTool("gcc", env); err != nil {
+		if _, err := findInstallerTool(cc, env); err != nil {
 			continue
 		}
-		if _, err := findInstallerTool("g++", env); err != nil {
+		if _, err := findInstallerTool(cxx, env); err != nil {
 			continue
 		}
 		return launcher, true
 	}
 	return "", false
+}
+
+type linuxCompilerChoice struct {
+	C   string
+	CXX string
+	FC  string
+}
+
+func preferredLinuxCompilerChoice(env []string) linuxCompilerChoice {
+	choice := linuxCompilerChoice{}
+	if installerGOOS != "linux" {
+		return choice
+	}
+	if candidate, err := toolchainenv.CandidateFromEnvironment(env); err == nil && candidate != nil && isCondaLikePreset(candidate.Preset) {
+		choice.C = firstAvailableCompiler(env, condaCompilerCandidates("gcc")...)
+		choice.CXX = firstAvailableCompiler(env, condaCompilerCandidates("c++")...)
+		if choice.CXX == "" {
+			choice.CXX = firstAvailableCompiler(env, condaCompilerCandidates("g++")...)
+		}
+		choice.FC = firstAvailableCompiler(env, condaCompilerCandidates("gfortran")...)
+	}
+	if choice.C == "" {
+		choice.C = firstAvailableCompiler(env, "gcc")
+	}
+	if choice.CXX == "" {
+		choice.CXX = firstAvailableCompiler(env, "g++", "c++")
+	}
+	if choice.FC == "" {
+		choice.FC = firstAvailableCompiler(env, "gfortran")
+	}
+	return choice
+}
+
+func isCondaLikePreset(preset string) bool {
+	switch preset {
+	case "enva", "micromamba", "mamba", "conda":
+		return true
+	default:
+		return false
+	}
+}
+
+func condaCompilerCandidates(tool string) []string {
+	triplets := []string{}
+	seen := map[string]struct{}{}
+	addTriplet := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		triplets = append(triplets, value)
+	}
+
+	switch runtime.GOARCH {
+	case "amd64":
+		addTriplet("x86_64-conda-linux-gnu")
+	case "arm64":
+		addTriplet("aarch64-conda-linux-gnu")
+	case "ppc64le":
+		addTriplet("powerpc64le-conda-linux-gnu")
+	case "s390x":
+		addTriplet("s390x-conda-linux-gnu")
+	case "riscv64":
+		addTriplet("riscv64-conda-linux-gnu")
+	}
+	for _, fallback := range []string{
+		"x86_64-conda-linux-gnu",
+		"aarch64-conda-linux-gnu",
+		"powerpc64le-conda-linux-gnu",
+		"s390x-conda-linux-gnu",
+		"riscv64-conda-linux-gnu",
+	} {
+		addTriplet(fallback)
+	}
+
+	candidates := make([]string, 0, len(triplets)+1)
+	for _, triplet := range triplets {
+		candidates = append(candidates, triplet+"-"+tool)
+	}
+	return candidates
+}
+
+func firstAvailableCompiler(env []string, names ...string) string {
+	for _, name := range names {
+		if _, err := findInstallerTool(name, env); err == nil {
+			return name
+		}
+	}
+	return ""
 }
 
 func runCommand(workDir string, progress, errors io.Writer, label string, name string, args ...string) error {

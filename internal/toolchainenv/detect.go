@@ -295,19 +295,19 @@ func bootstrapCommandForCandidate(candidate Candidate, env []string) (string, bo
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers pkg-config make`, path, prefix), true
+		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`, path, prefix), true
 	case "mamba":
 		path, err := FindInPath("mamba", env)
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers pkg-config make`, path, prefix), true
+		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`, path, prefix), true
 	case "conda":
 		path, err := FindInPath("conda", env)
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers pkg-config make`, path, prefix), true
+		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`, path, prefix), true
 	case "homebrew":
 		brewPath := filepath.Join(prefix, "bin", "brew")
 		if info, err := detectStat(brewPath); err == nil && !info.IsDir() {
@@ -429,19 +429,19 @@ func suggestedSetupCommand(preset string, prefixes []string) string {
 		return envaBootstrapCommand("enva")
 	case "micromamba":
 		if prefix == "" {
-			return `micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers pkg-config make`
+			return `micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`
 		}
-		return fmt.Sprintf(`micromamba create -y -p "%s" -c conda-forge compilers pkg-config make`, prefix)
+		return fmt.Sprintf(`micromamba create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`, prefix)
 	case "mamba":
 		if prefix == "" {
-			return `mamba create -y -p "$HOME/.local/share/mamba/envs/rs-sysdeps" -c conda-forge compilers pkg-config make`
+			return `mamba create -y -p "$HOME/.local/share/mamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`
 		}
-		return fmt.Sprintf(`mamba create -y -p "%s" -c conda-forge compilers pkg-config make`, prefix)
+		return fmt.Sprintf(`mamba create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`, prefix)
 	case "conda":
 		if prefix == "" {
-			return `conda create -y -p "$HOME/.conda/envs/rs-sysdeps" -c conda-forge compilers pkg-config make`
+			return `conda create -y -p "$HOME/.conda/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`
 		}
-		return fmt.Sprintf(`conda create -y -p "%s" -c conda-forge compilers pkg-config make`, prefix)
+		return fmt.Sprintf(`conda create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make`, prefix)
 	case "homebrew":
 		if prefix == "" {
 			return `"$HOME/homebrew/bin/brew" install pkg-config gcc`
@@ -507,6 +507,8 @@ channels:
   - conda-forge
 dependencies:
   - compilers
+  - binutils
+  - sysroot_linux-64=2.17
   - pkg-config
   - make
 EOF
