@@ -507,6 +507,23 @@ func TestPreflightSourceBuildMacOSMissingLzmaHeader(t *testing.T) {
 	}
 }
 
+func TestHeaderProbeSourceHandlesPCRE2(t *testing.T) {
+	got := headerProbeSource("pcre2.h")
+	if !strings.Contains(got, "#define PCRE2_CODE_UNIT_WIDTH 8") {
+		t.Fatalf("headerProbeSource() = %q, want PCRE2 width define", got)
+	}
+	if !strings.Contains(got, "#include <pcre2.h>") {
+		t.Fatalf("headerProbeSource() = %q, want pcre2 include", got)
+	}
+}
+
+func TestHeaderProbeSourceDefaultInclude(t *testing.T) {
+	got := headerProbeSource("zlib.h")
+	if got != "#include <zlib.h>\n" {
+		t.Fatalf("headerProbeSource() = %q, want default include", got)
+	}
+}
+
 func TestSourceBuildEnvironmentUsesRSToolchainPrefixes(t *testing.T) {
 	t.Setenv("RS_TOOLCHAIN_PREFIXES", strings.Join([]string{"/opt/demo", "/opt/demo2"}, string(os.PathListSeparator)))
 	t.Setenv("RS_PKG_CONFIG_PATH", strings.Join([]string{"/opt/pkgconfig"}, string(os.PathListSeparator)))

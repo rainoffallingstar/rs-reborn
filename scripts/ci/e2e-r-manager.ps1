@@ -22,9 +22,9 @@ try {
 
     Write-Host "==> installing R via the native rs manager"
     & $RSBin r install 4.4
-    $rList = & $RSBin r list
-    $rList | Tee-Object -FilePath (Join-Path $TmpDir "r-list.txt")
-    if ($rList -notmatch "4\.4") {
+    $rList = (& $RSBin r list) | Out-String
+    $rList | Tee-Object -FilePath (Join-Path $TmpDir "r-list.txt") | Out-Null
+    if ($rList -notmatch "(?m)^\\* managed\\s+4\\.4") {
         throw "expected managed R listing to include 4.4"
     }
 
@@ -34,8 +34,8 @@ cat("native-r-e2e\n")
 
     & $RSBin init $ProjectDir
     & $RSBin r use --project-dir $ProjectDir 4.4
-    $rWhich = & $RSBin r which $ProjectDir
-    $rWhich | Tee-Object -FilePath (Join-Path $TmpDir "r-which.txt")
+    $rWhich = (& $RSBin r which $ProjectDir) | Out-String
+    $rWhich | Tee-Object -FilePath (Join-Path $TmpDir "r-which.txt") | Out-Null
     if ($rWhich -notmatch "Rscript") {
         throw "expected rs r which to resolve a managed Rscript"
     }
@@ -47,8 +47,8 @@ cat("native-r-e2e\n")
         throw "expected rs r use 4.4 to write r_version instead of rscript"
     }
 
-    $runOutput = & $RSBin run $ScriptPath
-    $runOutput | Tee-Object -FilePath (Join-Path $TmpDir "run.txt")
+    $runOutput = (& $RSBin run $ScriptPath) | Out-String
+    $runOutput | Tee-Object -FilePath (Join-Path $TmpDir "run.txt") | Out-Null
     if ($runOutput -notmatch "native-r-e2e") {
         throw "expected managed run output"
     }

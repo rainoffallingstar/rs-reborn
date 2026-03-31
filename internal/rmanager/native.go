@@ -1646,7 +1646,7 @@ func checkHeaderWithCompiler(header string) error {
 		return fmt.Errorf("no C compiler available for header probe")
 	}
 	cmd := nativeCommand(compiler, "-x", "c", "-E", "-")
-	cmd.Stdin = strings.NewReader("#include <" + header + ">\n")
+	cmd.Stdin = strings.NewReader(headerProbeSource(header))
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	cmd.Env = sourceBuildEnvironment()
@@ -1654,6 +1654,15 @@ func checkHeaderWithCompiler(header string) error {
 		return err
 	}
 	return nil
+}
+
+func headerProbeSource(header string) string {
+	switch header {
+	case "pcre2.h":
+		return "#define PCRE2_CODE_UNIT_WIDTH 8\n#include <pcre2.h>\n"
+	default:
+		return "#include <" + header + ">\n"
+	}
 }
 
 func firstAvailableCompiler() string {
