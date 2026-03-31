@@ -2904,6 +2904,11 @@ func TestDoctorToolchainOnlyFallsBackToEnvironmentVariables(t *testing.T) {
 }
 
 func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T) {
+	oldBootstrap := bootstrapToolchainPreset
+	t.Cleanup(func() {
+		bootstrapToolchainPreset = oldBootstrap
+	})
+
 	dir := t.TempDir()
 	homeDir := filepath.Join(dir, "home")
 	binDir := filepath.Join(dir, "bin")
@@ -2923,6 +2928,36 @@ func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+systemPath)
 	t.Setenv("RS_TOOLCHAIN_PREFIXES", "")
 	t.Setenv("RS_PKG_CONFIG_PATH", "")
+	bootstrapToolchainPreset = func(stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+		expectedPrefix := filepath.Join(homeDir, "micromamba", "envs", "rs-sysdeps")
+		for _, path := range []string{
+			filepath.Join(expectedPrefix, "bin"),
+			filepath.Join(expectedPrefix, "lib", "pkgconfig"),
+			filepath.Join(expectedPrefix, "share", "pkgconfig"),
+		} {
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				return nil, err
+			}
+		}
+		pkgConfigName := "pkg-config"
+		if runtime.GOOS == "windows" {
+			pkgConfigName += ".exe"
+		}
+		if err := os.WriteFile(filepath.Join(expectedPrefix, "bin", pkgConfigName), []byte("binary"), 0o755); err != nil {
+			return nil, err
+		}
+		if stderr != nil {
+			fmt.Fprintln(stderr, "[rs] bootstrapping rootless toolchain preset: micromamba")
+		}
+		return &toolchainenv.Candidate{
+			Preset:            "micromamba",
+			ToolchainPrefixes: []string{expectedPrefix},
+			PkgConfigPath: []string{
+				filepath.Join(expectedPrefix, "lib", "pkgconfig"),
+				filepath.Join(expectedPrefix, "share", "pkgconfig"),
+			},
+		}, nil
+	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -3518,6 +3553,12 @@ func TestPrintAppliedAdjustments(t *testing.T) {
 }
 
 func TestCheckJSONOutputOnFailure(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error { return nil }
+
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
 	cacheDir := filepath.Join(dir, "cache")

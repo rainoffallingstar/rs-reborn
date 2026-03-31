@@ -278,6 +278,9 @@ var nativeValidatePlan = func(req installer.Request) error {
 var resolveManagedRscript = rmanager.ResolveVersionOrPath
 var resolveCurrentManagedRscript = rmanager.CurrentManagedRscript
 var resolveSelectedRscript = resolveConfiguredInterpreterPath
+var bootstrapToolchainPreset = func(stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+	return toolchainenv.Bootstrap("auto", "", os.Environ(), stdout, stderr)
+}
 
 var ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
 	return rmanager.EnsureInstalledRscript(selected, io.Discard, stderr)
@@ -4366,7 +4369,7 @@ func maybeBootstrapToolchain(prefixes, pkgConfig []string, stdout, stderr io.Wri
 	if recommended != nil && recommended.Complete {
 		return recommended, nil
 	}
-	return toolchainenv.Bootstrap("auto", "", os.Environ(), stdout, stderr)
+	return bootstrapToolchainPreset(stdout, stderr)
 }
 
 func installBackend() string {

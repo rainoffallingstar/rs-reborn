@@ -34,7 +34,7 @@ cat("native-r-e2e\n")
 
     & $RSBin init $ProjectDir
     & $RSBin r use --project-dir $ProjectDir 4.4
-    $rWhich = (& $RSBin r which $ProjectDir) | Out-String
+    $rWhich = ((& $RSBin r which $ProjectDir) | Out-String).Trim()
     $rWhich | Tee-Object -FilePath (Join-Path $TmpDir "r-which.txt") | Out-Null
     if ($rWhich -notmatch "Rscript") {
         throw "expected rs r which to resolve a managed Rscript"
@@ -58,7 +58,7 @@ cat("native-r-e2e\n")
 cat("native-r-mismatch\n")
 '@ | Set-Content -LiteralPath $MismatchScriptPath -Encoding ascii
 
-    $rWhichToml = $rWhich -replace '\\', '/'
+    $rWhichToml = $rWhich.Trim('"') -replace '\\', '/'
     @"
 repo = "https://cloud.r-project.org"
 cache_dir = ".rs-cache"
