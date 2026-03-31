@@ -649,6 +649,7 @@ type ListReport struct {
 	ProjectConfig  string       `json:"project_config,omitempty"`
 	ScriptProfile  string       `json:"script_profile,omitempty"`
 	RscriptPath    string       `json:"rscript_path,omitempty"`
+	RscriptIssue   string       `json:"rscript_issue,omitempty"`
 	Repo           string       `json:"repo"`
 	Lockfile       string       `json:"lockfile"`
 	ManagedLibrary string       `json:"managed_library"`
@@ -1089,7 +1090,7 @@ func List(opts ListOptions) error {
 	if err != nil {
 		return err
 	}
-	if plan.RscriptIssue != "" && !listCanProceedWithoutRuntime(plan.RscriptIssue) {
+	if plan.RscriptIssue != "" && !listCanProceedWithoutRuntime(plan.RscriptIssue, plan.RequestedRVersion) {
 		return fmt.Errorf("%s", plan.RscriptIssue)
 	}
 	report := buildListReport(plan, opts)
@@ -1192,8 +1193,14 @@ func List(opts ListOptions) error {
 	return nil
 }
 
-func listCanProceedWithoutRuntime(issue string) bool {
-	return strings.Contains(issue, "is not available")
+func listCanProceedWithoutRuntime(issue, requestedVersion string) bool {
+	if strings.Contains(issue, "is not available") {
+		return true
+	}
+	if requestedVersion != "" {
+		return false
+	}
+	return strings.Contains(issue, "inspect R runtime:")
 }
 
 func Prune(opts PruneOptions) error {
@@ -1875,6 +1882,7 @@ func buildListReport(plan dependencyPlan, opts ListOptions) ListReport {
 		ProjectConfig:  plan.ProjectPath,
 		ScriptProfile:  plan.ScriptKey,
 		RscriptPath:    plan.RscriptPath,
+		RscriptIssue:   plan.RscriptIssue,
 		Repo:           plan.Repo,
 		Lockfile:       plan.LockfilePath,
 		ManagedLibrary: plan.LibraryPath,
@@ -4823,7 +4831,7 @@ cat("arch\t", R.version$arch, "\n", sep = "")
 cat("os\t", R.version$os, "\n", sep = "")
 cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")
 `
-	cmd := exec.Command(interpreter, "-e", script)
+	cmd := exec.Command(interpreter, "--vanilla", "-e", script)
 	cmd.Dir = workDir
 	if stderr != nil {
 		cmd.Stderr = stderr

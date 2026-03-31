@@ -27,6 +27,9 @@ func writeFakeRscript(t *testing.T, dir string) string {
 
 	path := filepath.Join(dir, "Rscript")
 	script := `#!/bin/sh
+if [ "$1" = "--vanilla" ]; then
+	shift
+fi
 if [ "$1" = "-e" ]; then
 	cat <<'EOF'
 version	4.4.1
@@ -51,6 +54,9 @@ func writeFakeRscriptWithVersion(t *testing.T, dir, version string) string {
 
 	path := filepath.Join(dir, "Rscript")
 	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "--vanilla" ]; then
+	shift
+fi
 if [ "$1" = "-e" ]; then
 	cat <<'EOF'
 version	%s
@@ -64,6 +70,27 @@ fi
 echo "unexpected fake Rscript args: $*" >&2
 exit 1
 `, version)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
+	}
+	return path
+}
+
+func writeFailingFakeRscript(t *testing.T, dir string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "Rscript")
+	script := `#!/bin/sh
+if [ "$1" = "--vanilla" ]; then
+	shift
+fi
+if [ "$1" = "-e" ]; then
+	echo "runtime inspect failed" >&2
+	exit 9
+fi
+echo "unexpected fake Rscript args: $*" >&2
+exit 1
+`
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
 	}
@@ -1985,6 +2012,69 @@ func TestListFailsOnConfiguredRVersionMismatch(t *testing.T) {
 	}
 }
 
+func TestListJSONOutputAllowsRuntimeInspectionFailureWithoutVersionConstraint(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFailingFakeRscript(t, dir)
+	configPath := filepath.Join(dir, "rs.toml")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	config := fmt.Sprintf("rscript = %q\n", rscriptPath)
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := List(ListOptions{
+		ScriptPath: scriptPath,
+		JSON:       true,
+		Stdout:     &stdout,
+		Stderr:     &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	var report ListReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if report.RscriptPath != rscriptPath {
+		t.Fatalf("report.RscriptPath = %q, want %q", report.RscriptPath, rscriptPath)
+	}
+	if !strings.Contains(report.RscriptIssue, "inspect R runtime: exit status 9") {
+		t.Fatalf("report.RscriptIssue = %q, want runtime inspect failure", report.RscriptIssue)
+	}
+}
+
+func TestListStillFailsOnRuntimeInspectionFailureWhenRVersionIsConfigured(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFailingFakeRscript(t, dir)
+	configPath := filepath.Join(dir, "rs.toml")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	config := fmt.Sprintf("rscript = %q\nr_version = \"4.4\"\n", rscriptPath)
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	err := List(ListOptions{
+		ScriptPath: scriptPath,
+		JSON:       true,
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatal("List() error = nil, want runtime inspect failure")
+	}
+	if !strings.Contains(err.Error(), "inspect R runtime: exit status 9") {
+		t.Fatalf("List() error = %v", err)
+	}
+}
+
 func TestDoctorPrintsAppliedAdjustments(t *testing.T) {
 	oldValidate := nativeValidatePlan
 	t.Cleanup(func() {
@@ -2710,12 +2800,12 @@ func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	err := Doctor(DoctorOptions{
-		ProjectDir:          dir,
-		ToolchainOnly:       true,
-		BootstrapToolchain:  true,
-		JSON:                true,
-		Stdout:              &stdout,
-		Stderr:              &stderr,
+		ProjectDir:         dir,
+		ToolchainOnly:      true,
+		BootstrapToolchain: true,
+		JSON:               true,
+		Stdout:             &stdout,
+		Stderr:             &stderr,
 	})
 	if err != nil {
 		t.Fatalf("Doctor() error = %v", err)
@@ -2787,12 +2877,12 @@ func TestDoctorToolchainOnlyBootstrapToolchainDoesNotOverrideExplicitConfig(t *t
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	err := Doctor(DoctorOptions{
-		ProjectDir:          dir,
-		ToolchainOnly:       true,
-		BootstrapToolchain:  true,
-		JSON:                true,
-		Stdout:              &stdout,
-		Stderr:              &stderr,
+		ProjectDir:         dir,
+		ToolchainOnly:      true,
+		BootstrapToolchain: true,
+		JSON:               true,
+		Stdout:             &stdout,
+		Stderr:             &stderr,
 	})
 	if err != nil {
 		t.Fatalf("Doctor() error = %v", err)
