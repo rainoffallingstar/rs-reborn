@@ -264,7 +264,7 @@ func TestBuildInstallCommandWrapsEnvaToolchainRun(t *testing.T) {
 		filepath.Join(prefix, "share", "pkgconfig"),
 	})
 
-	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "lib"), env, filepath.Join(dir, "pkg.tar.gz"))
+	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "cache"), filepath.Join(dir, "lib"), env, filepath.Join(dir, "pkg.tar.gz"))
 	if err != nil {
 		t.Fatalf("buildInstallCommand() error = %v", err)
 	}
@@ -285,7 +285,7 @@ func TestBuildInstallCommandWrapsEnvaToolchainRun(t *testing.T) {
 
 func TestBuildInstallCommandPreservesExplicitParallelBuildEnv(t *testing.T) {
 	dir := t.TempDir()
-	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "lib"), []string{
+	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "cache"), filepath.Join(dir, "lib"), []string{
 		"PATH=/usr/bin",
 		"MAKEFLAGS=-j32",
 		"CMAKE_BUILD_PARALLEL_LEVEL=32",
@@ -298,6 +298,58 @@ func TestBuildInstallCommandPreservesExplicitParallelBuildEnv(t *testing.T) {
 	}
 	if slices.Contains(cmd.Env, "MAKEFLAGS=-j"+strconv.Itoa(defaultInstallJobs())) {
 		t.Fatalf("cmd.Env should preserve explicit MAKEFLAGS: %v", cmd.Env)
+	}
+}
+
+func TestBuildInstallCommandAutoEnablesCCache(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(binDir) error = %v", err)
+	}
+	for _, name := range []string{"ccache", "gcc", "g++"} {
+		fileName := name
+		if runtime.GOOS == "windows" {
+			fileName += ".exe"
+		}
+		if err := os.WriteFile(filepath.Join(binDir, fileName), []byte("binary"), 0o755); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", fileName, err)
+		}
+	}
+
+	cacheRoot := filepath.Join(dir, "cache")
+	cmd, err := buildInstallCommand("/usr/bin/R", dir, cacheRoot, filepath.Join(dir, "lib"), []string{
+		"PATH=" + binDir,
+	}, filepath.Join(dir, "pkg.tar.gz"))
+	if err != nil {
+		t.Fatalf("buildInstallCommand() error = %v", err)
+	}
+	if !slices.Contains(cmd.Env, "CC=ccache gcc") {
+		t.Fatalf("cmd.Env missing CC=ccache gcc: %v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, "CXX=ccache g++") {
+		t.Fatalf("cmd.Env missing CXX=ccache g++: %v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, "CCACHE_DIR="+filepath.Join(cacheRoot, "ccache")) {
+		t.Fatalf("cmd.Env missing CCACHE_DIR: %v", cmd.Env)
+	}
+}
+
+func TestBuildInstallCommandPreservesExplicitCompilerOverrides(t *testing.T) {
+	dir := t.TempDir()
+	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "cache"), filepath.Join(dir, "lib"), []string{
+		"PATH=/usr/bin",
+		"CC=clang",
+		"CXX=clang++",
+	}, filepath.Join(dir, "pkg.tar.gz"))
+	if err != nil {
+		t.Fatalf("buildInstallCommand() error = %v", err)
+	}
+	if !slices.Contains(cmd.Env, "CC=clang") || !slices.Contains(cmd.Env, "CXX=clang++") {
+		t.Fatalf("cmd.Env = %v", cmd.Env)
+	}
+	if slices.Contains(cmd.Env, "CC=ccache gcc") || slices.Contains(cmd.Env, "CXX=ccache g++") {
+		t.Fatalf("cmd.Env should preserve explicit compiler overrides: %v", cmd.Env)
 	}
 }
 

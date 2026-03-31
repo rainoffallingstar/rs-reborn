@@ -1006,7 +1006,7 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 }
 
 func (i *nativeInstaller) runRCommandInstall(target string) error {
-	cmd, err := buildInstallCommand(i.rBinary, i.req.WorkDir, i.req.LibraryPath, i.req.Environment, target)
+	cmd, err := buildInstallCommand(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, target)
 	if err != nil {
 		return err
 	}
@@ -1017,8 +1017,8 @@ func (i *nativeInstaller) runRCommandInstall(target string) error {
 	return nil
 }
 
-func buildInstallCommand(rBinary, workDir, libraryPath string, env []string, target string) (*exec.Cmd, error) {
-	installEnv := withInstallEnv(withLibraryEnv(env, libraryPath))
+func buildInstallCommand(rBinary, workDir, cacheRoot, libraryPath string, env []string, target string) (*exec.Cmd, error) {
+	installEnv := withInstallEnv(withLibraryEnv(env, libraryPath), cacheRoot)
 	wrappedName, wrappedArgs, wrappedEnv, _, err := toolchainenv.WrapCommand(
 		rBinary,
 		[]string{"CMD", "INSTALL", "-l", libraryPath, target},
@@ -2116,19 +2116,31 @@ func withLibraryEnv(env []string, libraryPath string) []string {
 	return filtered
 }
 
-func withInstallEnv(env []string) []string {
+func withInstallEnv(env []string, cacheRoot string) []string {
 	if len(env) == 0 {
 		env = os.Environ()
 	}
-	filtered := make([]string, 0, len(env)+4)
+	filtered := make([]string, 0, len(env)+8)
 	hasMakeflags := false
 	hasCMake := false
+	hasCC := false
+	hasCXX := false
+	hasCCacheDir := false
+	hasSCCacheDir := false
 	for _, entry := range env {
 		switch {
 		case strings.HasPrefix(entry, "MAKEFLAGS="):
 			hasMakeflags = true
 		case strings.HasPrefix(entry, "CMAKE_BUILD_PARALLEL_LEVEL="):
 			hasCMake = true
+		case strings.HasPrefix(entry, "CC="):
+			hasCC = true
+		case strings.HasPrefix(entry, "CXX="):
+			hasCXX = true
+		case strings.HasPrefix(entry, "CCACHE_DIR="):
+			hasCCacheDir = true
+		case strings.HasPrefix(entry, "SCCACHE_DIR="):
+			hasSCCacheDir = true
 		}
 		filtered = append(filtered, entry)
 	}
@@ -2138,6 +2150,25 @@ func withInstallEnv(env []string) []string {
 	}
 	if !hasCMake {
 		filtered = append(filtered, "CMAKE_BUILD_PARALLEL_LEVEL="+jobs)
+	}
+	launcher, ok := compilerLauncher(filtered)
+	if ok && (!hasCC || !hasCXX) {
+		if !hasCC {
+			filtered = append(filtered, "CC="+launcher+" gcc")
+		}
+		if !hasCXX {
+			filtered = append(filtered, "CXX="+launcher+" g++")
+		}
+		switch launcher {
+		case "ccache":
+			if cacheRoot != "" && !hasCCacheDir {
+				filtered = append(filtered, "CCACHE_DIR="+filepath.Join(cacheRoot, "ccache"))
+			}
+		case "sccache":
+			if cacheRoot != "" && !hasSCCacheDir {
+				filtered = append(filtered, "SCCACHE_DIR="+filepath.Join(cacheRoot, "sccache"))
+			}
+		}
 	}
 	return filtered
 }
@@ -2151,6 +2182,22 @@ func defaultInstallJobs() int {
 		return 8
 	}
 	return jobs
+}
+
+func compilerLauncher(env []string) (string, bool) {
+	for _, launcher := range []string{"ccache", "sccache"} {
+		if _, err := findInstallerTool(launcher, env); err != nil {
+			continue
+		}
+		if _, err := findInstallerTool("gcc", env); err != nil {
+			continue
+		}
+		if _, err := findInstallerTool("g++", env); err != nil {
+			continue
+		}
+		return launcher, true
+	}
+	return "", false
 }
 
 func runCommand(workDir string, progress, errors io.Writer, label string, name string, args ...string) error {
