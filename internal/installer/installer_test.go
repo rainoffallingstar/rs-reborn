@@ -506,6 +506,16 @@ func TestDownloadReusesPersistentCache(t *testing.T) {
 	}
 }
 
+func TestDownloadCacheNamePreservesOriginalBasename(t *testing.T) {
+	got := downloadCacheName("https://cloud.r-project.org/bin/windows/contrib/4.4/jsonlite_2.0.0.zip", "jsonlite_2.0.0.zip")
+	if filepath.Base(got) != "jsonlite_2.0.0.zip" {
+		t.Fatalf("filepath.Base(downloadCacheName()) = %q, want jsonlite_2.0.0.zip", filepath.Base(got))
+	}
+	if filepath.Dir(got) == "." {
+		t.Fatalf("downloadCacheName() = %q, want hashed subdirectory", got)
+	}
+}
+
 func TestDescribeLocalFingerprintForFileAndMissing(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "localpkg.tar.gz")

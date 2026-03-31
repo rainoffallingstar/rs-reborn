@@ -1257,6 +1257,15 @@ func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 		progresscmd.Stage(i.stderr, "reusing cached "+name)
 		return target, nil
 	}
+	legacyTarget := filepath.Join(i.downloadRoot, legacyDownloadCacheName(rawURL, name))
+	if info, err := os.Stat(legacyTarget); err == nil && !info.IsDir() && info.Size() > 0 {
+		progresscmd.Stage(i.stderr, "reusing cached "+name)
+		return legacyTarget, nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return "", err
+	}
 
 	i.stage("downloading " + name)
 	resp, err := getWithRetry(i.httpClient, rawURL)
@@ -1281,6 +1290,11 @@ func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 }
 
 func downloadCacheName(rawURL, name string) string {
+	sum := sha256.Sum256([]byte(rawURL))
+	return filepath.Join(fmt.Sprintf("%x", sum[:8]), name)
+}
+
+func legacyDownloadCacheName(rawURL, name string) string {
 	sum := sha256.Sum256([]byte(rawURL))
 	return fmt.Sprintf("%x-%s", sum[:8], name)
 }

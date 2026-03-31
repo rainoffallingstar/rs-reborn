@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1422,9 +1423,16 @@ func runWithCapturedStdout(t *testing.T, fn func() error) (string, error) {
 		os.Stdout = original
 	}()
 
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
 	runErr := fn()
 	_ = w.Close()
-	out, _ := io.ReadAll(r)
+	out := <-done
 	_ = r.Close()
-	return string(out), runErr
+	return out, runErr
 }
