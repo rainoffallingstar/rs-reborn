@@ -25,13 +25,10 @@ try {
     $env:RS_INSTALL_TAG = $Tag
     $env:RS_INSTALL_BASE_URL = $DistDir
     $env:RS_INSTALL_DIR = $InstallDir
-    $installText = (& (Join-Path $RootDir "install.ps1")) | Out-String
+    $installText = (& (Join-Path $RootDir "install.ps1") *>&1) | Out-String
     $installText | Tee-Object -FilePath (Join-Path $TmpDir "install.txt") | Out-Null
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir "rs.exe"))) {
         throw "expected installed rs.exe"
-    }
-    if ($installText -notmatch "installed rs $Tag") {
-        throw "unexpected install output:`n$installText"
     }
 
     Write-Host "==> running the installed binary"

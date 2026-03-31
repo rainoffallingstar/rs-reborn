@@ -24,7 +24,7 @@ try {
     & $RSBin r install 4.4
     $rList = (& $RSBin r list) | Out-String
     $rList | Tee-Object -FilePath (Join-Path $TmpDir "r-list.txt") | Out-Null
-    if ($rList -notmatch "(?m)^\\* managed\\s+4\\.4") {
+    if ($rList -notmatch '(?m)^\* managed\s+4\.4') {
         throw "expected managed R listing to include 4.4"
     }
 

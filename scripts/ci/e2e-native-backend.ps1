@@ -30,7 +30,21 @@ cat(jsonlite::toJSON(list(value = "native-backend", bioc = as.character(packageV
     & $RSBin add --project-dir $ProjectDir --bioc BiocGenerics
 
     Write-Host "==> lock through auto/native backend"
-    $lockText = (& $RSBin lock $ScriptPath 2>&1 | Tee-Object -FilePath (Join-Path $TmpDir "lock.txt")) | Out-String
+    $lockOutputPath = Join-Path $TmpDir "lock.txt"
+    $lockSucceeded = $true
+    try {
+        $lockText = (& $RSBin lock $ScriptPath *>&1 | Tee-Object -FilePath $lockOutputPath) | Out-String
+    } catch {
+        $lockSucceeded = $false
+        if (Test-Path -LiteralPath $lockOutputPath) {
+            $lockText = Get-Content -LiteralPath $lockOutputPath -Raw
+        } else {
+            $lockText = ""
+        }
+    }
+    if (-not $lockSucceeded) {
+        throw "rs lock failed:`n$lockText"
+    }
     if ($lockText -notmatch "native backend") {
         throw "expected native backend install output:`n$lockText"
     }
