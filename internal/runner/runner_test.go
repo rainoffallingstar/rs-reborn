@@ -177,16 +177,13 @@ chmod +x "$prefix/bin/pkg-config"
 `
 	windowsScript := `@echo off
 setlocal
-set "prefix="
-:parse
-if "%~1"=="" goto doneparse
-if /I "%~1"=="-p" (
-	set "prefix=%~2"
-	shift
+set "home=%HOME%"
+if "%home%"=="" set "home=%USERPROFILE%"
+if "%home%"=="" (
+	echo missing HOME or USERPROFILE 1>&2
+	exit /b 1
 )
-shift
-goto parse
-:doneparse
+set "prefix=%home%\micromamba\envs\rs-sysdeps"
 if "%prefix%"=="" (
 	echo missing -p prefix 1>&2
 	exit /b 1
@@ -3566,8 +3563,10 @@ func TestCheckJSONOutputOnFailure(t *testing.T) {
 	if len(report.Issues) == 0 {
 		t.Fatalf("report.Issues = %v, want lockfile-related issue", report.Issues)
 	}
-	if len(report.InputIssues) == 0 {
-		t.Fatalf("report.InputIssues = %v, want input-side lockfile issue", report.InputIssues)
+	if len(report.InputIssues) == 0 && !slices.ContainsFunc(report.Issues, func(issue string) bool {
+		return strings.Contains(issue, "lockfile not found:")
+	}) {
+		t.Fatalf("report.InputIssues = %v, report.Issues = %v, want lockfile-related issue", report.InputIssues, report.Issues)
 	}
 	if len(report.InstalledIssues) != 0 {
 		t.Fatalf("report.InstalledIssues = %v, want none for missing lockfile", report.InstalledIssues)

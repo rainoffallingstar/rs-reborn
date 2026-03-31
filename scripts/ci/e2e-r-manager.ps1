@@ -58,11 +58,12 @@ cat("native-r-e2e\n")
 cat("native-r-mismatch\n")
 '@ | Set-Content -LiteralPath $MismatchScriptPath -Encoding ascii
 
+    $rWhichToml = $rWhich -replace '\\', '/'
     @"
 repo = "https://cloud.r-project.org"
 cache_dir = ".rs-cache"
 lockfile = "rs.lock.json"
-rscript = "$rWhich"
+rscript = "$rWhichToml"
 r_version = "9.9"
 "@ | Set-Content -LiteralPath (Join-Path $MismatchProjectDir "rs.toml") -Encoding ascii
 

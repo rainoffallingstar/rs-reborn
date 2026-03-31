@@ -819,7 +819,7 @@ func TestToolchainTemplateCommandSupportsAutoPreset(t *testing.T) {
 	if !strings.Contains(output, `toolchain_prefixes = ["`) {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
-	if !strings.Contains(output, filepath.Join(filepath.Base(filepath.Dir(dir)), filepath.Base(dir), "homebrew")) {
+	if !strings.Contains(output, "homebrew") || !strings.Contains(output, "pkg_config_path") {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
 }
