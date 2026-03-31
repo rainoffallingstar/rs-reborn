@@ -71,6 +71,7 @@ cat("native-r-guidance\n")
     }
 
     Write-Host "native R bootstrap guidance E2E passed"
+    $global:LASTEXITCODE = 0
 } finally {
     if (Test-Path -LiteralPath $TmpDir) {
         Remove-Item -LiteralPath $TmpDir -Recurse -Force

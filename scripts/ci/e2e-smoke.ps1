@@ -87,6 +87,7 @@ cat(jsonlite::toJSON(list(args = args, lib = .libPaths()[1]), auto_unbox = TRUE)
     }
 
     Write-Host "CLI smoke E2E passed"
+    $global:LASTEXITCODE = 0
 } finally {
     if (Test-Path -LiteralPath $TmpDir) {
         Remove-Item -LiteralPath $TmpDir -Recurse -Force

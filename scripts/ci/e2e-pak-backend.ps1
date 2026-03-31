@@ -57,6 +57,7 @@ cat(jsonlite::toJSON(list(value = "pak-backend"), auto_unbox = TRUE), "\n")
     }
 
     Write-Host "Pak backend E2E passed"
+    $global:LASTEXITCODE = 0
 } finally {
     if (Test-Path -LiteralPath $TmpDir) {
         Remove-Item -LiteralPath $TmpDir -Recurse -Force

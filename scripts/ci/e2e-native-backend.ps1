@@ -48,6 +48,7 @@ cat(jsonlite::toJSON(list(value = "native-backend", bioc = as.character(packageV
     }
 
     Write-Host "Auto/native backend E2E passed"
+    $global:LASTEXITCODE = 0
 } finally {
     if (Test-Path -LiteralPath $TmpDir) {
         Remove-Item -LiteralPath $TmpDir -Recurse -Force

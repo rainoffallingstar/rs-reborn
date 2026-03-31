@@ -82,6 +82,7 @@ r_version = "9.9"
     }
 
     Write-Host "native R manager integration E2E passed"
+    $global:LASTEXITCODE = 0
 } finally {
     if (Test-Path -LiteralPath $TmpDir) {
         Remove-Item -LiteralPath $TmpDir -Recurse -Force

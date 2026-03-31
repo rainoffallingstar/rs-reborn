@@ -42,6 +42,7 @@ try {
     }
 
     Write-Host "release install smoke E2E passed"
+    $global:LASTEXITCODE = 0
 } finally {
     Remove-Item Env:RS_INSTALL_TAG, Env:RS_INSTALL_BASE_URL, Env:RS_INSTALL_DIR -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $TmpDir) {
