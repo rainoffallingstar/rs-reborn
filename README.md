@@ -272,7 +272,7 @@ export RS_PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/share/pkgconf
 
 `rs` expands each `toolchain_prefixes` entry into the usual `bin`, `include`, and `lib` locations and injects the resulting `PATH`, `CPPFLAGS`, `LDFLAGS`, and `PKG_CONFIG_PATH` automatically for native R builds and source package installs.
 
-The detailed rootless cookbook lives at [`docs/rootless-toolchains.md`](/Volumes/DataCenter_01/GitHub/gr/docs/rootless-toolchains.md). It includes copy-paste examples for `enva`, Homebrew-in-home, micromamba/mamba/Conda, and Spack, and explains the current product boundary clearly: `rs` auto-detects and auto-uses an existing user-local prefix by default, and with `--bootstrap-toolchain` it can invoke a supported external manager to create one for you.
+The detailed rootless cookbook lives at [`docs/rootless-toolchains.md`](/Volumes/DataCenter_01/GitHub/gr/docs/rootless-toolchains.md). It includes copy-paste examples for `enva`, Homebrew-in-home, compatibility conda-family layouts, and Spack, and explains the current product boundary clearly: `rs` auto-detects and auto-uses an existing user-local prefix by default, and with `--bootstrap-toolchain` it can invoke a supported external manager to create one for you.
 
 For faster bootstrapping, `rs init` also supports `--toolchain-preset auto|enva|micromamba|mamba|conda|homebrew|spack`, which seeds `toolchain_prefixes` and `pkg_config_path` with a common user-local template. `auto` reuses the top recommendation from `rs toolchain detect`, so if one of the built-in layouts already exists under your home directory you can wire it into a new project in one step. You can still append explicit `--toolchain-prefix` or `--pkg-config-path` values on the same command.
 
@@ -280,7 +280,7 @@ For faster bootstrapping, `rs init` also supports `--toolchain-preset auto|enva|
 
 When no explicit `toolchain_prefixes` / `pkg_config_path` config or `RS_TOOLCHAIN_PREFIXES` / `RS_PKG_CONFIG_PATH` environment is present, native source-build paths and runtime package-install environments now also auto-detect a recommended existing rootless prefix and use it automatically. Explicit config still wins.
 
-If no suitable prefix exists yet and you want `rs` to create one for you, use a command that accepts `--bootstrap-toolchain`. When `rs` needs to actively create a new conda-style toolchain prefix, the current bootstrap priority is `enva > micromamba > mamba > conda`. Already-detected Homebrew and Spack layouts are still recommended and reused by `auto` when they already exist:
+If no suitable prefix exists yet and you want `rs` to create one for you, use a command that accepts `--bootstrap-toolchain`. `auto` bootstrap now only attempts first-class managers such as `enva`, plus already-detected Homebrew and Spack layouts. Compatibility conda-family presets remain available when selected explicitly:
 
 ```bash
 rs run --bootstrap-toolchain analysis.R

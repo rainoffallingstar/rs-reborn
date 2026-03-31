@@ -35,6 +35,34 @@ func SupportedPresets() []string {
 	return []string{"enva", "micromamba", "mamba", "conda", "homebrew", "spack"}
 }
 
+func autoPresets() []string {
+	return []string{"enva", "homebrew", "spack"}
+}
+
+func detectCandidatesForPresets(home string, presets []string) ([]Candidate, error) {
+	homeDir, err := resolveHomeDir(home)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := []Candidate{}
+	for _, preset := range presets {
+		candidate, err := candidateForPreset(preset, homeDir)
+		if err != nil {
+			return nil, err
+		}
+		if len(candidate.ExistingPrefixes) == 0 && len(candidate.ExistingPkgConfigPath) == 0 {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	slices.SortFunc(candidates, compareCandidates)
+	if len(candidates) > 0 {
+		candidates[0].Recommended = true
+	}
+	return candidates, nil
+}
+
 func ResolvePreset(name, home string) ([]string, []string, error) {
 	name = strings.TrimSpace(strings.ToLower(name))
 	if name == "" {
@@ -100,31 +128,11 @@ func ResolvePreset(name, home string) ([]string, []string, error) {
 }
 
 func DetectCandidates(home string) ([]Candidate, error) {
-	homeDir, err := resolveHomeDir(home)
-	if err != nil {
-		return nil, err
-	}
-
-	candidates := []Candidate{}
-	for _, preset := range SupportedPresets() {
-		candidate, err := candidateForPreset(preset, homeDir)
-		if err != nil {
-			return nil, err
-		}
-		if len(candidate.ExistingPrefixes) == 0 && len(candidate.ExistingPkgConfigPath) == 0 {
-			continue
-		}
-		candidates = append(candidates, candidate)
-	}
-	slices.SortFunc(candidates, compareCandidates)
-	if len(candidates) > 0 {
-		candidates[0].Recommended = true
-	}
-	return candidates, nil
+	return detectCandidatesForPresets(home, SupportedPresets())
 }
 
 func RecommendedCandidate(home string) (*Candidate, error) {
-	candidates, err := DetectCandidates(home)
+	candidates, err := detectCandidatesForPresets(home, autoPresets())
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +232,7 @@ func BootstrapCandidate(name, home string, env []string) (*Candidate, error) {
 		return &candidate, nil
 	}
 	if strings.TrimSpace(strings.ToLower(name)) == "auto" {
-		return nil, fmt.Errorf("could not auto-bootstrap a rootless toolchain on this machine; no supported manager command is callable. Try `rs toolchain detect`, `rs toolchain bootstrap enva`, `rs toolchain bootstrap micromamba`, `rs toolchain bootstrap mamba`, `rs toolchain bootstrap conda`, `rs toolchain bootstrap homebrew`, or `rs toolchain bootstrap spack`")
+		return nil, fmt.Errorf("could not auto-bootstrap a rootless toolchain on this machine; no supported auto-bootstrap manager command is callable. Try `rs toolchain detect`, `rs toolchain bootstrap enva`, `rs toolchain bootstrap homebrew`, or `rs toolchain bootstrap spack`")
 	}
 	return nil, fmt.Errorf("toolchain preset %s is not callable on this machine; install or expose the matching manager first, or try `rs toolchain detect`", name)
 }
@@ -422,8 +430,8 @@ func bootstrapCandidates(name, home string) ([]Candidate, error) {
 	if err != nil {
 		return nil, err
 	}
-	candidates := make([]Candidate, 0, len(SupportedPresets()))
-	for _, preset := range SupportedPresets() {
+	candidates := make([]Candidate, 0, len(autoPresets()))
+	for _, preset := range autoPresets() {
 		candidate, err := candidateForPreset(preset, homeDir)
 		if err != nil {
 			return nil, err

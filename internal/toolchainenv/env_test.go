@@ -257,7 +257,7 @@ func TestMergeWithDetectedUsesRecommendedCandidateWhenUnset(t *testing.T) {
 	}
 }
 
-func TestBootstrapCandidateAutoUsesCallableMicromamba(t *testing.T) {
+func TestBootstrapCandidateExplicitMicromambaStillWorks(t *testing.T) {
 	dir := t.TempDir()
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -271,9 +271,9 @@ func TestBootstrapCandidateAutoUsesCallableMicromamba(t *testing.T) {
 		t.Fatalf("WriteFile(micromamba) error = %v", err)
 	}
 
-	candidate, err := BootstrapCandidate("auto", dir, []string{"PATH=" + binDir})
+	candidate, err := BootstrapCandidate("micromamba", dir, []string{"PATH=" + binDir})
 	if err != nil {
-		t.Fatalf("BootstrapCandidate() error = %v", err)
+		t.Fatalf("BootstrapCandidate(micromamba) error = %v", err)
 	}
 	if candidate == nil || candidate.Preset != "micromamba" {
 		t.Fatalf("candidate = %#v, want micromamba", candidate)
@@ -311,7 +311,7 @@ func TestBootstrapCandidateAutoPrefersEnvaBeforeMicromambaMambaAndConda(t *testi
 	}
 }
 
-func TestBootstrapCandidateAutoFallsBackToMambaThenConda(t *testing.T) {
+func TestBootstrapCandidateAutoDoesNotFallBackToCondaFamily(t *testing.T) {
 	dir := t.TempDir()
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -328,28 +328,11 @@ func TestBootstrapCandidateAutoFallsBackToMambaThenConda(t *testing.T) {
 	}
 
 	candidate, err := BootstrapCandidate("auto", dir, []string{"PATH=" + binDir})
-	if err != nil {
-		t.Fatalf("BootstrapCandidate() error = %v", err)
+	if err == nil {
+		t.Fatalf("BootstrapCandidate(auto) error = nil, candidate = %#v", candidate)
 	}
-	if candidate == nil || candidate.Preset != "mamba" {
-		t.Fatalf("candidate = %#v, want mamba", candidate)
-	}
-	if !strings.Contains(candidate.SuggestedSetupCommand, `" create -y -p "`) || !strings.Contains(candidate.SuggestedSetupCommand, "compilers binutils sysroot_linux-64=2.17 pkg-config make") {
-		t.Fatalf("candidate.SuggestedSetupCommand = %q", candidate.SuggestedSetupCommand)
-	}
-
-	for _, name := range []string{"mamba", "mamba.exe"} {
-		_ = os.Remove(filepath.Join(binDir, name))
-	}
-	candidate, err = BootstrapCandidate("auto", dir, []string{"PATH=" + binDir})
-	if err != nil {
-		t.Fatalf("BootstrapCandidate() error after mamba removal = %v", err)
-	}
-	if candidate == nil || candidate.Preset != "conda" {
-		t.Fatalf("candidate = %#v, want conda", candidate)
-	}
-	if !strings.Contains(candidate.SuggestedSetupCommand, `" create -y -p "`) || !strings.Contains(candidate.SuggestedSetupCommand, "compilers binutils sysroot_linux-64=2.17 pkg-config make") {
-		t.Fatalf("candidate.SuggestedSetupCommand = %q", candidate.SuggestedSetupCommand)
+	if !strings.Contains(err.Error(), "could not auto-bootstrap a rootless toolchain on this machine") {
+		t.Fatalf("BootstrapCandidate(auto) error = %v", err)
 	}
 }
 
@@ -383,9 +366,9 @@ func TestBootstrapRunsDetectedCommand(t *testing.T) {
 		t.Fatalf("WriteFile(micromamba) error = %v", err)
 	}
 
-	candidate, err := Bootstrap("auto", dir, []string{"PATH=" + binDir}, io.Discard, io.Discard)
+	candidate, err := Bootstrap("micromamba", dir, []string{"PATH=" + binDir}, io.Discard, io.Discard)
 	if err != nil {
-		t.Fatalf("Bootstrap() error = %v", err)
+		t.Fatalf("Bootstrap(micromamba) error = %v", err)
 	}
 	if candidate == nil || candidate.Preset != "micromamba" {
 		t.Fatalf("candidate = %#v, want micromamba", candidate)
@@ -492,6 +475,34 @@ func TestRecommendedCandidatePrefersAdoptedEnvaOverMamba(t *testing.T) {
 	}
 	if candidate.SuggestedInitCommand != "rs init --toolchain-prefix "+actualPrefix+" --pkg-config-path "+filepath.Join(actualPrefix, "lib", "pkgconfig")+" --pkg-config-path "+filepath.Join(actualPrefix, "share", "pkgconfig") {
 		t.Fatalf("candidate.SuggestedInitCommand = %q", candidate.SuggestedInitCommand)
+	}
+}
+
+func TestRecommendedCandidateAutoIgnoresCondaFamilyFallbacks(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	for _, path := range []string{
+		filepath.Join(dir, "micromamba", "envs", "rs-sysdeps"),
+		filepath.Join(dir, "micromamba", "envs", "rs-sysdeps", "lib", "pkgconfig"),
+		filepath.Join(dir, "micromamba", "envs", "rs-sysdeps", "share", "pkgconfig"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps", "lib", "pkgconfig"),
+		filepath.Join(dir, ".local", "share", "mamba", "envs", "rs-sysdeps", "share", "pkgconfig"),
+		filepath.Join(dir, ".conda", "envs", "rs-sysdeps"),
+		filepath.Join(dir, ".conda", "envs", "rs-sysdeps", "lib", "pkgconfig"),
+		filepath.Join(dir, ".conda", "envs", "rs-sysdeps", "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	candidate, err := RecommendedCandidate(dir)
+	if err != nil {
+		t.Fatalf("RecommendedCandidate() error = %v", err)
+	}
+	if candidate != nil {
+		t.Fatalf("RecommendedCandidate() = %#v, want nil", candidate)
 	}
 }
 

@@ -106,7 +106,7 @@ These are starting points, not guaranteed universal one-liners. The exact librar
 
 ### enva
 
-If you already use `enva`, this is now the preferred rootless bootstrap path. `rs` treats it as a first-class toolchain manager and will prefer it over micromamba/mamba/conda when all are callable:
+If you already use `enva`, this is now the preferred rootless bootstrap path. `rs` treats it as the first-class conda-style toolchain manager, and `auto` bootstrap now stays on `enva` instead of falling back to micromamba/mamba/conda:
 
 ```bash
 rs toolchain bootstrap enva
@@ -118,7 +118,7 @@ rs doctor --toolchain-only
 
 ### micromamba
 
-If micromamba, mamba, or Conda is already allowed on your machine, these remain supported compatibility bootstrap paths:
+If micromamba, mamba, or Conda is already allowed on your machine, these remain supported compatibility bootstrap paths when selected explicitly:
 
 ```bash
 micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make

@@ -62,12 +62,9 @@ This release also makes rootless and user-local source-build flows much more pra
 - `rs toolchain detect`, `rs toolchain template`, and `rs doctor --toolchain-only` now provide a complete discover/preview/validate loop
 - commands such as `rs run`, `rs lock`, `rs check`, `rs doctor`, and `rs r install --method source` now accept `--bootstrap-toolchain` to explicitly create a user-local toolchain prefix through a supported external manager when needed
 
-For active bootstrap of a new conda-style build-tools prefix, the current priority is:
+For active bootstrap of a new conda-style build-tools prefix, `auto` now stays on:
 
 - `enva`
-- `micromamba`
-- `mamba`
-- `conda`
 
 Already-detected Homebrew and Spack layouts remain supported and are still recommended by `auto` when they already exist on the machine.
 

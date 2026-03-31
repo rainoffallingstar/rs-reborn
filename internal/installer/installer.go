@@ -2,6 +2,7 @@ package installer
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bufio"
 	"compress/gzip"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -40,6 +42,8 @@ const (
 	localKindDirSHA256  = "dir_tree_sha256"
 	localKindMissing    = "missing"
 	localKindError      = "unavailable"
+	defaultHTTPTimeout  = 90 * time.Second
+	httpRetryAttempts   = 3
 )
 
 var (
@@ -520,7 +524,7 @@ func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {
 		resolving:         map[string]bool{},
 		resolved:          map[string]bool{},
 		sourceCache:       map[string]preparedSource{},
-		httpClient:        &http.Client{Timeout: 30 * time.Second},
+		httpClient:        &http.Client{Timeout: defaultHTTPTimeout},
 		requirements:      map[string][]constraintRequest{},
 		cranArchiveLoaded: map[string]bool{},
 		selectedVersions:  map[string]string{},
@@ -1254,13 +1258,19 @@ func buildInstallCommand(rBinary, workDir, cacheRoot, libraryPath string, env []
 func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 	target := filepath.Join(i.downloadRoot, downloadCacheName(rawURL, name))
 	if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 {
-		progresscmd.Stage(i.stderr, "reusing cached "+name)
-		return target, nil
+		if err := validateCachedDownload(target); err == nil {
+			progresscmd.Stage(i.stderr, "reusing cached "+name)
+			return target, nil
+		}
+		_ = os.Remove(target)
 	}
 	legacyTarget := filepath.Join(i.downloadRoot, legacyDownloadCacheName(rawURL, name))
 	if info, err := os.Stat(legacyTarget); err == nil && !info.IsDir() && info.Size() > 0 {
-		progresscmd.Stage(i.stderr, "reusing cached "+name)
-		return legacyTarget, nil
+		if err := validateCachedDownload(legacyTarget); err == nil {
+			progresscmd.Stage(i.stderr, "reusing cached "+name)
+			return legacyTarget, nil
+		}
+		_ = os.Remove(legacyTarget)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -1268,22 +1278,7 @@ func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 	}
 
 	i.stage("downloading " + name)
-	resp, err := getWithRetry(i.httpClient, rawURL)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected HTTP %d from %s", resp.StatusCode, rawURL)
-	}
-
-	file, err := os.Create(target)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	if err := progresscmd.Copy(file, resp.Body, resp.ContentLength, "downloading "+name, i.stderr); err != nil {
+	if err := downloadWithRetry(i.httpClient, rawURL, target, "downloading "+name, i.stderr); err != nil {
 		return "", err
 	}
 	return target, nil
@@ -1592,6 +1587,25 @@ func appendRepoCandidate(index map[string][]repoRecord, record repoRecord) {
 }
 
 func fetchPackagesFile(client *http.Client, rawURL string) ([]byte, error) {
+	var lastErr error
+	backoff := 500 * time.Millisecond
+	for attempt := 0; attempt < httpRetryAttempts; attempt++ {
+		data, err := fetchPackagesFileOnce(client, rawURL)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		if attempt < httpRetryAttempts-1 && shouldRetryHTTPOperation(err) {
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+		break
+	}
+	return nil, lastErr
+}
+
+func fetchPackagesFileOnce(client *http.Client, rawURL string) ([]byte, error) {
 	resp, err := getWithRetry(client, rawURL)
 	if err != nil {
 		return nil, err
@@ -1639,18 +1653,158 @@ func parseArchiveVersions(pkg, body string) []string {
 func getWithRetry(client *http.Client, rawURL string) (*http.Response, error) {
 	var lastErr error
 	backoff := 500 * time.Millisecond
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < httpRetryAttempts; attempt++ {
 		resp, err := client.Get(rawURL)
 		if err == nil {
 			return resp, nil
 		}
 		lastErr = err
-		if attempt < 2 {
+		if attempt < httpRetryAttempts-1 && shouldRetryHTTPOperation(err) {
 			time.Sleep(backoff)
 			backoff *= 2
+			continue
 		}
+		break
 	}
 	return nil, lastErr
+}
+
+func shouldRetryHTTPOperation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "temporary") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "unexpected eof")
+}
+
+func downloadWithRetry(client *http.Client, rawURL, target, label string, progress io.Writer) error {
+	var lastErr error
+	backoff := 500 * time.Millisecond
+	for attempt := 0; attempt < httpRetryAttempts; attempt++ {
+		err := downloadOnce(client, rawURL, target, label, progress)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt < httpRetryAttempts-1 && shouldRetryHTTPOperation(err) {
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+		break
+	}
+	return lastErr
+}
+
+func downloadOnce(client *http.Client, rawURL, target, label string, progress io.Writer) error {
+	resp, err := getWithRetry(client, rawURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected HTTP %d from %s", resp.StatusCode, rawURL)
+	}
+
+	part := target + ".part"
+	_ = os.Remove(part)
+	file, err := os.Create(part)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		file.Close()
+		_ = os.Remove(part)
+	}()
+
+	if err := progresscmd.Copy(file, resp.Body, resp.ContentLength, label, progress); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := validateCachedDownload(part); err != nil {
+		return err
+	}
+	if err := os.Rename(part, target); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCachedDownload(path string) error {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+		return validateTarGz(path)
+	case strings.HasSuffix(lower, ".zip"):
+		return validateZip(path)
+	default:
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if info.Size() <= 0 {
+			return fmt.Errorf("empty cached file")
+		}
+		return nil
+	}
+}
+
+func validateTarGz(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	gzReader, err := gzip.NewReader(file)
+	if err != nil {
+		return err
+	}
+	defer gzReader.Close()
+	tarReader := tar.NewReader(gzReader)
+	for {
+		_, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, tarReader); err != nil {
+			return err
+		}
+	}
+}
+
+func validateZip(path string) error {
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	for _, file := range reader.File {
+		rc, err := file.Open()
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(io.Discard, rc); err != nil {
+			rc.Close()
+			return err
+		}
+		if err := rc.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func parseDCF(data []byte) []map[string]string {

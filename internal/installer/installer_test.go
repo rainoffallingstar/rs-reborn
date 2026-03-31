@@ -22,6 +22,28 @@ import (
 	"gr/internal/toolchainenv"
 )
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type timeoutReadCloser struct {
+	read func(p []byte) (int, error)
+}
+
+func (r timeoutReadCloser) Read(p []byte) (int, error) {
+	return r.read(p)
+}
+
+func (r timeoutReadCloser) Close() error { return nil }
+
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
+
 func setTestHomeDir(t *testing.T, dir string) {
 	t.Helper()
 	t.Setenv("HOME", dir)
@@ -472,9 +494,12 @@ func TestCanParallelInstallPurePackagesDisablesWindows(t *testing.T) {
 func TestDownloadReusesPersistentCache(t *testing.T) {
 	dir := t.TempDir()
 	var hits int
+	archive := testTarGzBytes(t, map[string]string{
+		"pkg/DESCRIPTION": "Package: pkg\nVersion: 1.0.0\n",
+	})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits++
-		_, _ = w.Write([]byte("archive-bytes"))
+		_, _ = w.Write(archive)
 	}))
 	defer server.Close()
 
@@ -506,6 +531,91 @@ func TestDownloadReusesPersistentCache(t *testing.T) {
 	}
 }
 
+func TestDownloadRemovesCorruptCachedTarballAndRedownloads(t *testing.T) {
+	dir := t.TempDir()
+	var hits int
+	archive := testTarGzBytes(t, map[string]string{
+		"pkg/DESCRIPTION": "Package: pkg\nVersion: 1.0.0\n",
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+
+	inst := nativeInstaller{
+		tempRoot:     filepath.Join(dir, "tmp"),
+		downloadRoot: filepath.Join(dir, "downloads"),
+		stderr:       io.Discard,
+		httpClient:   server.Client(),
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+
+	target := filepath.Join(inst.downloadRoot, downloadCacheName(server.URL+"/pkg.tar.gz", "pkg_1.0.0.tar.gz"))
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("MkdirAll(target dir) error = %v", err)
+	}
+	if err := os.WriteFile(target, []byte("corrupt"), 0o644); err != nil {
+		t.Fatalf("WriteFile(corrupt cache) error = %v", err)
+	}
+
+	got, err := inst.download(server.URL+"/pkg.tar.gz", "pkg_1.0.0.tar.gz")
+	if err != nil {
+		t.Fatalf("download() error = %v", err)
+	}
+	if got != target {
+		t.Fatalf("download() = %q, want %q", got, target)
+	}
+	if hits != 1 {
+		t.Fatalf("download server hits = %d, want 1", hits)
+	}
+	if err := validateCachedDownload(target); err != nil {
+		t.Fatalf("validateCachedDownload(downloaded file) error = %v", err)
+	}
+}
+
+func TestFetchPackagesFileRetriesBodyReadTimeout(t *testing.T) {
+	packages := "Package: cli\nVersion: 3.6.5\n\n"
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte(packages))
+	_ = gz.Close()
+
+	attempts := 0
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			if attempts == 1 {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: timeoutReadCloser{read: func(p []byte) (int, error) {
+						return 0, timeoutErr{}
+					}},
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+			}, nil
+		}),
+	}
+
+	data, err := fetchPackagesFile(client, "https://example.test/src/contrib/PACKAGES.gz")
+	if err != nil {
+		t.Fatalf("fetchPackagesFile() error = %v", err)
+	}
+	if string(data) != packages {
+		t.Fatalf("fetchPackagesFile() = %q, want %q", string(data), packages)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
 func TestDownloadCacheNamePreservesOriginalBasename(t *testing.T) {
 	got := downloadCacheName("https://cloud.r-project.org/bin/windows/contrib/4.4/jsonlite_2.0.0.zip", "jsonlite_2.0.0.zip")
 	if filepath.Base(got) != "jsonlite_2.0.0.zip" {
@@ -514,6 +624,33 @@ func TestDownloadCacheNamePreservesOriginalBasename(t *testing.T) {
 	if filepath.Dir(got) == "." {
 		t.Fatalf("downloadCacheName() = %q, want hashed subdirectory", got)
 	}
+}
+
+func testTarGzBytes(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var gzBuf bytes.Buffer
+	gzWriter := gzip.NewWriter(&gzBuf)
+	tarWriter := tar.NewWriter(gzWriter)
+	for name, body := range files {
+		data := []byte(body)
+		if err := tarWriter.WriteHeader(&tar.Header{
+			Name: name,
+			Mode: 0o644,
+			Size: int64(len(data)),
+		}); err != nil {
+			t.Fatalf("WriteHeader(%q) error = %v", name, err)
+		}
+		if _, err := tarWriter.Write(data); err != nil {
+			t.Fatalf("Write(%q) error = %v", name, err)
+		}
+	}
+	if err := tarWriter.Close(); err != nil {
+		t.Fatalf("tarWriter.Close() error = %v", err)
+	}
+	if err := gzWriter.Close(); err != nil {
+		t.Fatalf("gzWriter.Close() error = %v", err)
+	}
+	return gzBuf.Bytes()
 }
 
 func TestDescribeLocalFingerprintForFileAndMissing(t *testing.T) {

@@ -115,7 +115,7 @@ Unless additional validation changes this, the safest public statement is:
 - explicit interpreter selection via `rscript` and `--rscript` is supported
 - `rs r ...` is a first-party native R manager on macOS, Linux, and Windows x64
 - rootless source-build flows support detected user-local prefixes by default, plus explicit `--bootstrap-toolchain` opt-in for manager-driven prefix creation
-- the current conda-style bootstrap priority is `enva > micromamba > mamba > conda`
+- conda-style `auto` bootstrap stays on `enva`; micromamba/mamba/conda remain explicit compatibility presets only
 - Windows ARM64 remains a shipped secondary artifact with lighter validation depth
 - stable automation-oriented commands today are `scan`, `list`, `doctor`, `check`, `lock`, `sync`, `run`, `exec`, `shell`, and `rs r list|install|use|which` on macOS, Linux, and Windows x64
 
