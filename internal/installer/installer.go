@@ -21,6 +21,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"gr/internal/progresscmd"
@@ -239,27 +240,241 @@ func Install(req Request) error {
 		return err
 	}
 
+	if inst.canParallelInstallPurePackages() {
+		for _, layer := range installPlanLayers(inst.planned, inst.order) {
+			pure := make([]string, 0, len(layer))
+			compiled := make([]string, 0, len(layer))
+			for _, name := range layer {
+				if inst.isPlannedPackageInstalled(inst.planned[name]) {
+					continue
+				}
+				if plannedPackageNeedsCompilation(inst.planned[name]) {
+					compiled = append(compiled, name)
+					continue
+				}
+				pure = append(pure, name)
+			}
+			installed, err := inst.installPackageBatch(pure)
+			if err != nil {
+				return err
+			}
+			for _, name := range installed {
+				inst.installedPackages[name] = installedPackageForPlanned(inst.planned[name])
+			}
+			for _, name := range compiled {
+				installed, err := inst.installPlannedPackage(name)
+				if err != nil {
+					return err
+				}
+				if installed {
+					inst.installedPackages[name] = installedPackageForPlanned(inst.planned[name])
+				}
+			}
+		}
+		return nil
+	}
+
 	for _, name := range inst.order {
-		pkg := inst.planned[name]
-		if inst.isPlannedPackageInstalled(pkg) {
-			continue
+		installed, err := inst.installPlannedPackage(name)
+		if err != nil {
+			return err
 		}
-		switch pkg.Source {
-		case sourceCRAN, sourceBioconductor:
-			if err := inst.installRepoPackage(*pkg.Repo); err != nil {
-				return err
-			}
-		case sourceLocal, sourceGit, sourceGitHub:
-			if err := inst.installPreparedSource(*pkg.Prepared); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("unsupported native source %q for package %s", pkg.Source, name)
+		if installed {
+			inst.installedPackages[name] = installedPackageForPlanned(inst.planned[name])
 		}
-		inst.installedPackages[name] = installedPackageForPlanned(pkg)
 	}
 
 	return nil
+}
+
+func (i *nativeInstaller) canParallelInstallPurePackages() bool {
+	if writerIsTTY(i.stderr) {
+		return false
+	}
+	return true
+}
+
+func writerIsTTY(w io.Writer) bool {
+	file, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func plannedPackageNeedsCompilation(pkg plannedPackage) bool {
+	switch {
+	case pkg.Repo != nil:
+		return pkg.Repo.NeedsCompilation
+	case pkg.Prepared != nil:
+		return pkg.Prepared.NeedsCompilation
+	default:
+		return false
+	}
+}
+
+func installPlanLayers(planned map[string]plannedPackage, order []string) [][]string {
+	if len(order) == 0 {
+		return nil
+	}
+
+	orderIndex := make(map[string]int, len(order))
+	for idx, name := range order {
+		orderIndex[name] = idx
+	}
+
+	remaining := make(map[string]int, len(planned))
+	dependents := make(map[string][]string, len(planned))
+	for name := range planned {
+		remaining[name] = 0
+	}
+	for name, pkg := range planned {
+		seen := map[string]struct{}{}
+		for _, dep := range pkg.Deps {
+			if _, ok := planned[dep.Name]; !ok {
+				continue
+			}
+			if _, ok := seen[dep.Name]; ok {
+				continue
+			}
+			seen[dep.Name] = struct{}{}
+			remaining[name]++
+			dependents[dep.Name] = append(dependents[dep.Name], name)
+		}
+	}
+
+	ready := make([]string, 0, len(planned))
+	for _, name := range order {
+		if remaining[name] == 0 {
+			ready = append(ready, name)
+		}
+	}
+
+	layers := make([][]string, 0, len(planned))
+	processed := 0
+	for len(ready) > 0 {
+		slices.SortFunc(ready, func(a, b string) int {
+			return orderIndex[a] - orderIndex[b]
+		})
+		layer := append([]string(nil), ready...)
+		layers = append(layers, layer)
+		next := make([]string, 0, len(planned))
+		for _, name := range ready {
+			processed++
+			for _, dependent := range dependents[name] {
+				remaining[dependent]--
+				if remaining[dependent] == 0 {
+					next = append(next, dependent)
+				}
+			}
+		}
+		ready = next
+	}
+
+	if processed == len(planned) {
+		return layers
+	}
+
+	// Fall back to deterministic serial order if an unexpected cycle slips through planning.
+	fallback := make([]string, 0, len(planned)-processed)
+	for _, name := range order {
+		if remaining[name] > 0 {
+			fallback = append(fallback, name)
+		}
+	}
+	if len(fallback) > 0 {
+		layers = append(layers, fallback)
+	}
+	return layers
+}
+
+func (i *nativeInstaller) installPlannedPackage(name string) (bool, error) {
+	pkg := i.planned[name]
+	if i.isPlannedPackageInstalled(pkg) {
+		return false, nil
+	}
+	switch pkg.Source {
+	case sourceCRAN, sourceBioconductor:
+		if err := i.installRepoPackage(*pkg.Repo); err != nil {
+			return false, err
+		}
+	case sourceLocal, sourceGit, sourceGitHub:
+		if err := i.installPreparedSource(*pkg.Prepared); err != nil {
+			return false, err
+		}
+	default:
+		return false, fmt.Errorf("unsupported native source %q for package %s", pkg.Source, name)
+	}
+	return true, nil
+}
+
+func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	if len(names) == 1 {
+		installed, err := i.installPlannedPackage(names[0])
+		if err != nil || !installed {
+			return nil, err
+		}
+		return []string{names[0]}, nil
+	}
+
+	type installResult struct {
+		name      string
+		installed bool
+		err       error
+	}
+
+	workers := len(names)
+	if workers > 4 {
+		workers = 4
+	}
+	jobs := make(chan string)
+	results := make(chan installResult, len(names))
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for name := range jobs {
+				installed, err := i.installPlannedPackage(name)
+				results <- installResult{name: name, installed: installed, err: err}
+			}
+		}()
+	}
+
+	for _, name := range names {
+		jobs <- name
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	byName := make(map[string]installResult, len(names))
+	for result := range results {
+		byName[result.name] = result
+	}
+
+	installed := make([]string, 0, len(names))
+	for _, name := range names {
+		result, ok := byName[name]
+		if !ok {
+			return nil, fmt.Errorf("install batch did not return a result for package %s", name)
+		}
+		if result.err != nil {
+			return nil, result.err
+		}
+		if result.installed {
+			installed = append(installed, name)
+		}
+	}
+	return installed, nil
 }
 
 func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {

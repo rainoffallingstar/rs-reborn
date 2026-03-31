@@ -353,6 +353,49 @@ func TestBuildInstallCommandPreservesExplicitCompilerOverrides(t *testing.T) {
 	}
 }
 
+func TestInstallPlanLayersPreservesDependencyLayers(t *testing.T) {
+	planned := map[string]plannedPackage{
+		"jsonlite": {Name: "jsonlite"},
+		"glue":     {Name: "glue"},
+		"cli": {
+			Name: "cli",
+			Deps: []packageRequirement{{Name: "glue"}},
+		},
+		"pillar": {
+			Name: "pillar",
+			Deps: []packageRequirement{{Name: "cli"}, {Name: "jsonlite"}},
+		},
+	}
+
+	got := installPlanLayers(planned, []string{"jsonlite", "glue", "cli", "pillar"})
+	want := [][]string{
+		{"jsonlite", "glue"},
+		{"cli"},
+		{"pillar"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("installPlanLayers() = %v, want %v", got, want)
+	}
+}
+
+func TestInstallPlanLayersIgnoresDependenciesOutsidePlan(t *testing.T) {
+	planned := map[string]plannedPackage{
+		"cli": {
+			Name: "cli",
+			Deps: []packageRequirement{{Name: "methods"}},
+		},
+		"jsonlite": {Name: "jsonlite"},
+	}
+
+	got := installPlanLayers(planned, []string{"cli", "jsonlite"})
+	want := [][]string{
+		{"cli", "jsonlite"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("installPlanLayers() = %v, want %v", got, want)
+	}
+}
+
 func TestDownloadReusesPersistentCache(t *testing.T) {
 	dir := t.TempDir()
 	var hits int
