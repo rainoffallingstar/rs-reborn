@@ -18,6 +18,12 @@ import (
 	"gr/internal/project"
 )
 
+func setTestHomeDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
 func TestParseDependenciesDropsRAndVersionConstraints(t *testing.T) {
 	got := parseDependencies(
 		"R (>= 4.3), cli (>= 3.0), jsonlite",
@@ -47,6 +53,12 @@ func TestParseDCFSupportsContinuationLines(t *testing.T) {
 }
 
 func TestFetchRepoIndexParsesPackagesGz(t *testing.T) {
+	oldGOOS := installerGOOS
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+	})
+	installerGOOS = "linux"
+
 	packages := "Package: cli\nVersion: 3.6.5\nImports: glue\n\nPackage: jsonlite\nVersion: 1.8.9\nDepends: methods\n\n"
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -363,15 +375,19 @@ func TestEnsureLinuxSourceBuildToolsUsesDistroAdvice(t *testing.T) {
 }
 
 func TestWithLibraryEnvPreservesToolchainEnvironment(t *testing.T) {
+	prefix := filepath.Join(string(filepath.Separator), "opt", "demo")
+	pkgConfig := filepath.Join(prefix, "lib", "pkgconfig")
+	pathValue := strings.Join([]string{filepath.Join(prefix, "bin"), filepath.Join(string(filepath.Separator), "usr", "bin")}, string(os.PathListSeparator))
+	libPath := filepath.Join(string(filepath.Separator), "tmp", "lib")
 	env := withLibraryEnv([]string{
-		"PATH=/opt/demo/bin:/usr/bin",
-		"RS_TOOLCHAIN_PREFIXES=/opt/demo",
-		"RS_PKG_CONFIG_PATH=/opt/demo/lib/pkgconfig",
-	}, "/tmp/lib")
-	if !slices.Contains(env, "R_LIBS=/tmp/lib") || !slices.Contains(env, "R_LIBS_USER=/tmp/lib") {
+		"PATH=" + pathValue,
+		"RS_TOOLCHAIN_PREFIXES=" + prefix,
+		"RS_PKG_CONFIG_PATH=" + pkgConfig,
+	}, libPath)
+	if !slices.Contains(env, "R_LIBS="+libPath) || !slices.Contains(env, "R_LIBS_USER="+libPath) {
 		t.Fatalf("withLibraryEnv() = %v", env)
 	}
-	if !slices.Contains(env, "RS_TOOLCHAIN_PREFIXES=/opt/demo") || !slices.Contains(env, "RS_PKG_CONFIG_PATH=/opt/demo/lib/pkgconfig") {
+	if !slices.Contains(env, "RS_TOOLCHAIN_PREFIXES="+prefix) || !slices.Contains(env, "RS_PKG_CONFIG_PATH="+pkgConfig) {
 		t.Fatalf("withLibraryEnv() lost toolchain env: %v", env)
 	}
 }
@@ -409,7 +425,7 @@ func TestValidateBuildPrerequisitesFailsEarlyOnLinuxCompilationPackage(t *testin
 
 func TestRootlessToolchainAdviceIncludesDetectedPresetRecommendation(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	for _, path := range []string{
 		homebrewPrefix,

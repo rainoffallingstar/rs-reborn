@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -493,10 +494,12 @@ func TestToolchainTemplateCommandPrintsTOML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toolchainTemplateCommand() error = %v", err)
 	}
-	if !strings.Contains(output, `toolchain_prefixes = ["/demo-home/micromamba/envs/rs-sysdeps"]`) {
+	prefix := filepath.Join("/demo-home", "micromamba", "envs", "rs-sysdeps")
+	if !strings.Contains(output, `toolchain_prefixes = [`+strconv.Quote(prefix)+`]`) {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
-	if !strings.Contains(output, `pkg_config_path = ["/demo-home/micromamba/envs/rs-sysdeps/lib/pkgconfig", "/demo-home/micromamba/envs/rs-sysdeps/share/pkgconfig"]`) {
+	wantPkg := `pkg_config_path = [` + strconv.Quote(filepath.Join(prefix, "lib", "pkgconfig")) + `, ` + strconv.Quote(filepath.Join(prefix, "share", "pkgconfig")) + `]`
+	if !strings.Contains(output, wantPkg) {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
 }
@@ -516,10 +519,12 @@ func TestToolchainTemplateCommandPrintsEnvaPreset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toolchainTemplateCommand() error = %v", err)
 	}
-	if !strings.Contains(output, `toolchain_prefixes = ["/demo-home/.local/share/rattler/envs/rs-sysdeps"]`) {
+	prefix := filepath.Join("/demo-home", ".local", "share", "rattler", "envs", "rs-sysdeps")
+	if !strings.Contains(output, `toolchain_prefixes = [`+strconv.Quote(prefix)+`]`) {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
-	if !strings.Contains(output, `pkg_config_path = ["/demo-home/.local/share/rattler/envs/rs-sysdeps/lib/pkgconfig", "/demo-home/.local/share/rattler/envs/rs-sysdeps/share/pkgconfig"]`) {
+	wantPkg := `pkg_config_path = [` + strconv.Quote(filepath.Join(prefix, "lib", "pkgconfig")) + `, ` + strconv.Quote(filepath.Join(prefix, "share", "pkgconfig")) + `]`
+	if !strings.Contains(output, wantPkg) {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
 }
@@ -539,10 +544,15 @@ func TestToolchainTemplateCommandPrintsEnv(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toolchainTemplateCommand() error = %v", err)
 	}
-	if !strings.Contains(output, `export RS_TOOLCHAIN_PREFIXES='/demo-home/homebrew'`) {
+	prefix := filepath.Join("/demo-home", "homebrew")
+	if !strings.Contains(output, `export RS_TOOLCHAIN_PREFIXES='`+prefix+`'`) {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
-	if !strings.Contains(output, `export RS_PKG_CONFIG_PATH='/demo-home/homebrew/lib/pkgconfig:/demo-home/homebrew/share/pkgconfig'`) {
+	wantPkg := strings.Join([]string{
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+	}, string(os.PathListSeparator))
+	if !strings.Contains(output, `export RS_PKG_CONFIG_PATH='`+wantPkg+`'`) {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
 }
@@ -608,7 +618,8 @@ func TestToolchainTemplateCommandCheckFailsWhenPathsMissing(t *testing.T) {
 	if err == nil {
 		t.Fatal("toolchainTemplateCommand() error = nil, want missing-path failure")
 	}
-	if !strings.Contains(output, "[check] toolchain prefix missing: /demo-home/micromamba/envs/rs-sysdeps") {
+	prefix := filepath.Join("/demo-home", "micromamba", "envs", "rs-sysdeps")
+	if !strings.Contains(output, "[check] toolchain prefix missing: "+prefix) {
 		t.Fatalf("toolchainTemplateCommand() output = %q", output)
 	}
 	if !strings.Contains(output, "[summary] preset paths are missing on this machine") {

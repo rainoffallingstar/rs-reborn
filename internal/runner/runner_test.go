@@ -25,8 +25,7 @@ import (
 func writeFakeRscript(t *testing.T, dir string) string {
 	t.Helper()
 
-	path := filepath.Join(dir, "Rscript")
-	script := `#!/bin/sh
+	unixScript := `#!/bin/sh
 if [ "$1" = "--vanilla" ]; then
 	shift
 fi
@@ -40,20 +39,41 @@ pkg_type	source
 EOF
 	exit 0
 fi
+if [ -n "$1" ]; then
+	cat <<'EOF'
+version	4.4.1
+platform	x86_64-pc-linux-gnu
+arch	x86_64
+os	linux-gnu
+pkg_type	source
+EOF
+	exit 0
+fi
 echo "unexpected fake Rscript args: $*" >&2
 exit 1
 `
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
-	}
-	return path
+	windowsScript := `@echo off
+setlocal
+if /I "%~1"=="--vanilla" shift
+if /I "%~1"=="-e" goto inspect
+if not "%~1"=="" goto inspect
+echo unexpected fake Rscript args: %* 1>&2
+exit /b 1
+:inspect
+echo version	4.4.1
+echo platform	x86_64-pc-windows-gnu
+echo arch	x86_64
+echo os	mingw32
+echo pkg_type	binary
+exit /b 0
+`
+	return writeTestCommand(t, dir, "Rscript", unixScript, windowsScript)
 }
 
 func writeFakeRscriptWithVersion(t *testing.T, dir, version string) string {
 	t.Helper()
 
-	path := filepath.Join(dir, "Rscript")
-	script := fmt.Sprintf(`#!/bin/sh
+	unixScript := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "--vanilla" ]; then
 	shift
 fi
@@ -67,20 +87,41 @@ pkg_type	source
 EOF
 	exit 0
 fi
+if [ -n "$1" ]; then
+	cat <<'EOF'
+version	%s
+platform	x86_64-pc-linux-gnu
+arch	x86_64
+os	linux-gnu
+pkg_type	source
+EOF
+	exit 0
+fi
 echo "unexpected fake Rscript args: $*" >&2
 exit 1
+`, version, version)
+	windowsScript := fmt.Sprintf(`@echo off
+setlocal
+if /I "%%~1"=="--vanilla" shift
+if /I "%%~1"=="-e" goto inspect
+if not "%%~1"=="" goto inspect
+echo unexpected fake Rscript args: %%* 1>&2
+exit /b 1
+:inspect
+echo version	%s
+echo platform	x86_64-pc-windows-gnu
+echo arch	x86_64
+echo os	mingw32
+echo pkg_type	binary
+exit /b 0
 `, version)
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
-	}
-	return path
+	return writeTestCommand(t, dir, "Rscript", unixScript, windowsScript)
 }
 
 func writeFailingFakeRscript(t *testing.T, dir string) string {
 	t.Helper()
 
-	path := filepath.Join(dir, "Rscript")
-	script := `#!/bin/sh
+	unixScript := `#!/bin/sh
 if [ "$1" = "--vanilla" ]; then
 	shift
 fi
@@ -88,20 +129,31 @@ if [ "$1" = "-e" ]; then
 	echo "runtime inspect failed" >&2
 	exit 9
 fi
+if [ -n "$1" ]; then
+	echo "runtime inspect failed" >&2
+	exit 9
+fi
 echo "unexpected fake Rscript args: $*" >&2
 exit 1
 `
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
-	}
-	return path
+	windowsScript := `@echo off
+setlocal
+if /I "%~1"=="--vanilla" shift
+if /I "%~1"=="-e" goto fail
+if not "%~1"=="" goto fail
+echo unexpected fake Rscript args: %* 1>&2
+exit /b 1
+:fail
+echo runtime inspect failed 1>&2
+exit /b 9
+`
+	return writeTestCommand(t, dir, "Rscript", unixScript, windowsScript)
 }
 
 func writeFakeMicromamba(t *testing.T, dir string) string {
 	t.Helper()
 
-	path := filepath.Join(dir, "micromamba")
-	script := `#!/bin/sh
+	unixScript := `#!/bin/sh
 prefix=""
 while [ "$#" -gt 0 ]; do
 	case "$1" in
@@ -123,10 +175,64 @@ exit 0
 EOF
 chmod +x "$prefix/bin/pkg-config"
 `
+	windowsScript := `@echo off
+setlocal EnableDelayedExpansion
+set "prefix="
+:parse
+if "%~1"=="" goto doneparse
+if /I "%~1"=="-p" (
+	shift
+	set "prefix=%~1"
+)
+shift
+goto parse
+:doneparse
+if "%prefix%"=="" (
+	echo missing -p prefix 1>&2
+	exit /b 1
+)
+mkdir "%prefix%\bin" "%prefix%\lib\pkgconfig" "%prefix%\share\pkgconfig" >NUL 2>&1
+type nul > "%prefix%\bin\pkg-config.cmd"
+type nul > "%prefix%\bin\pkg-config.exe"
+exit /b 0
+`
+	return writeTestCommand(t, dir, "micromamba", unixScript, windowsScript)
+}
+
+func writeTestCommand(t *testing.T, dir, name, unixScript, windowsScript string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	script := unixScript
+	if runtime.GOOS == "windows" {
+		path += ".cmd"
+		script = windowsScript
+	}
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("WriteFile(fake micromamba) error = %v", err)
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
 	return path
+}
+
+func setTestHomeDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
+func testFileURL(path string) string {
+	slashed := filepath.ToSlash(filepath.Clean(path))
+	if strings.HasPrefix(slashed, "/") {
+		return "file://" + slashed
+	}
+	return "file:///" + slashed
+}
+
+func testCommandPath(rooted string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(string(filepath.Separator), strings.TrimPrefix(rooted, "/"))
+	}
+	return rooted
 }
 
 func TestMergeDeps(t *testing.T) {
@@ -403,12 +509,14 @@ func TestSelectInterpreterTargetLeavesUnconfiguredProjectEmpty(t *testing.T) {
 }
 
 func TestRuntimeEnvAppliesToolchainPrefixes(t *testing.T) {
+	prefix := testCommandPath("/opt/demo")
+	pkgConfig := filepath.Join(prefix, "custom-pkgconfig")
 	env := runtimeEnv(ResolvedEnvironment{
 		BootstrapPath:     "/tmp/bootstrap.R",
 		LibraryPath:       "/tmp/lib",
 		Repo:              "https://cloud.r-project.org",
-		ToolchainPrefixes: []string{"/opt/demo"},
-		PkgConfigPath:     []string{"/opt/demo/custom-pkgconfig"},
+		ToolchainPrefixes: []string{prefix},
+		PkgConfigPath:     []string{pkgConfig},
 	}, true)
 
 	pathValue := ""
@@ -416,21 +524,21 @@ func TestRuntimeEnvAppliesToolchainPrefixes(t *testing.T) {
 		if strings.HasPrefix(entry, "PATH=") {
 			pathValue = strings.TrimPrefix(entry, "PATH=")
 		}
-		if entry == "RS_TOOLCHAIN_PREFIXES=/opt/demo" {
+		if entry == "RS_TOOLCHAIN_PREFIXES="+prefix {
 			goto sawPrefix
 		}
 	}
 	t.Fatal("runtimeEnv() missing RS_TOOLCHAIN_PREFIXES")
 
 sawPrefix:
-	if !strings.HasPrefix(pathValue, filepath.Join("/opt/demo", "bin")+string(os.PathListSeparator)) {
+	if !strings.HasPrefix(pathValue, filepath.Join(prefix, "bin")+string(os.PathListSeparator)) {
 		t.Fatalf("PATH = %q", pathValue)
 	}
 }
 
 func TestRuntimeEnvAutoDetectsToolchainWhenUnset(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	for _, path := range []string{
 		homebrewPrefix,
@@ -471,6 +579,8 @@ func TestRuntimeEnvAutoDetectsToolchainWhenUnset(t *testing.T) {
 }
 
 func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
+	prefix := testCommandPath("/opt/demo")
+	pkgConfig := filepath.Join(prefix, "custom-pkgconfig")
 	req, err := installerRequestFromEnvironment(ResolvedEnvironment{
 		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
 		Interpreter: "/tmp/Rscript",
@@ -480,18 +590,18 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 			Interpreter: "/tmp/Rscript",
 			RVersion:    "4.4.3",
 		},
-		ToolchainPrefixes: []string{"/opt/demo"},
-		PkgConfigPath:     []string{"/opt/demo/custom-pkgconfig"},
+		ToolchainPrefixes: []string{prefix},
+		PkgConfigPath:     []string{pkgConfig},
 	}, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("installerRequestFromEnvironment() error = %v", err)
 	}
 	var sawPrefix, sawPkg bool
 	for _, entry := range req.Environment {
-		if entry == "RS_TOOLCHAIN_PREFIXES=/opt/demo" {
+		if entry == "RS_TOOLCHAIN_PREFIXES="+prefix {
 			sawPrefix = true
 		}
-		if entry == "RS_PKG_CONFIG_PATH=/opt/demo/custom-pkgconfig" {
+		if entry == "RS_PKG_CONFIG_PATH="+pkgConfig {
 			sawPkg = true
 		}
 	}
@@ -502,7 +612,7 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 
 func TestInstallerRequestFromEnvironmentAutoDetectsToolchainWhenUnset(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	for _, path := range []string{
 		homebrewPrefix,
@@ -716,6 +826,25 @@ func TestResolveInterpreterSelectionRejectsRscriptVersionMismatch(t *testing.T) 
 	}
 }
 
+func TestInspectRuntimeWithInterpreterUsesScriptFileExecution(t *testing.T) {
+	dir := t.TempDir()
+	rscriptPath := writeFakeRscriptWithVersion(t, dir, "4.4.2")
+
+	meta, err := inspectRuntimeWithInterpreter(rscriptPath, dir, io.Discard)
+	if err != nil {
+		t.Fatalf("inspectRuntimeWithInterpreter() error = %v", err)
+	}
+	if meta.RVersion != "4.4.2" {
+		t.Fatalf("meta.RVersion = %q, want 4.4.2", meta.RVersion)
+	}
+	if meta.Interpreter != rscriptPath {
+		t.Fatalf("meta.Interpreter = %q, want %q", meta.Interpreter, rscriptPath)
+	}
+	if meta.InterpreterKind == "" {
+		t.Fatalf("meta.InterpreterKind is empty: %#v", meta)
+	}
+}
+
 func TestDoctorJSONOutputIncludesDependencyConflictDetails(t *testing.T) {
 	oldValidate := nativeValidatePlan
 	t.Cleanup(func() {
@@ -805,8 +934,9 @@ func TestParseDependencyConflictIssue(t *testing.T) {
 }
 
 func TestDefaultLockfilePath(t *testing.T) {
-	got := defaultLockfilePath("/tmp/project", "/tmp/project/scripts/a.R")
-	want := "/tmp/project/rs.lock.json"
+	projectDir := filepath.Join(string(filepath.Separator), "tmp", "project")
+	got := defaultLockfilePath(projectDir, filepath.Join(projectDir, "scripts", "a.R"))
+	want := filepath.Join(projectDir, "rs.lock.json")
 	if got != want {
 		t.Fatalf("defaultLockfilePath() = %q, want %q", got, want)
 	}
@@ -1056,7 +1186,7 @@ func TestPredictedLibraryPathTracksGitAndLocalSourceIdentity(t *testing.T) {
 		"gitpkg": {
 			Package: "gitpkg",
 			Type:    "git",
-			URL:     "file:///tmp/repo",
+			URL:     testFileURL(testCommandPath("/tmp/repo")),
 			Ref:     "main",
 			Subdir:  "pkg",
 		},
@@ -1070,7 +1200,7 @@ func TestPredictedLibraryPathTracksGitAndLocalSourceIdentity(t *testing.T) {
 		"gitpkg": {
 			Package: "gitpkg",
 			Type:    "git",
-			URL:     "file:///tmp/repo",
+			URL:     testFileURL(testCommandPath("/tmp/repo")),
 			Ref:     "release",
 			Subdir:  "pkg",
 		},
@@ -1108,7 +1238,7 @@ func TestPredictedLibraryPathTracksGitURLAndSubdirChanges(t *testing.T) {
 		"gitpkg": {
 			Package: "gitpkg",
 			Type:    "git",
-			URL:     "file:///tmp/repo",
+			URL:     testFileURL(testCommandPath("/tmp/repo")),
 			Ref:     "main",
 			Subdir:  "pkg",
 		},
@@ -1117,7 +1247,7 @@ func TestPredictedLibraryPathTracksGitURLAndSubdirChanges(t *testing.T) {
 		"gitpkg": {
 			Package: "gitpkg",
 			Type:    "git",
-			URL:     "file:///tmp/repo-two",
+			URL:     testFileURL(testCommandPath("/tmp/repo-two")),
 			Ref:     "main",
 			Subdir:  "pkg",
 		},
@@ -1126,7 +1256,7 @@ func TestPredictedLibraryPathTracksGitURLAndSubdirChanges(t *testing.T) {
 		"gitpkg": {
 			Package: "gitpkg",
 			Type:    "git",
-			URL:     "file:///tmp/repo",
+			URL:     testFileURL(testCommandPath("/tmp/repo")),
 			Ref:     "main",
 			Subdir:  "pkg/sub",
 		},
@@ -1605,7 +1735,7 @@ func TestCompareLockedSourcesGitLocationRefAndSubdir(t *testing.T) {
 			"gitpkg": {
 				Package: "gitpkg",
 				Type:    "git",
-				URL:     "file:///tmp/repo",
+				URL:     testFileURL(testCommandPath("/tmp/repo")),
 				Ref:     "main",
 				Subdir:  "pkg",
 			},
@@ -1616,7 +1746,7 @@ func TestCompareLockedSourcesGitLocationRefAndSubdir(t *testing.T) {
 			Name:           "gitpkg",
 			Version:        "0.1.0",
 			Source:         "git",
-			SourceLocation: "file:///tmp/other-repo",
+			SourceLocation: testFileURL(testCommandPath("/tmp/other-repo")),
 			SourceRef:      "release",
 			SourceSubdir:   "pkg/sub",
 		},
@@ -1829,7 +1959,7 @@ func TestCollectSourceAvailabilityIssues(t *testing.T) {
 		"existinggit": {
 			Package: "existinggit",
 			Type:    "git",
-			URL:     "file://" + localRepo,
+			URL:     testFileURL(localRepo),
 		},
 		"missinggit": {
 			Package: "missinggit",
@@ -1865,8 +1995,8 @@ func TestLocalGitPath(t *testing.T) {
 		ok   bool
 	}{
 		{name: "empty", raw: "", want: "", ok: false},
-		{name: "file url", raw: "file:///tmp/repo", want: "/tmp/repo", ok: true},
-		{name: "plain path", raw: "/tmp/repo", want: "/tmp/repo", ok: true},
+		{name: "file url", raw: testFileURL(testCommandPath("/tmp/repo")), want: filepath.Clean(testCommandPath("/tmp/repo")), ok: true},
+		{name: "plain path", raw: testCommandPath("/tmp/repo"), want: filepath.Clean(testCommandPath("/tmp/repo")), ok: true},
 		{name: "ssh remote", raw: "git@github.com:owner/repo.git", want: "", ok: false},
 		{name: "https remote", raw: "https://github.com/owner/repo.git", want: "", ok: false},
 	}
@@ -2453,7 +2583,7 @@ func TestDoctorToolchainValidationReportsBrokenConfiguredPaths(t *testing.T) {
 	nativeValidatePlan = func(req installer.Request) error { return nil }
 
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	for _, path := range []string{
 		homebrewPrefix,
@@ -2564,7 +2694,7 @@ func TestDoctorWarnsWhenPkgConfigIsMissingForConfiguredToolchain(t *testing.T) {
 	nativeValidatePlan = func(req installer.Request) error { return nil }
 
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	for _, path := range []string{
 		homebrewPrefix,
@@ -2792,7 +2922,7 @@ func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T
 	if strings.TrimSpace(systemPath) == "" {
 		systemPath = "/bin:/usr/bin"
 	}
-	t.Setenv("HOME", homeDir)
+	setTestHomeDir(t, homeDir)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+systemPath)
 	t.Setenv("RS_TOOLCHAIN_PREFIXES", "")
 	t.Setenv("RS_PKG_CONFIG_PATH", "")
@@ -2831,7 +2961,11 @@ func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T
 	if !strings.Contains(stderr.String(), "[rs] bootstrapping rootless toolchain preset: micromamba") {
 		t.Fatalf("Doctor() stderr missing bootstrap message:\n%s", stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(expectedPrefix, "bin", "pkg-config")); err != nil {
+	pkgConfigName := "pkg-config"
+	if runtime.GOOS == "windows" {
+		pkgConfigName += ".exe"
+	}
+	if _, err := os.Stat(filepath.Join(expectedPrefix, "bin", pkgConfigName)); err != nil {
 		t.Fatalf("bootstrapped pkg-config missing: %v", err)
 	}
 }
@@ -2869,7 +3003,7 @@ func TestDoctorToolchainOnlyBootstrapToolchainDoesNotOverrideExplicitConfig(t *t
 	if strings.TrimSpace(systemPath) == "" {
 		systemPath = "/bin:/usr/bin"
 	}
-	t.Setenv("HOME", homeDir)
+	setTestHomeDir(t, homeDir)
 	t.Setenv("PATH", filepath.Join(configuredPrefix, "bin")+string(os.PathListSeparator)+binDir+string(os.PathListSeparator)+systemPath)
 	t.Setenv("RS_TOOLCHAIN_PREFIXES", "")
 	t.Setenv("RS_PKG_CONFIG_PATH", "")
@@ -3048,7 +3182,7 @@ func TestDoctorJSONOutputClassifiesNetworkAndSourceErrors(t *testing.T) {
 		"",
 		"[sources.\"gitpkg\"]",
 		"type = \"git\"",
-		"url = \"file:///tmp/rs-missing-git-source\"",
+		"url = \"" + testFileURL(testCommandPath("/tmp/rs-missing-git-source")) + "\"",
 		"",
 	}, "\n")
 	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
@@ -3099,7 +3233,7 @@ func TestDoctorJSONOutputClassifiesNetworkAndSourceErrors(t *testing.T) {
 		if detail.Kind == "missing_token_env" && detail.Category == "network" && detail.Package == "privpkg" && detail.EnvVar == "RS_TEST_GH_TOKEN" {
 			foundToken = true
 		}
-		if detail.Kind == "missing_git_source" && detail.Category == "source" && detail.Package == "gitpkg" && detail.Path == "/tmp/rs-missing-git-source" {
+		if detail.Kind == "missing_git_source" && detail.Category == "source" && detail.Package == "gitpkg" && detail.Path == filepath.Clean(testCommandPath("/tmp/rs-missing-git-source")) {
 			foundGitPath = true
 		}
 	}
@@ -3217,7 +3351,7 @@ func TestBuildDoctorNextStepsSuggestsManagedRForExternalConda(t *testing.T) {
 
 func TestBuildDoctorNextStepsSuggestsToolchainFollowupsForSystemHintsWithoutConfig(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	for _, path := range []string{
 		homebrewPrefix,
@@ -3276,7 +3410,7 @@ func TestBuildDoctorNextStepsSuggestsToolchainFollowupsForSystemHintsWithoutConf
 
 func TestWrapExternalInterpreterInstallErrorAddsCondaHint(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	for _, path := range []string{
 		homebrewPrefix,

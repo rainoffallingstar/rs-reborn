@@ -11,32 +11,38 @@ import (
 )
 
 func TestApplyPrependsPrefixesAndPkgConfigPaths(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "opt", "demo")
+	customPkg := filepath.Join(string(filepath.Separator), "custom", "pkgconfig")
+	existingPath := filepath.Join(string(filepath.Separator), "usr", "bin")
+	existingCPP := "-I" + filepath.Join(string(filepath.Separator), "existing", "include")
+	existingLD := "-L" + filepath.Join(string(filepath.Separator), "existing", "lib")
+	existingPkg := filepath.Join(string(filepath.Separator), "existing", "pkgconfig")
 	base := []string{
-		"PATH=/usr/bin",
-		"CPPFLAGS=-I/existing/include",
-		"LDFLAGS=-L/existing/lib",
-		"PKG_CONFIG_PATH=/existing/pkgconfig",
+		"PATH=" + existingPath,
+		"CPPFLAGS=" + existingCPP,
+		"LDFLAGS=" + existingLD,
+		"PKG_CONFIG_PATH=" + existingPkg,
 	}
 
-	env := Apply(base, []string{"/opt/demo"}, []string{"/custom/pkgconfig"})
+	env := Apply(base, []string{root}, []string{customPkg})
 
 	pathValue := envValue(env, "PATH")
-	if !strings.HasPrefix(pathValue, filepath.Join("/opt/demo", "bin")+string(os.PathListSeparator)) {
+	if !strings.HasPrefix(pathValue, filepath.Join(root, "bin")+string(os.PathListSeparator)) {
 		t.Fatalf("PATH = %q", pathValue)
 	}
-	if cpp := envValue(env, "CPPFLAGS"); !strings.Contains(cpp, "-I/opt/demo/include") {
+	if cpp := envValue(env, "CPPFLAGS"); !strings.Contains(cpp, "-I"+filepath.Join(root, "include")) {
 		t.Fatalf("CPPFLAGS = %q", cpp)
 	}
-	if ld := envValue(env, "LDFLAGS"); !strings.Contains(ld, "-L/opt/demo/lib") {
+	if ld := envValue(env, "LDFLAGS"); !strings.Contains(ld, "-L"+filepath.Join(root, "lib")) {
 		t.Fatalf("LDFLAGS = %q", ld)
 	}
-	if pkg := envValue(env, "PKG_CONFIG_PATH"); !strings.HasPrefix(pkg, "/custom/pkgconfig"+string(os.PathListSeparator)) {
+	if pkg := envValue(env, "PKG_CONFIG_PATH"); !strings.HasPrefix(pkg, customPkg+string(os.PathListSeparator)) {
 		t.Fatalf("PKG_CONFIG_PATH = %q", pkg)
 	}
-	if got := envValue(env, PrefixesEnv); got != "/opt/demo" {
+	if got := envValue(env, PrefixesEnv); got != root {
 		t.Fatalf("%s = %q", PrefixesEnv, got)
 	}
-	if got := envValue(env, PkgConfigEnv); got != "/custom/pkgconfig" {
+	if got := envValue(env, PkgConfigEnv); got != customPkg {
 		t.Fatalf("%s = %q", PkgConfigEnv, got)
 	}
 }
@@ -119,25 +125,28 @@ func TestValidateAcceptsExistingDirectoriesWithPkgConfig(t *testing.T) {
 }
 
 func TestBuildPreviewIncludesDerivedPathsAndFlags(t *testing.T) {
+	first := filepath.Join(string(filepath.Separator), "opt", "demo")
+	second := filepath.Join(string(filepath.Separator), "opt", "extra")
+	customPkg := filepath.Join(string(filepath.Separator), "custom", "pkgconfig")
 	preview := BuildPreview(
-		[]string{"/opt/demo", "/opt/extra"},
-		[]string{"/custom/pkgconfig"},
+		[]string{first, second},
+		[]string{customPkg},
 	)
-	if !reflect.DeepEqual(preview.Path, []string{"/opt/demo/bin", "/opt/extra/bin"}) {
+	if !reflect.DeepEqual(preview.Path, []string{filepath.Join(first, "bin"), filepath.Join(second, "bin")}) {
 		t.Fatalf("preview.Path = %v", preview.Path)
 	}
-	if !reflect.DeepEqual(preview.CPPFLAGS, []string{"-I/opt/demo/include", "-I/opt/extra/include"}) {
+	if !reflect.DeepEqual(preview.CPPFLAGS, []string{"-I" + filepath.Join(first, "include"), "-I" + filepath.Join(second, "include")}) {
 		t.Fatalf("preview.CPPFLAGS = %v", preview.CPPFLAGS)
 	}
-	if !reflect.DeepEqual(preview.LDFLAGS, []string{"-L/opt/demo/lib", "-L/opt/extra/lib"}) {
+	if !reflect.DeepEqual(preview.LDFLAGS, []string{"-L" + filepath.Join(first, "lib"), "-L" + filepath.Join(second, "lib")}) {
 		t.Fatalf("preview.LDFLAGS = %v", preview.LDFLAGS)
 	}
 	if !reflect.DeepEqual(preview.PkgConfigPath, []string{
-		"/opt/demo/lib/pkgconfig",
-		"/opt/demo/share/pkgconfig",
-		"/opt/extra/lib/pkgconfig",
-		"/opt/extra/share/pkgconfig",
-		"/custom/pkgconfig",
+		filepath.Join(first, "lib", "pkgconfig"),
+		filepath.Join(first, "share", "pkgconfig"),
+		filepath.Join(second, "lib", "pkgconfig"),
+		filepath.Join(second, "share", "pkgconfig"),
+		customPkg,
 	}) {
 		t.Fatalf("preview.PkgConfigPath = %v", preview.PkgConfigPath)
 	}

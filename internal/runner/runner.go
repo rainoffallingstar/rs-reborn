@@ -4560,7 +4560,17 @@ func localGitPath(raw string) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		return parsed.Path, true
+		path := parsed.Path
+		if runtime.GOOS == "windows" {
+			switch {
+			case parsed.Host != "":
+				path = "//" + parsed.Host + path
+			case len(path) >= 3 && path[0] == '/' && path[2] == ':':
+				path = path[1:]
+			}
+			path = filepath.FromSlash(path)
+		}
+		return path, true
 	}
 	if strings.Contains(raw, "://") || strings.Contains(raw, "@") {
 		return "", false
@@ -4831,8 +4841,28 @@ cat("arch\t", R.version$arch, "\n", sep = "")
 cat("os\t", R.version$os, "\n", sep = "")
 cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")
 `
-	cmd := exec.Command(interpreter, "--vanilla", "-e", script)
-	cmd.Dir = workDir
+	tempDir := ""
+	if info, err := os.Stat(workDir); err == nil && info.IsDir() {
+		tempDir = workDir
+	}
+	tmpFile, err := os.CreateTemp(tempDir, "rs-inspect-*.R")
+	if err != nil {
+		return RuntimeMetadata{}, fmt.Errorf("prepare runtime inspection script: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmpFile.WriteString(script); err != nil {
+		_ = tmpFile.Close()
+		return RuntimeMetadata{}, fmt.Errorf("write runtime inspection script: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return RuntimeMetadata{}, fmt.Errorf("close runtime inspection script: %w", err)
+	}
+
+	cmd := exec.Command(interpreter, "--vanilla", tmpPath)
+	if tempDir != "" {
+		cmd.Dir = tempDir
+	}
 	if stderr != nil {
 		cmd.Stderr = stderr
 	}

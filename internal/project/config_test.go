@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -165,10 +166,11 @@ path = "vendor/scriptpkg_0.2.0.tar.gz"
 	if cfg.Defaults.RVersion != "4.4" {
 		t.Fatalf("Defaults.RVersion = %q", cfg.Defaults.RVersion)
 	}
-	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{filepath.Join(dir, ".toolchain"), "/opt/demo"}) {
+	absDemo := filepath.Join(string(filepath.Separator), "opt", "demo")
+	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{filepath.Join(dir, ".toolchain"), absDemo}) {
 		t.Fatalf("Defaults.ToolchainPrefixes = %v", cfg.Defaults.ToolchainPrefixes)
 	}
-	if !reflect.DeepEqual(cfg.Defaults.PkgConfigPath, []string{filepath.Join(dir, "pkgconfig"), "/opt/demo/lib/pkgconfig"}) {
+	if !reflect.DeepEqual(cfg.Defaults.PkgConfigPath, []string{filepath.Join(dir, "pkgconfig"), filepath.Join(absDemo, "lib", "pkgconfig")}) {
 		t.Fatalf("Defaults.PkgConfigPath = %v", cfg.Defaults.PkgConfigPath)
 	}
 	if cfg.Sources["localpkg"].Path != filepath.Join(dir, "vendor", "localpkg_0.1.0.tar.gz") {
@@ -191,16 +193,21 @@ path = "vendor/scriptpkg_0.2.0.tar.gz"
 }
 
 func TestResolveForScript(t *testing.T) {
+	rootDir := filepath.Join(string(filepath.Separator), "tmp", "project")
+	gitURL := "file:///tmp/example.git"
+	if runtime.GOOS == "windows" {
+		gitURL = "file:///C:/tmp/example.git"
+	}
 	cfg := Config{
-		RootDir: "/tmp/project",
+		RootDir: rootDir,
 		Defaults: ScriptConfig{
 			Repo:              "https://cloud.r-project.org",
-			CacheDir:          "/tmp/project/.rs-cache",
-			Lockfile:          "/tmp/project/rs.lock.json",
-			Rscript:           "/tmp/project/bin/Rscript",
+			CacheDir:          filepath.Join(rootDir, ".rs-cache"),
+			Lockfile:          filepath.Join(rootDir, "rs.lock.json"),
+			Rscript:           filepath.Join(rootDir, "bin", "Rscript"),
 			RVersion:          "4.4",
-			ToolchainPrefixes: []string{"/tmp/project/.toolchain"},
-			PkgConfigPath:     []string{"/tmp/project/.toolchain/lib/pkgconfig"},
+			ToolchainPrefixes: []string{filepath.Join(rootDir, ".toolchain")},
+			PkgConfigPath:     []string{filepath.Join(rootDir, ".toolchain", "lib", "pkgconfig")},
 			Packages:          []string{"jsonlite"},
 			BiocPackages:      []string{"Biostrings"},
 		},
@@ -217,7 +224,7 @@ func TestResolveForScript(t *testing.T) {
 			"gitpkg": {
 				Package: "gitpkg",
 				Type:    "git",
-				URL:     "file:///tmp/example.git",
+				URL:     gitURL,
 				Ref:     "main",
 				Subdir:  "pkg",
 			},
@@ -225,10 +232,10 @@ func TestResolveForScript(t *testing.T) {
 		Scripts: map[string]ScriptConfig{
 			"scripts/report.R": {
 				Repo:              "https://cran.rstudio.com",
-				Rscript:           "/tmp/project/tools/Rscript-4.4",
+				Rscript:           filepath.Join(rootDir, "tools", "Rscript-4.4"),
 				RVersion:          "4.4",
-				ToolchainPrefixes: []string{"/tmp/project/scripts/.toolchain"},
-				PkgConfigPath:     []string{"/tmp/project/scripts/pkgconfig"},
+				ToolchainPrefixes: []string{filepath.Join(rootDir, "scripts", ".toolchain")},
+				PkgConfigPath:     []string{filepath.Join(rootDir, "scripts", "pkgconfig")},
 				Packages:          []string{"cli", "jsonlite"},
 				BiocPackages:      []string{"DESeq2"},
 				Sources: map[string]SourceSpec{
@@ -246,7 +253,7 @@ func TestResolveForScript(t *testing.T) {
 		},
 	}
 
-	resolved, err := cfg.ResolveForScript("/tmp/project/scripts/report.R")
+	resolved, err := cfg.ResolveForScript(filepath.Join(rootDir, "scripts", "report.R"))
 	if err != nil {
 		t.Fatalf("ResolveForScript() error = %v", err)
 	}
@@ -254,16 +261,16 @@ func TestResolveForScript(t *testing.T) {
 	if resolved.Repo != "https://cran.rstudio.com" {
 		t.Fatalf("Repo = %q", resolved.Repo)
 	}
-	if resolved.Rscript != "/tmp/project/tools/Rscript-4.4" {
+	if resolved.Rscript != filepath.Join(rootDir, "tools", "Rscript-4.4") {
 		t.Fatalf("Rscript = %q", resolved.Rscript)
 	}
 	if resolved.RVersion != "4.4" {
 		t.Fatalf("RVersion = %q", resolved.RVersion)
 	}
-	if !reflect.DeepEqual(resolved.ToolchainPrefixes, []string{"/tmp/project/.toolchain", "/tmp/project/scripts/.toolchain"}) {
+	if !reflect.DeepEqual(resolved.ToolchainPrefixes, []string{filepath.Join(rootDir, ".toolchain"), filepath.Join(rootDir, "scripts", ".toolchain")}) {
 		t.Fatalf("ToolchainPrefixes = %v", resolved.ToolchainPrefixes)
 	}
-	if !reflect.DeepEqual(resolved.PkgConfigPath, []string{"/tmp/project/.toolchain/lib/pkgconfig", "/tmp/project/scripts/pkgconfig"}) {
+	if !reflect.DeepEqual(resolved.PkgConfigPath, []string{filepath.Join(rootDir, ".toolchain", "lib", "pkgconfig"), filepath.Join(rootDir, "scripts", "pkgconfig")}) {
 		t.Fatalf("PkgConfigPath = %v", resolved.PkgConfigPath)
 	}
 	if resolved.ScriptKey != "scripts/report.R" {
@@ -290,7 +297,7 @@ func TestResolveForScript(t *testing.T) {
 	if resolved.Sources["custompkg"].TokenEnv != "GH_ENTERPRISE_PAT" {
 		t.Fatalf("Sources[custompkg].TokenEnv = %q", resolved.Sources["custompkg"].TokenEnv)
 	}
-	if resolved.Sources["gitpkg"].URL != "file:///tmp/example.git" {
+	if resolved.Sources["gitpkg"].URL != gitURL {
 		t.Fatalf("Sources[gitpkg].URL = %q", resolved.Sources["gitpkg"].URL)
 	}
 }
@@ -311,11 +318,15 @@ repo = "owner/custompkg"
 }
 
 func TestParseRejectsConflictingRootSourceFields(t *testing.T) {
+	gitURL := "file:///tmp/example.git"
+	if runtime.GOOS == "windows" {
+		gitURL = "file:///C:/tmp/example.git"
+	}
 	src := `
 [sources."custompkg"]
 type = "github"
 repo = "owner/custompkg"
-url = "file:///tmp/example.git"
+url = "` + gitURL + `"
 `
 
 	_, err := Parse(src)

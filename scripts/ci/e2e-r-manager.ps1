@@ -43,7 +43,7 @@ cat("native-r-e2e\n")
     if ($projectConfig -notmatch 'r_version = "4.4"') {
         throw "expected rs r use 4.4 to write r_version"
     }
-    if ($projectConfig -match '^rscript = ') {
+    if ($projectConfig -match '(?m)^rscript = ') {
         throw "expected rs r use 4.4 to write r_version instead of rscript"
     }
 

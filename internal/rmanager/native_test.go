@@ -34,6 +34,12 @@ exit 1
 	return path
 }
 
+func setTestHomeDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+}
+
 func TestResolveVersionOrPathAcceptsExplicitPath(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFakeManagedRscript(t, dir, "4.4.3")
@@ -470,7 +476,7 @@ func TestPreflightSourceBuildMacOSMissingLzmaHeader(t *testing.T) {
 	})
 	nativeGOOS = "darwin"
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	for _, path := range []string{
 		homebrewPrefix,
@@ -525,8 +531,11 @@ func TestHeaderProbeSourceDefaultInclude(t *testing.T) {
 }
 
 func TestSourceBuildEnvironmentUsesRSToolchainPrefixes(t *testing.T) {
-	t.Setenv("RS_TOOLCHAIN_PREFIXES", strings.Join([]string{"/opt/demo", "/opt/demo2"}, string(os.PathListSeparator)))
-	t.Setenv("RS_PKG_CONFIG_PATH", strings.Join([]string{"/opt/pkgconfig"}, string(os.PathListSeparator)))
+	firstPrefix := filepath.Join(string(filepath.Separator), "opt", "demo")
+	secondPrefix := filepath.Join(string(filepath.Separator), "opt", "demo2")
+	pkgPrefix := filepath.Join(string(filepath.Separator), "opt", "pkgconfig")
+	t.Setenv("RS_TOOLCHAIN_PREFIXES", strings.Join([]string{firstPrefix, secondPrefix}, string(os.PathListSeparator)))
+	t.Setenv("RS_PKG_CONFIG_PATH", strings.Join([]string{pkgPrefix}, string(os.PathListSeparator)))
 
 	env := sourceBuildEnvironment()
 	var pathValue, prefixValue, pkgValue string
@@ -540,7 +549,7 @@ func TestSourceBuildEnvironmentUsesRSToolchainPrefixes(t *testing.T) {
 			pkgValue = strings.TrimPrefix(entry, "RS_PKG_CONFIG_PATH=")
 		}
 	}
-	if !strings.HasPrefix(pathValue, filepath.Join("/opt/demo2", "bin")+string(os.PathListSeparator)) && !strings.HasPrefix(pathValue, filepath.Join("/opt/demo", "bin")+string(os.PathListSeparator)) {
+	if !strings.HasPrefix(pathValue, filepath.Join(secondPrefix, "bin")+string(os.PathListSeparator)) && !strings.HasPrefix(pathValue, filepath.Join(firstPrefix, "bin")+string(os.PathListSeparator)) {
 		t.Fatalf("PATH = %q", pathValue)
 	}
 	if prefixValue == "" || pkgValue == "" {
@@ -550,7 +559,7 @@ func TestSourceBuildEnvironmentUsesRSToolchainPrefixes(t *testing.T) {
 
 func TestSourceBuildEnvironmentAutoDetectsToolchainWhenUnset(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("HOME", dir)
+	setTestHomeDir(t, dir)
 	t.Setenv("RS_TOOLCHAIN_PREFIXES", "")
 	t.Setenv("RS_PKG_CONFIG_PATH", "")
 	homebrewPrefix := filepath.Join(dir, "homebrew")
@@ -697,7 +706,7 @@ func TestInstallBinaryWithFallbackFallsBackOnUnrunnableBinaryInAutoMode(t *testi
 		t.Fatalf("MkdirAll() error = %v", err)
 	}
 	rscriptPath := filepath.Join(target, "bin", rscriptExecutableName())
-	if err := os.WriteFile(rscriptPath, []byte("#!/bin/sh\nexit 127\n"), 0o755); err != nil {
+	if err := os.WriteFile(rscriptPath, []byte("placeholder"), 0o755); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
 	}
 	var stderr bytes.Buffer
@@ -711,7 +720,7 @@ func TestInstallBinaryWithFallbackFallsBackOnUnrunnableBinaryInAutoMode(t *testi
 	nativeCommand = func(name string, args ...string) *exec.Cmd {
 		switch {
 		case name == rscriptPath:
-			return exec.Command("/bin/sh", "-c", "exit 127")
+			return failingShellCommand()
 		default:
 			return exec.Command(name, args...)
 		}
@@ -734,6 +743,13 @@ func TestInstallBinaryWithFallbackFallsBackOnUnrunnableBinaryInAutoMode(t *testi
 
 var execLookPath = rscriptLookPath
 var execNativeLookPath = nativeLookPath
+
+func failingShellCommand() *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/C", "exit /b 127")
+	}
+	return exec.Command("/bin/sh", "-c", "exit 127")
+}
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 

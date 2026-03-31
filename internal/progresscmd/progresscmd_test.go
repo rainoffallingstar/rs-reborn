@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -11,7 +12,7 @@ import (
 func TestRunSuppressesSuccessfulCommandOutput(t *testing.T) {
 	var progress bytes.Buffer
 	var errors bytes.Buffer
-	cmd := exec.Command("/bin/sh", "-c", "echo hidden stdout; echo hidden stderr >&2")
+	cmd := shellCommand("echo hidden stdout; echo hidden stderr >&2", "echo hidden stdout & echo hidden stderr 1>&2")
 
 	if err := Run(cmd, "testing success", &progress, &errors); err != nil {
 		t.Fatalf("Run() error = %v", err)
@@ -27,7 +28,7 @@ func TestRunSuppressesSuccessfulCommandOutput(t *testing.T) {
 func TestRunPrintsTailOnFailure(t *testing.T) {
 	var progress bytes.Buffer
 	var errors bytes.Buffer
-	cmd := exec.Command("/bin/sh", "-c", "echo first; echo second >&2; exit 1")
+	cmd := shellCommand("echo first; echo second >&2; exit 1", "echo first & echo second 1>&2 & exit /b 1")
 
 	err := Run(cmd, "testing failure", &progress, &errors)
 	if err == nil {
@@ -85,4 +86,11 @@ func TestWriteSuccessClearsTTYLineBeforeDone(t *testing.T) {
 	if !strings.Contains(buf.String(), "\033[2K[rs] downloading file done\n") {
 		t.Fatalf("writeSuccess() output = %q", buf.String())
 	}
+}
+
+func shellCommand(unixScript, windowsScript string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/C", windowsScript)
+	}
+	return exec.Command("/bin/sh", "-c", unixScript)
 }

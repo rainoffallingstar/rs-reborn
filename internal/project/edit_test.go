@@ -8,6 +8,10 @@ import (
 	"testing"
 )
 
+func testProjectRoot() string {
+	return filepath.Join(string(filepath.Separator), "tmp", "project")
+}
+
 func TestRenderRoundTrip(t *testing.T) {
 	cfg := Config{
 		Defaults: ScriptConfig{
@@ -569,13 +573,14 @@ func TestRemovePackageRootSourcePreservesTopLevelMixedOrder(t *testing.T) {
 
 func TestAddPackageRootAndScript(t *testing.T) {
 	cfg := NewDefaultConfig(InitOptions{})
-	cfg.RootDir = "/tmp/project"
+	rootDir := testProjectRoot()
+	cfg.RootDir = rootDir
 
 	if err := AddPackage(&cfg, AddPackageOptions{Package: "jsonlite"}); err != nil {
 		t.Fatalf("AddPackage(root) error = %v", err)
 	}
 	if err := AddPackage(&cfg, AddPackageOptions{
-		ScriptPath: "/tmp/project/scripts/report.R",
+		ScriptPath: filepath.Join(rootDir, "scripts", "report.R"),
 		Package:    "DESeq2",
 		Bioc:       true,
 	}); err != nil {
@@ -593,10 +598,11 @@ func TestAddPackageRootAndScript(t *testing.T) {
 
 func TestAddPackageSource(t *testing.T) {
 	cfg := NewDefaultConfig(InitOptions{})
-	cfg.RootDir = "/tmp/project"
+	rootDir := testProjectRoot()
+	cfg.RootDir = rootDir
 
 	err := AddPackage(&cfg, AddPackageOptions{
-		ScriptPath: "/tmp/project/scripts/report.R",
+		ScriptPath: filepath.Join(rootDir, "scripts", "report.R"),
 		Package:    "mypkg",
 		Source: &SourceSpec{
 			Type:     "github",
@@ -620,12 +626,14 @@ func TestAddPackageSource(t *testing.T) {
 }
 
 func TestNewConfigFromScriptWritesRootPackages(t *testing.T) {
+	rootDir := testProjectRoot()
+	scriptPath := filepath.Join(rootDir, "scripts", "report.R")
 	cfg, err := NewConfigFromScript(InitOptions{
 		Repo:     DefaultRepo,
 		CacheDir: ".rs-cache",
 		Lockfile: "rs.lock.json",
 		Packages: []string{"cli", "jsonlite"},
-	}, "/tmp/project", "/tmp/project/scripts/report.R", false)
+	}, rootDir, scriptPath, false)
 	if err != nil {
 		t.Fatalf("NewConfigFromScript(root) error = %v", err)
 	}
@@ -639,9 +647,11 @@ func TestNewConfigFromScriptWritesRootPackages(t *testing.T) {
 }
 
 func TestNewConfigFromScriptWritesScriptBlock(t *testing.T) {
+	rootDir := testProjectRoot()
+	scriptPath := filepath.Join(rootDir, "scripts", "report.R")
 	cfg, err := NewConfigFromScript(InitOptions{
 		Packages: []string{"cli", "jsonlite"},
-	}, "/tmp/project", "/tmp/project/scripts/report.R", true)
+	}, rootDir, scriptPath, true)
 	if err != nil {
 		t.Fatalf("NewConfigFromScript(script block) error = %v", err)
 	}
@@ -659,11 +669,12 @@ func TestNewConfigFromScriptWritesScriptBlock(t *testing.T) {
 }
 
 func TestNewConfigFromScriptsWritesScriptBlocks(t *testing.T) {
-	cfg, err := NewConfigFromScripts(InitOptions{}, "/tmp/project", map[string]ScriptConfig{
-		"/tmp/project/scripts/a.R": {
+	rootDir := testProjectRoot()
+	cfg, err := NewConfigFromScripts(InitOptions{}, rootDir, map[string]ScriptConfig{
+		filepath.Join(rootDir, "scripts", "a.R"): {
 			Packages: []string{"cli", "jsonlite"},
 		},
-		"/tmp/project/scripts/b.R": {
+		filepath.Join(rootDir, "scripts", "b.R"): {
 			Packages:     []string{"dplyr"},
 			BiocPackages: []string{"DESeq2"},
 		},
@@ -752,9 +763,10 @@ func TestRemovePackageRootAndSource(t *testing.T) {
 }
 
 func TestRemovePackageDeletesEmptyScriptBlock(t *testing.T) {
+	rootDir := testProjectRoot()
 	cfg := Config{
-		Path:    "/tmp/project/rs.toml",
-		RootDir: "/tmp/project",
+		Path:    filepath.Join(rootDir, "rs.toml"),
+		RootDir: rootDir,
 		Scripts: map[string]ScriptConfig{
 			"scripts/report.R": {
 				Packages: []string{"localpkg"},
@@ -766,7 +778,7 @@ func TestRemovePackageDeletesEmptyScriptBlock(t *testing.T) {
 	}
 
 	err := RemovePackage(&cfg, RemovePackageOptions{
-		ScriptPath: "/tmp/project/scripts/report.R",
+		ScriptPath: filepath.Join(rootDir, "scripts", "report.R"),
 		Package:    "localpkg",
 	})
 	if err != nil {
