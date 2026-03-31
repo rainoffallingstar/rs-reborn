@@ -355,14 +355,19 @@ func TestBootstrapCandidateAutoFallsBackToMambaThenConda(t *testing.T) {
 
 func TestBootstrapRunsDetectedCommand(t *testing.T) {
 	oldRun := detectRunCommand
+	oldOutput := detectOutput
 	t.Cleanup(func() {
 		detectRunCommand = oldRun
+		detectOutput = oldOutput
 	})
 	detectRunCommand = func(command string, env []string, stdout, stderr io.Writer) error {
 		if !strings.Contains(command, "create -y -p") {
 			t.Fatalf("command = %q", command)
 		}
 		return nil
+	}
+	detectOutput = func(name string, args []string, env []string) (string, error) {
+		return "", nil
 	}
 
 	dir := t.TempDir()
@@ -384,6 +389,58 @@ func TestBootstrapRunsDetectedCommand(t *testing.T) {
 	}
 	if candidate == nil || candidate.Preset != "micromamba" {
 		t.Fatalf("candidate = %#v, want micromamba", candidate)
+	}
+}
+
+func TestBootstrapResolvesAdoptedEnvaPrefix(t *testing.T) {
+	oldRun := detectRunCommand
+	oldOutput := detectOutput
+	t.Cleanup(func() {
+		detectRunCommand = oldRun
+		detectOutput = oldOutput
+	})
+	detectRunCommand = func(command string, env []string, stdout, stderr io.Writer) error {
+		if !strings.Contains(command, "create --yaml") {
+			t.Fatalf("command = %q", command)
+		}
+		return nil
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	envaPath := writeToolExecutable(t, binDir, "enva")
+	actualPrefix := filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")
+	for _, path := range []string{
+		actualPrefix,
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	detectOutput = func(name string, args []string, env []string) (string, error) {
+		if name != envaPath {
+			t.Fatalf("name = %q, want %q", name, envaPath)
+		}
+		if !reflect.DeepEqual(args, []string{"list"}) {
+			t.Fatalf("args = %v, want [list]", args)
+		}
+		return "Name | Owner | Prefixes\nrs-sysdeps | rattler | " + actualPrefix + "\n", nil
+	}
+
+	candidate, err := Bootstrap("auto", dir, []string{"PATH=" + binDir}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if candidate == nil || candidate.Preset != "enva" {
+		t.Fatalf("candidate = %#v, want enva", candidate)
+	}
+	if !reflect.DeepEqual(candidate.ToolchainPrefixes, []string{actualPrefix}) {
+		t.Fatalf("candidate.ToolchainPrefixes = %v", candidate.ToolchainPrefixes)
+	}
+	if candidate.SuggestedInitCommand != "rs init --toolchain-prefix "+actualPrefix+" --pkg-config-path "+filepath.Join(actualPrefix, "lib", "pkgconfig")+" --pkg-config-path "+filepath.Join(actualPrefix, "share", "pkgconfig") {
+		t.Fatalf("candidate.SuggestedInitCommand = %q", candidate.SuggestedInitCommand)
 	}
 }
 
@@ -436,6 +493,36 @@ func TestCandidateFromPathsMatchesEnvaPreset(t *testing.T) {
 	}
 	if candidate == nil || candidate.Preset != "enva" {
 		t.Fatalf("candidate = %#v, want enva", candidate)
+	}
+}
+
+func TestCandidateFromEnvironmentHeuristicallyMatchesAdoptedEnvaPrefix(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	writeToolExecutable(t, binDir, "enva")
+
+	actualPrefix := filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")
+	pkgConfig := []string{
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+	}
+	for _, path := range append([]string{actualPrefix}, pkgConfig...) {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	env := Apply([]string{"PATH=" + binDir}, []string{actualPrefix}, pkgConfig)
+	candidate, err := CandidateFromEnvironment(env)
+	if err != nil {
+		t.Fatalf("CandidateFromEnvironment() error = %v", err)
+	}
+	if candidate == nil || candidate.Preset != "enva" {
+		t.Fatalf("candidate = %#v, want enva", candidate)
+	}
+	if !reflect.DeepEqual(candidate.ToolchainPrefixes, []string{actualPrefix}) {
+		t.Fatalf("candidate.ToolchainPrefixes = %v", candidate.ToolchainPrefixes)
 	}
 }
 

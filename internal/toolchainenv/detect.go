@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 )
 
 var (
 	detectStat       = os.Stat
 	detectRunCommand = runBootstrapCommand
+	detectOutput     = runCommandOutput
 )
 
 type Candidate struct {
@@ -201,6 +203,7 @@ func Bootstrap(name, home string, env []string, stdout, stderr io.Writer) (*Cand
 	if err := detectRunCommand(candidate.SuggestedSetupCommand, env, stdout, stderr); err != nil {
 		return nil, fmt.Errorf("bootstrap rootless toolchain preset %s: %w", candidate.Preset, err)
 	}
+	candidate = resolveBootstrappedCandidate(*candidate, env)
 	return candidate, nil
 }
 
@@ -244,6 +247,127 @@ func candidateForPreset(name, home string) (Candidate, error) {
 		SuggestedSetupNote:    suggestedSetupNote(name, prefixes),
 		Complete:              len(existingPrefixes) == len(prefixes) && len(existingPkgConfig) == len(pkgConfig),
 	}, nil
+}
+
+func resolveBootstrappedCandidate(candidate Candidate, env []string) *Candidate {
+	actualPrefixes, actualPkgConfig := discoverBootstrappedPaths(candidate, env)
+	if len(actualPrefixes) == 0 {
+		return &candidate
+	}
+	originalPrefixes := append([]string(nil), candidate.ToolchainPrefixes...)
+	originalPkgConfig := append([]string(nil), candidate.PkgConfigPath...)
+	candidate.ToolchainPrefixes = actualPrefixes
+	candidate.PkgConfigPath = actualPkgConfig
+	candidate.ExistingPrefixes = existingTemplatePaths(actualPrefixes)
+	candidate.ExistingPkgConfigPath = existingTemplatePaths(actualPkgConfig)
+	candidate.Complete = len(candidate.ExistingPrefixes) == len(actualPrefixes) && len(candidate.ExistingPkgConfigPath) == len(actualPkgConfig)
+	if !slices.Equal(originalPrefixes, actualPrefixes) || !slices.Equal(originalPkgConfig, actualPkgConfig) {
+		candidate.SuggestedInitCommand = explicitInitCommand(actualPrefixes, actualPkgConfig)
+	}
+	return &candidate
+}
+
+func discoverBootstrappedPaths(candidate Candidate, env []string) ([]string, []string) {
+	if len(candidate.ToolchainPrefixes) == 0 {
+		return nil, nil
+	}
+	envName := strings.TrimSpace(filepath.Base(candidate.ToolchainPrefixes[0]))
+	if envName == "" {
+		return nil, nil
+	}
+	switch candidate.Preset {
+	case "enva":
+		prefixes := discoverEnvaEnvironmentPrefixes(env, envName)
+		if len(prefixes) == 0 {
+			return nil, nil
+		}
+		return prefixes, pkgConfigPathsForPrefixes(prefixes)
+	default:
+		return nil, nil
+	}
+}
+
+func discoverEnvaEnvironmentPrefixes(env []string, envName string) []string {
+	path, err := FindInPath("enva", env)
+	if err != nil {
+		return nil
+	}
+	output, err := detectOutput(path, []string{"list"}, env)
+	if err != nil {
+		return nil
+	}
+	return parseEnvaList(output, envName)
+}
+
+func parseEnvaList(output string, envName string) []string {
+	if strings.TrimSpace(output) == "" || strings.TrimSpace(envName) == "" {
+		return nil
+	}
+	prefixes := []string{}
+	seen := map[string]struct{}{}
+	for _, rawLine := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if line == "" || !strings.Contains(line, "|") {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		name := strings.TrimSpace(parts[0])
+		if name != envName {
+			continue
+		}
+		for _, prefix := range strings.Split(strings.TrimSpace(parts[2]), ",") {
+			cleaned := filepath.Clean(strings.TrimSpace(prefix))
+			if cleaned == "." || cleaned == "" {
+				continue
+			}
+			if _, ok := seen[cleaned]; ok {
+				continue
+			}
+			seen[cleaned] = struct{}{}
+			prefixes = append(prefixes, cleaned)
+		}
+	}
+	return prefixes
+}
+
+func pkgConfigPathsForPrefixes(prefixes []string) []string {
+	paths := make([]string, 0, len(prefixes)*2)
+	seen := map[string]struct{}{}
+	for _, prefix := range prefixes {
+		for _, path := range []string{
+			filepath.Join(prefix, "lib", "pkgconfig"),
+			filepath.Join(prefix, "share", "pkgconfig"),
+		} {
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+func explicitInitCommand(prefixes, pkgConfig []string) string {
+	parts := []string{"rs", "init"}
+	for _, prefix := range prefixes {
+		parts = append(parts, "--toolchain-prefix", prefix)
+	}
+	for _, path := range pkgConfig {
+		parts = append(parts, "--pkg-config-path", path)
+	}
+	quoted := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if strings.ContainsAny(part, " \t\"'") {
+			quoted = append(quoted, strconv.Quote(part))
+		} else {
+			quoted = append(quoted, part)
+		}
+	}
+	return strings.Join(quoted, " ")
 }
 
 func bootstrapCandidates(name, home string) ([]Candidate, error) {
@@ -343,6 +467,18 @@ func runBootstrapCommand(command string, env []string, stdout, stderr io.Writer)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+func runCommandOutput(name string, args []string, env []string) (string, error) {
+	cmd := exec.Command(name, args...)
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
 }
 
 func existingTemplatePaths(paths []string) []string {

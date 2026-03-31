@@ -42,7 +42,11 @@ func WrapCommand(name string, args []string, env []string) (string, []string, []
 }
 
 func CandidateFromEnvironment(env []string) (*Candidate, error) {
-	return CandidateFromPaths(PrefixesFromEnv(env), PkgConfigPathsFromEnv(env), "")
+	candidate, err := CandidateFromPaths(PrefixesFromEnv(env), PkgConfigPathsFromEnv(env), "")
+	if err != nil || candidate != nil {
+		return candidate, err
+	}
+	return heuristicCandidateFromEnvironment(env), nil
 }
 
 func CandidateFromPaths(prefixes, pkgConfig []string, home string) (*Candidate, error) {
@@ -76,4 +80,52 @@ func candidateMatchesPaths(candidate Candidate, prefixes, pkgConfig []string) bo
 		return false
 	}
 	return true
+}
+
+func heuristicCandidateFromEnvironment(env []string) *Candidate {
+	prefixes := cleanList(PrefixesFromEnv(env))
+	pkgConfig := cleanList(PkgConfigPathsFromEnv(env))
+	if len(prefixes) == 0 && len(pkgConfig) == 0 {
+		return nil
+	}
+	if len(prefixes) == 0 {
+		return nil
+	}
+	firstPrefix := strings.ToLower(filepath.ToSlash(prefixes[0]))
+	if filepath.Base(prefixes[0]) != "rs-sysdeps" {
+		return nil
+	}
+	if !strings.Contains(firstPrefix, "/envs/") {
+		return nil
+	}
+
+	preset := ""
+	switch {
+	case commandAvailableInEnv("enva", env):
+		preset = "enva"
+	case strings.Contains(firstPrefix, "/micromamba/") && commandAvailableInEnv("micromamba", env):
+		preset = "micromamba"
+	case strings.Contains(firstPrefix, "/mamba/") && commandAvailableInEnv("mamba", env):
+		preset = "mamba"
+	case (strings.Contains(firstPrefix, "miniconda") || strings.Contains(firstPrefix, "anaconda") || strings.Contains(firstPrefix, "/conda/")) && commandAvailableInEnv("conda", env):
+		preset = "conda"
+	default:
+		return nil
+	}
+
+	candidate := &Candidate{
+		Preset:                preset,
+		ToolchainPrefixes:     prefixes,
+		PkgConfigPath:         pkgConfig,
+		ExistingPrefixes:      existingTemplatePaths(prefixes),
+		ExistingPkgConfigPath: existingTemplatePaths(pkgConfig),
+		SuggestedInitCommand:  explicitInitCommand(prefixes, pkgConfig),
+	}
+	candidate.Complete = len(candidate.ExistingPrefixes) == len(prefixes) && len(candidate.ExistingPkgConfigPath) == len(pkgConfig)
+	return candidate
+}
+
+func commandAvailableInEnv(name string, env []string) bool {
+	_, err := FindInPath(name, env)
+	return err == nil
 }
