@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"gr/internal/project"
 	"gr/internal/rmanager"
+	"gr/internal/runner"
 )
 
 func TestInitCommandFromScriptWritesRootPackages(t *testing.T) {
@@ -236,6 +238,50 @@ func TestInitCommandFromDirWritesScriptBlocks(t *testing.T) {
 	}
 }
 
+func TestDoctorCommandAllowsToolchainOnlyWithoutScript(t *testing.T) {
+	oldDoctor := cliDoctor
+	t.Cleanup(func() {
+		cliDoctor = oldDoctor
+	})
+
+	dir := t.TempDir()
+	called := false
+	cliDoctor = func(opts runner.DoctorOptions) error {
+		called = true
+		if !opts.ToolchainOnly {
+			t.Fatalf("opts.ToolchainOnly = false, want true")
+		}
+		if opts.ProjectDir != dir {
+			t.Fatalf("opts.ProjectDir = %q, want %q", opts.ProjectDir, dir)
+		}
+		if opts.ScriptPath != "" {
+			t.Fatalf("opts.ScriptPath = %q, want empty", opts.ScriptPath)
+		}
+		return nil
+	}
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return doctorCommand([]string{"--toolchain-only", dir})
+	}); err != nil {
+		t.Fatalf("doctorCommand() error = %v", err)
+	}
+	if !called {
+		t.Fatal("doctorCommand() did not call runner")
+	}
+}
+
+func TestDoctorCommandRejectsMissingScriptWithoutToolchainOnly(t *testing.T) {
+	_, err := runWithCapturedStdout(t, func() error {
+		return doctorCommand(nil)
+	})
+	if err == nil {
+		t.Fatal("doctorCommand() error = nil, want usage error")
+	}
+	if !strings.Contains(err.Error(), "usage: rs doctor [flags] path/to/script.R") {
+		t.Fatalf("doctorCommand() error = %v", err)
+	}
+}
+
 func TestInitCommandBiocPackageAddsProjectDefault(t *testing.T) {
 	dir := t.TempDir()
 
@@ -252,6 +298,684 @@ func TestInitCommandBiocPackageAddsProjectDefault(t *testing.T) {
 
 	if !reflect.DeepEqual(cfg.Defaults.BiocPackages, []string{"Biostrings"}) {
 		t.Fatalf("Defaults.BiocPackages = %v", cfg.Defaults.BiocPackages)
+	}
+}
+
+func TestInitCommandWritesToolchainConfig(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{
+			"--toolchain-prefix", ".toolchain",
+			"--toolchain-prefix", "/opt/demo",
+			"--pkg-config-path", "pkgconfig",
+			dir,
+		})
+	}); err != nil {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+
+	cfg, err := project.LoadEditable(filepath.Join(dir, project.ConfigFileName))
+	if err != nil {
+		t.Fatalf("LoadEditable() error = %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{".toolchain", "/opt/demo"}) {
+		t.Fatalf("Defaults.ToolchainPrefixes = %v", cfg.Defaults.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.PkgConfigPath, []string{"pkgconfig"}) {
+		t.Fatalf("Defaults.PkgConfigPath = %v", cfg.Defaults.PkgConfigPath)
+	}
+}
+
+func TestInitCommandWritesToolchainPresetConfig(t *testing.T) {
+	dir := t.TempDir()
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return "/demo-home", nil
+	}
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{"--toolchain-preset", "micromamba", dir})
+	}); err != nil {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+
+	cfg, err := project.LoadEditable(filepath.Join(dir, project.ConfigFileName))
+	if err != nil {
+		t.Fatalf("LoadEditable() error = %v", err)
+	}
+	prefix := filepath.Join("/demo-home", "micromamba", "envs", "rs-sysdeps")
+	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{prefix}) {
+		t.Fatalf("Defaults.ToolchainPrefixes = %v", cfg.Defaults.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.PkgConfigPath, []string{
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+	}) {
+		t.Fatalf("Defaults.PkgConfigPath = %v", cfg.Defaults.PkgConfigPath)
+	}
+}
+
+func TestInitCommandAutoDetectsRecommendedToolchainPreset(t *testing.T) {
+	dir := t.TempDir()
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	projectDir := filepath.Join(dir, "project")
+	if _, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{"--toolchain-preset", "auto", projectDir})
+	}); err != nil {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+
+	cfg, err := project.LoadEditable(filepath.Join(projectDir, project.ConfigFileName))
+	if err != nil {
+		t.Fatalf("LoadEditable() error = %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{homebrewPrefix}) {
+		t.Fatalf("Defaults.ToolchainPrefixes = %v", cfg.Defaults.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.PkgConfigPath, []string{
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	}) {
+		t.Fatalf("Defaults.PkgConfigPath = %v", cfg.Defaults.PkgConfigPath)
+	}
+}
+
+func TestInitCommandMergesToolchainPresetWithExplicitFlags(t *testing.T) {
+	dir := t.TempDir()
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return "/demo-home", nil
+	}
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{
+			"--toolchain-preset", "homebrew",
+			"--toolchain-prefix", ".toolchain",
+			"--pkg-config-path", "pkgconfig",
+			dir,
+		})
+	}); err != nil {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+
+	cfg, err := project.LoadEditable(filepath.Join(dir, project.ConfigFileName))
+	if err != nil {
+		t.Fatalf("LoadEditable() error = %v", err)
+	}
+	prefix := filepath.Join("/demo-home", "homebrew")
+	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{prefix, ".toolchain"}) {
+		t.Fatalf("Defaults.ToolchainPrefixes = %v", cfg.Defaults.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.PkgConfigPath, []string{
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+		"pkgconfig",
+	}) {
+		t.Fatalf("Defaults.PkgConfigPath = %v", cfg.Defaults.PkgConfigPath)
+	}
+}
+
+func TestInitCommandRejectsAutoToolchainPresetWhenNothingDetected(t *testing.T) {
+	dir := t.TempDir()
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	_, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{"--toolchain-preset", "auto", filepath.Join(dir, "project")})
+	})
+	if err == nil {
+		t.Fatal("initCommand() error = nil, want auto-detect failure")
+	}
+	if !strings.Contains(err.Error(), "could not auto-detect a common rootless toolchain preset on this machine") {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "rs toolchain detect") {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+}
+
+func TestInitCommandRejectsUnknownToolchainPreset(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{"--toolchain-preset", "unknown", dir})
+	})
+	if err == nil {
+		t.Fatal("initCommand() error = nil, want preset validation error")
+	}
+	if !strings.Contains(err.Error(), `unsupported --toolchain-preset "unknown"`) {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+}
+
+func TestToolchainTemplateCommandPrintsTOML(t *testing.T) {
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return "/demo-home", nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainTemplateCommand([]string{"micromamba"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainTemplateCommand() error = %v", err)
+	}
+	if !strings.Contains(output, `toolchain_prefixes = ["/demo-home/micromamba/envs/rs-sysdeps"]`) {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+	if !strings.Contains(output, `pkg_config_path = ["/demo-home/micromamba/envs/rs-sysdeps/lib/pkgconfig", "/demo-home/micromamba/envs/rs-sysdeps/share/pkgconfig"]`) {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+}
+
+func TestToolchainTemplateCommandPrintsEnvaPreset(t *testing.T) {
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return "/demo-home", nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainTemplateCommand([]string{"enva"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainTemplateCommand() error = %v", err)
+	}
+	if !strings.Contains(output, `toolchain_prefixes = ["/demo-home/.local/share/rattler/envs/rs-sysdeps"]`) {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+	if !strings.Contains(output, `pkg_config_path = ["/demo-home/.local/share/rattler/envs/rs-sysdeps/lib/pkgconfig", "/demo-home/.local/share/rattler/envs/rs-sysdeps/share/pkgconfig"]`) {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+}
+
+func TestToolchainTemplateCommandPrintsEnv(t *testing.T) {
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return "/demo-home", nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainTemplateCommand([]string{"--format", "env", "homebrew"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainTemplateCommand() error = %v", err)
+	}
+	if !strings.Contains(output, `export RS_TOOLCHAIN_PREFIXES='/demo-home/homebrew'`) {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+	if !strings.Contains(output, `export RS_PKG_CONFIG_PATH='/demo-home/homebrew/lib/pkgconfig:/demo-home/homebrew/share/pkgconfig'`) {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+}
+
+func TestToolchainTemplateCommandRejectsUnknownFormat(t *testing.T) {
+	_, err := runWithCapturedStdout(t, func() error {
+		return toolchainTemplateCommand([]string{"--format", "json", "homebrew"})
+	})
+	if err == nil {
+		t.Fatal("toolchainTemplateCommand() error = nil, want format validation error")
+	}
+	if !strings.Contains(err.Error(), `unsupported --format "json"`) {
+		t.Fatalf("toolchainTemplateCommand() error = %v", err)
+	}
+}
+
+func TestToolchainTemplateCommandCheckPassesWhenPathsExist(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		prefix,
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	oldHome := cliUserHomeDir
+	oldStat := cliStat
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+		cliStat = oldStat
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+	cliStat = os.Stat
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainTemplateCommand([]string{"homebrew", "--check"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainTemplateCommand() error = %v", err)
+	}
+	if !strings.Contains(output, "[ok] all preset toolchain paths exist on this machine") {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+}
+
+func TestToolchainTemplateCommandCheckFailsWhenPathsMissing(t *testing.T) {
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return "/demo-home", nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainTemplateCommand([]string{"micromamba", "--check"})
+	})
+	if err == nil {
+		t.Fatal("toolchainTemplateCommand() error = nil, want missing-path failure")
+	}
+	if !strings.Contains(output, "[check] toolchain prefix missing: /demo-home/micromamba/envs/rs-sysdeps") {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+	if !strings.Contains(output, "[summary] preset paths are missing on this machine") {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+}
+
+func TestToolchainDetectCommandPrintsDetectedCandidates(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		prefix,
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainDetectCommand(nil)
+	})
+	if err != nil {
+		t.Fatalf("toolchainDetectCommand() error = %v", err)
+	}
+	if !strings.Contains(output, "[detect] homebrew (complete, recommended)") {
+		t.Fatalf("toolchainDetectCommand() output = %q", output)
+	}
+	if !strings.Contains(output, "[next] preview template: rs toolchain template homebrew --check") {
+		t.Fatalf("toolchainDetectCommand() output = %q", output)
+	}
+	if !strings.Contains(output, `[next] prepare user-local prefix: "`+filepath.Join(prefix, "bin", "brew")+`" install pkg-config gcc`) {
+		t.Fatalf("toolchainDetectCommand() output = %q", output)
+	}
+	if !strings.Contains(output, "[next] initialize project defaults: rs init --toolchain-preset homebrew") {
+		t.Fatalf("toolchainDetectCommand() output = %q", output)
+	}
+}
+
+func TestToolchainDetectCommandJSONOutput(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "micromamba", "envs", "rs-sysdeps")
+	if err := os.MkdirAll(prefix, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", prefix, err)
+	}
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainDetectCommand([]string{"--json"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainDetectCommand() error = %v", err)
+	}
+	var report toolchainDetectReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, output)
+	}
+	if len(report.Candidates) != 1 {
+		t.Fatalf("report.Candidates = %v", report.Candidates)
+	}
+	if report.Candidates[0].Preset != "micromamba" {
+		t.Fatalf("report.Candidates[0].Preset = %q", report.Candidates[0].Preset)
+	}
+	if !report.Candidates[0].Recommended {
+		t.Fatalf("report.Candidates[0].Recommended = false, want true")
+	}
+	if report.Candidates[0].SuggestedInitCommand != "rs init --toolchain-preset micromamba" {
+		t.Fatalf("report.Candidates[0].SuggestedInitCommand = %q", report.Candidates[0].SuggestedInitCommand)
+	}
+	if !strings.Contains(report.Candidates[0].SuggestedSetupCommand, `micromamba create -y -p "`) {
+		t.Fatalf("report.Candidates[0].SuggestedSetupCommand = %q", report.Candidates[0].SuggestedSetupCommand)
+	}
+	if !strings.Contains(report.Candidates[0].SuggestedSetupNote, "dedicated build-tools environment") {
+		t.Fatalf("report.Candidates[0].SuggestedSetupNote = %q", report.Candidates[0].SuggestedSetupNote)
+	}
+	if report.Candidates[0].Complete {
+		t.Fatalf("report.Candidates[0].Complete = true, want false")
+	}
+	if !reflect.DeepEqual(report.Candidates[0].ExistingPrefixes, []string{prefix}) {
+		t.Fatalf("report.Candidates[0].ExistingPrefixes = %v", report.Candidates[0].ExistingPrefixes)
+	}
+}
+
+func TestToolchainDetectCommandPrefersEnvaOverMicromambaWhenBothExist(t *testing.T) {
+	dir := t.TempDir()
+	envaPrefix := filepath.Join(dir, ".local", "share", "rattler", "envs", "rs-sysdeps")
+	micromambaPrefix := filepath.Join(dir, "micromamba", "envs", "rs-sysdeps")
+	for _, path := range []string{
+		envaPrefix,
+		filepath.Join(envaPrefix, "lib", "pkgconfig"),
+		filepath.Join(envaPrefix, "share", "pkgconfig"),
+		micromambaPrefix,
+		filepath.Join(micromambaPrefix, "lib", "pkgconfig"),
+		filepath.Join(micromambaPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainDetectCommand([]string{"--json"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainDetectCommand() error = %v", err)
+	}
+	var report toolchainDetectReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, output)
+	}
+	if len(report.Candidates) < 2 {
+		t.Fatalf("report.Candidates = %v, want at least 2", report.Candidates)
+	}
+	if report.Candidates[0].Preset != "enva" {
+		t.Fatalf("report.Candidates[0].Preset = %q, want enva", report.Candidates[0].Preset)
+	}
+	if !report.Candidates[0].Recommended {
+		t.Fatalf("report.Candidates[0].Recommended = false, want true")
+	}
+	if report.Candidates[1].Preset != "micromamba" {
+		t.Fatalf("report.Candidates[1].Preset = %q, want micromamba", report.Candidates[1].Preset)
+	}
+}
+
+func TestToolchainDetectCommandReportsNoCandidates(t *testing.T) {
+	dir := t.TempDir()
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainDetectCommand(nil)
+	})
+	if err != nil {
+		t.Fatalf("toolchainDetectCommand() error = %v", err)
+	}
+	if !strings.Contains(output, "no common rootless toolchain presets detected on this machine") {
+		t.Fatalf("toolchainDetectCommand() output = %q", output)
+	}
+	if !strings.Contains(output, "rs toolchain template micromamba") {
+		t.Fatalf("toolchainDetectCommand() output = %q", output)
+	}
+}
+
+func TestToolchainTemplateCommandSupportsAutoPreset(t *testing.T) {
+	dir := t.TempDir()
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainTemplateCommand([]string{"auto"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainTemplateCommand() error = %v", err)
+	}
+	if !strings.Contains(output, `toolchain_prefixes = ["`+homebrewPrefix+`"]`) {
+		t.Fatalf("toolchainTemplateCommand() output = %q", output)
+	}
+}
+
+func TestToolchainBootstrapCommandPrintsBootstrapPlan(t *testing.T) {
+	dir := t.TempDir()
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainBootstrapCommand([]string{"auto"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainBootstrapCommand() error = %v", err)
+	}
+	if !strings.Contains(output, "[bootstrap] preset: homebrew (detected complete layout, recommended)") {
+		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
+	}
+	if !strings.Contains(output, `[bootstrap] setup command: "`+filepath.Join(homebrewPrefix, "bin", "brew")+`" install pkg-config gcc`) {
+		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
+	}
+	if !strings.Contains(output, "[next] initialize project defaults: rs init --toolchain-preset homebrew") {
+		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
+	}
+	if !strings.Contains(output, "[next] validate toolchain configuration: rs doctor --toolchain-only") {
+		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
+	}
+}
+
+func TestToolchainBootstrapCommandJSONOutput(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "micromamba", "envs", "rs-sysdeps")
+	if err := os.MkdirAll(prefix, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", prefix, err)
+	}
+
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainBootstrapCommand([]string{"micromamba", "--json"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainBootstrapCommand() error = %v", err)
+	}
+	var report toolchainBootstrapReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, output)
+	}
+	if report.Candidate.Preset != "micromamba" {
+		t.Fatalf("report.Candidate.Preset = %q", report.Candidate.Preset)
+	}
+	if report.InitCommand != "rs init --toolchain-preset micromamba" {
+		t.Fatalf("report.InitCommand = %q", report.InitCommand)
+	}
+	if report.TemplateCheckCommand != "rs toolchain template micromamba --check" {
+		t.Fatalf("report.TemplateCheckCommand = %q", report.TemplateCheckCommand)
+	}
+	if !strings.Contains(report.Candidate.SuggestedSetupCommand, `micromamba create -y -p "`) {
+		t.Fatalf("report.Candidate.SuggestedSetupCommand = %q", report.Candidate.SuggestedSetupCommand)
+	}
+}
+
+func TestToolchainBootstrapCommandPrintsEnvaPlan(t *testing.T) {
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainBootstrapCommand([]string{"enva"})
+	})
+	if err != nil {
+		t.Fatalf("toolchainBootstrapCommand() error = %v", err)
+	}
+	if !strings.Contains(output, "[bootstrap] preset: enva") {
+		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
+	}
+	if !strings.Contains(output, "enva") || !strings.Contains(output, "create --yaml") {
+		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
+	}
+	if !strings.Contains(output, "[next] initialize project defaults: rs init --toolchain-preset enva") {
+		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
+	}
+}
+
+func TestRInstallCommandPassesBootstrapToolchainFlag(t *testing.T) {
+	oldInstall := cliInstallRWithOptions
+	t.Cleanup(func() {
+		cliInstallRWithOptions = oldInstall
+	})
+
+	called := false
+	cliInstallRWithOptions = func(opts rmanager.InstallOptions) error {
+		called = true
+		if opts.Version != "4.4.3" {
+			t.Fatalf("opts.Version = %q", opts.Version)
+		}
+		if opts.Method != rmanager.InstallMethodSource {
+			t.Fatalf("opts.Method = %q", opts.Method)
+		}
+		if !opts.BootstrapToolchain {
+			t.Fatalf("opts.BootstrapToolchain = false, want true")
+		}
+		return nil
+	}
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return rInstallCommand([]string{"--method", "source", "--bootstrap-toolchain", "4.4.3"})
+	}); err != nil {
+		t.Fatalf("rInstallCommand() error = %v", err)
+	}
+	if !called {
+		t.Fatal("rInstallCommand() did not call installer")
+	}
+}
+
+func TestToolchainDetectCommandSortsAndMarksRecommendedCandidate(t *testing.T) {
+	dir := t.TempDir()
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	micromambaPrefix := filepath.Join(dir, "micromamba", "envs", "rs-sysdeps")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+		micromambaPrefix,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
+	candidates, err := detectToolchainCandidates()
+	if err != nil {
+		t.Fatalf("detectToolchainCandidates() error = %v", err)
+	}
+	if len(candidates) != 2 {
+		t.Fatalf("len(candidates) = %d, want 2 (%v)", len(candidates), candidates)
+	}
+	if !candidates[0].Recommended {
+		t.Fatalf("candidates[0].Recommended = false, want true")
+	}
+	if candidates[1].Recommended {
+		t.Fatalf("candidates[1].Recommended = true, want false")
+	}
+	if candidates[0].Preset != "homebrew" {
+		t.Fatalf("candidates[0].Preset = %q, want homebrew because complete should outrank partial", candidates[0].Preset)
 	}
 }
 
@@ -283,6 +1007,50 @@ func TestRUseCommandRejectsUnsupportedNativeSelector(t *testing.T) {
 	}
 	if validateErr := rmanager.ValidateVersionSelector("oldrel"); validateErr == nil {
 		t.Fatal("ValidateVersionSelector(oldrel) error = nil, want unsupported selector")
+	}
+}
+
+func TestRUseCommandRejectsUnresolvableVersionWithoutMutatingConfig(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := runWithCapturedStdout(t, func() error {
+		return initCommand([]string{dir})
+	}); err != nil {
+		t.Fatalf("initCommand() error = %v", err)
+	}
+
+	oldValidate := cliValidateVersionSelector
+	oldResolvePath := cliResolveVersionOrPath
+	oldResolveVersion := cliResolveVersionSelector
+	t.Cleanup(func() {
+		cliValidateVersionSelector = oldValidate
+		cliResolveVersionOrPath = oldResolvePath
+		cliResolveVersionSelector = oldResolveVersion
+	})
+	cliValidateVersionSelector = func(spec string) error { return nil }
+	cliResolveVersionOrPath = func(spec string) (string, error) {
+		return "", fmt.Errorf("could not find an installed Rscript for version %q", spec)
+	}
+	cliResolveVersionSelector = func(spec string) (string, error) {
+		return "", fmt.Errorf("could not resolve R version selector %q", spec)
+	}
+
+	_, err := runWithCapturedStdout(t, func() error {
+		return rUseCommand([]string{"--project-dir", dir, "5.3.2"})
+	})
+	if err == nil {
+		t.Fatal("rUseCommand() error = nil, want unresolved version failure")
+	}
+	if !strings.Contains(err.Error(), `could not resolve R version selector "5.3.2"`) {
+		t.Fatalf("rUseCommand() error = %v", err)
+	}
+
+	cfg, loadErr := project.LoadEditable(filepath.Join(dir, project.ConfigFileName))
+	if loadErr != nil {
+		t.Fatalf("LoadEditable() error = %v", loadErr)
+	}
+	if cfg.Defaults.RVersion != "" || cfg.Defaults.Rscript != "" {
+		t.Fatalf("config unexpectedly changed after rejected version: %#v", cfg.Defaults)
 	}
 }
 

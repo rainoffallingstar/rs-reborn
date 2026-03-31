@@ -43,9 +43,16 @@ RS_INSTALL_TAG=2026-03-30 curl -fsSL https://raw.githubusercontent.com/rainoffal
 RS_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.sh | bash
 ```
 
+Install the latest published Windows binary into `%USERPROFILE%\.cargo\bin` with PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.ps1 | iex
+$env:RS_INSTALL_TAG="2026-03-30"; irm https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.ps1 | iex
+```
+
 Continuous integration:
 
-- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux and macOS, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and native multi-R manager integration checks
+- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux, macOS, and Windows x64, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and native multi-R manager integration checks
 - [`.github/workflows/release.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/release.yml) publishes date-tagged GitHub Release binaries after successful `main` or `master` CI runs; successful rebuilds later the same day reuse that date tag and refresh the assets
 - the CI helper scripts live under [`scripts/ci/`](/Volumes/DataCenter_01/GitHub/gr/scripts/ci)
 
@@ -163,7 +170,7 @@ Manage interpreter versions and selection:
 ./rs r which
 ```
 
-On macOS and Linux, `rs` now includes a native multi-R manager. `rs r list` shows both `managed` and discovered `external` interpreters, `rs r install` installs a user-local managed R, and `rs r install --method auto|binary|source` lets you control artifact selection. When `Rscript` is missing, `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` print a next step by default and only auto-install R when you opt in with `RS_AUTO_INSTALL_R=1`. Set `RS_R_VERSION=4.4` if you want to pin the default bootstrap target on fresh machines. Windows binaries may still be published, but the native R manager is currently a macOS/Linux-first path; on Windows the safest v1 flow is still to point `rs` at an explicit `Rscript`.
+`rs` now includes a native multi-R manager on macOS, Linux, and Windows x64. `rs r list` shows both `managed` and discovered `external` interpreters, `rs r install` installs a user-local managed R, and `rs r install --method auto|binary|source` lets you control artifact selection where supported. On Windows, native R installs are binary-only in this release, `rs shell` prefers `Rterm.exe`, and source-based package installs from `local`, `git`, or `github` still require Rtools. When `Rscript` is missing, `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` print a next step by default and only auto-install R when you opt in with `RS_AUTO_INSTALL_R=1`. Set `RS_R_VERSION=4.4` if you want to pin the default bootstrap target on fresh machines.
 
 Compatibility alias:
 
@@ -204,6 +211,8 @@ cache_dir = ".rs-cache"
 lockfile = "rs.lock.json"
 r_version = "4.4"
 rscript = "tools/Rscript-4.4"
+toolchain_prefixes = [".toolchain", "/opt/demo"]
+pkg_config_path = [".toolchain/lib/pkgconfig"]
 packages = ["jsonlite", "cli"]
 bioc_packages = ["Biostrings"]
 
@@ -237,6 +246,61 @@ ref = "feature-branch"
 ```
 
 The root block defines project defaults. A `[scripts."relative/path.R"]` block can override or extend settings for one script, including `rscript` when one entrypoint must pin a specific interpreter path and `r_version` when one entrypoint should target a specific R line such as `4.4`. When both are set, `rs` expects the selected interpreter to match `r_version`. A `[sources."packageName"]` block declares a project-wide non-CRAN installation source, and `[scripts."relative/path.R".sources."packageName"]` overrides that source for one script. `rs.toml` is validated when it is loaded, so malformed sections, contradictory source fields, repeated keys, and common typos now fail early with the offending section and line, plus supported-key or close-match hints when the fix is obvious.
+
+For rootless or user-local source builds, you can keep toolchain hints in `rs.toml`:
+
+```toml
+toolchain_prefixes = [
+  "/home/you/.local",
+  "/home/you/.local/share/rattler/envs/rs-sysdeps",
+]
+pkg_config_path = [
+  "/home/you/.local/lib/pkgconfig",
+  "/home/you/.local/share/pkgconfig",
+]
+```
+
+or provide them ad hoc through environment variables:
+
+```bash
+export RS_TOOLCHAIN_PREFIXES="$HOME/.local:$HOME/.local/share/rattler/envs/rs-sysdeps"
+export RS_PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/share/pkgconfig"
+
+./rs r install 4.4.3 --method source
+./rs run analysis.R
+```
+
+`rs` expands each `toolchain_prefixes` entry into the usual `bin`, `include`, and `lib` locations and injects the resulting `PATH`, `CPPFLAGS`, `LDFLAGS`, and `PKG_CONFIG_PATH` automatically for native R builds and source package installs.
+
+The detailed rootless cookbook lives at [`docs/rootless-toolchains.md`](/Volumes/DataCenter_01/GitHub/gr/docs/rootless-toolchains.md). It includes copy-paste examples for `enva`, Homebrew-in-home, micromamba/mamba/Conda, and Spack, and explains the current product boundary clearly: `rs` auto-detects and auto-uses an existing user-local prefix by default, and with `--bootstrap-toolchain` it can invoke a supported external manager to create one for you.
+
+For faster bootstrapping, `rs init` also supports `--toolchain-preset auto|enva|micromamba|mamba|conda|homebrew|spack`, which seeds `toolchain_prefixes` and `pkg_config_path` with a common user-local template. `auto` reuses the top recommendation from `rs toolchain detect`, so if one of the built-in layouts already exists under your home directory you can wire it into a new project in one step. You can still append explicit `--toolchain-prefix` or `--pkg-config-path` values on the same command.
+
+`rs toolchain detect` now also prints preset-specific setup hints such as an `enva` bootstrap command, a conda-family environment creation command, or the matching Homebrew/Spack follow-up, so rootless users can move from discovery to a concrete user-local prefix more directly. The longer cookbook lives in [docs/rootless-toolchains.md](docs/rootless-toolchains.md).
+
+When no explicit `toolchain_prefixes` / `pkg_config_path` config or `RS_TOOLCHAIN_PREFIXES` / `RS_PKG_CONFIG_PATH` environment is present, native source-build paths and runtime package-install environments now also auto-detect a recommended existing rootless prefix and use it automatically. Explicit config still wins.
+
+If no suitable prefix exists yet and you want `rs` to create one for you, use a command that accepts `--bootstrap-toolchain`. When `rs` needs to actively create a new conda-style toolchain prefix, the current bootstrap priority is `enva > micromamba > mamba > conda`. Already-detected Homebrew and Spack layouts are still recommended and reused by `auto` when they already exist:
+
+```bash
+rs run --bootstrap-toolchain analysis.R
+rs lock --bootstrap-toolchain analysis.R
+rs check --bootstrap-toolchain analysis.R
+rs doctor --toolchain-only --bootstrap-toolchain
+rs r install 4.5.3 --method source --bootstrap-toolchain
+```
+
+If you want to inspect a preset before writing anything, use:
+
+```bash
+rs toolchain template enva
+rs toolchain template mamba
+rs toolchain template conda --check
+rs toolchain template homebrew --format env
+rs toolchain template spack --check
+rs toolchain detect
+rs toolchain bootstrap auto
+```
 
 ## Examples
 
@@ -428,17 +492,23 @@ The human-readable failure output now also adds short grouped summaries for inpu
 - which repo, lockfile path, and managed library path will be used
 - whether the lockfile or managed library has not been created yet
 
-It prints `[info]`, `[warn]`, and `[error]` lines. Missing lockfiles and missing managed libraries are warnings, because a first-time `rs sync` or `rs run` can still create them. Blocking misconfiguration such as a missing selected `Rscript`, missing local source tarball, or missing private token env returns a non-zero exit code.
+It prints `[info]`, `[warn]`, and `[error]` lines. Missing lockfiles and missing managed libraries are warnings, because a first-time `rs sync` or `rs run` can still create them. Blocking misconfiguration such as a missing selected `Rscript`, missing local source tarball, missing private token env, or broken `toolchain_prefixes` / `pkg_config_path` entries returns a non-zero exit code. When a rootless toolchain is configured, `doctor` also warns if `pkg-config` itself is still missing from the effective `PATH`.
 
-`rs doctor --json` keeps the flat `warnings` and `errors` arrays, and also groups them into `setup_errors`, `source_errors`, `network_errors`, `runtime_errors`, `lock_warnings`, and `cache_warnings` so automation can distinguish prerequisites, source misconfiguration, remote-access failures, and dependency-state warnings. It also exposes `error_details` and `warning_details` with structured `category`, `kind`, `message`, and optional path/package/env fields, plus `status` and `summary` so callers can quickly judge whether the report is `ok`, `warning`, or `error` without recomputing aggregate counts. `system_hints` and `system_hint_details` remain available for packages that commonly need external libraries, SDKs, or toolchains, and now cover a broader set of native-library-heavy packages such as `stringi`, `odbc`, and `git2r` in addition to the earlier `curl`/`xml2`/geospatial families.
+`rs doctor --json` keeps the flat `warnings` and `errors` arrays, and also groups them into `setup_errors`, `source_errors`, `network_errors`, `runtime_errors`, `lock_warnings`, and `cache_warnings` so automation can distinguish prerequisites, source misconfiguration, remote-access failures, and dependency-state warnings. It also exposes `error_details` and `warning_details` with structured `category`, `kind`, `message`, and optional path/package/env fields, plus `status` and `summary` so callers can quickly judge whether the report is `ok`, `warning`, or `error` without recomputing aggregate counts. The report now also includes `toolchain_prefixes` and `pkg_config_path`, so rootless and user-local build setups can be inspected directly from automation. `system_hints` and `system_hint_details` remain available for packages that commonly need external libraries, SDKs, or toolchains, and now cover a broader set of native-library-heavy packages such as `stringi`, `odbc`, and `git2r` in addition to the earlier `curl`/`xml2`/geospatial families.
 
-The doctor output now also includes explicit next-step guidance. In human-readable mode it prints `[next]` lines such as `rs lock <script>` or `rs run <script>` when the environment is merely missing a lockfile or managed library, and `rs doctor --json` exposes the same guidance under structured `next_steps` entries with `category`, `kind`, `message`, optional `command`, and a `blocking` flag so automation can distinguish hard prerequisites from optional follow-up actions.
+For rootless-only preflight, `rs doctor --toolchain-only [path/to/script.R|path/to/project]` skips dependency scanning and lockfile checks, then validates just the effective toolchain prefixes and pkg-config paths. It uses project config when an `rs.toml` is present, or falls back to `RS_TOOLCHAIN_PREFIXES` / `RS_PKG_CONFIG_PATH` when you are validating an ad hoc user-local build environment.
+
+The doctor JSON report now also includes `toolchain_path`, `toolchain_cppflags`, `toolchain_ldflags`, and `toolchain_pkg_config_path`, which show the rootless build contribution that `rs` would inject on top of your existing environment.
+
+The doctor output now also includes explicit next-step guidance. In human-readable mode it prints `[next]` lines such as `rs lock <script>` or `rs run <script>` when the environment is merely missing a lockfile or managed library, and `rs doctor --json` exposes the same guidance under structured `next_steps` entries with `category`, `kind`, `message`, optional `command`, optional `note`, optional `preset`, and a `blocking` flag so automation can distinguish hard prerequisites from optional follow-up actions.
+
+For rootless/source-build issues, those next steps now also point at `rs toolchain detect`, `rs toolchain template ...`, and `rs doctor --toolchain-only ...` so the recovery flow stays inside `rs` instead of requiring guesswork.
 
 The human-readable `rs doctor` output now also ends with a compact `[summary]` line, for example `status=warning | errors=0 | warnings=2 | hints=2 | next=4 | blocking_next=0`, so logs are easy to scan without reparsing every line above it.
 
 If you only want that compact status line, `rs doctor --summary-only` suppresses the detailed `[info]`, `[warn]`, `[hint]`, and `[next]` lines and prints just the final summary. It still honors the normal exit behavior, including `--strict`.
 
-If you still want warnings, hints, next steps, and the summary, but do not want the verbose environment preamble, `rs doctor --quiet` hides only the `[info]` lines.
+If you still want warnings, hints, next steps, and the summary, but do not want the verbose environment preamble, `rs doctor --quiet` hides only the `[info]` lines. Those `[info]` lines now also show the effective `toolchain prefixes` and `pkg-config path`, which makes rootless source-build debugging much easier.
 
 For CI or gating scripts, `rs doctor --strict` exits non-zero unless the report status is exactly `ok`. That means warnings such as a missing lockfile or missing managed library can be treated as failures when you want a fully prepared environment before continuing. By convention, normal blocking doctor failures exit with code `1`, while `--strict` warning failures exit with code `2`.
 
@@ -454,9 +524,10 @@ If you want this to grow from prototype into a real tool, the next steps are:
 
 ## Notes
 
-- `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` bootstrap R through the native manager on macOS and Linux; by default they print next steps, and if you set `RS_AUTO_INSTALL_R=1` they install the requested target
-- `rs r install <version> --method auto|binary|source` controls how managed R versions are installed; `auto` is the default and Arch Linux prefers source builds in that mode
-- the supported v1 path is macOS/Linux runtime plus the macOS/Linux native R manager; Windows remains best-effort unless you pin an explicit `Rscript`
+- `rs run`, `rs exec`, `rs shell`, `rs lock`, and `rs sync` bootstrap R through the native manager on macOS, Linux, and Windows; by default they print next steps, and if you set `RS_AUTO_INSTALL_R=1` they install the requested target
+- `rs r install <version> --method auto|binary|source` controls how managed R versions are installed; `auto` is the default, Arch Linux prefers source builds in that mode, and Windows currently supports `auto|binary`
+- Windows x64 is now a supported path for runtime commands and the native R manager; Windows ARM64 binaries still ship as secondary artifacts with lighter validation depth
+- Windows CRAN/Bioconductor installs are binary-first, while `local`, `git`, and `github` package installs remain source-based and may require Rtools
 - you can still pin a project interpreter with `rscript = "..."`, override it with `--rscript`, or use the explicit `rs r ...` commands when you want full control
 - package installation supports CRAN, explicitly declared Bioconductor packages, GitHub sources, and local package sources
 - package installation also supports generic `git` sources with `url`, `ref`, and `subdir`

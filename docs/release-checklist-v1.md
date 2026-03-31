@@ -87,14 +87,15 @@ Run on a machine where the native manager can install or discover multiple R ver
 
 Notes:
 
-- v1 now ships a first-party R manager on macOS and Linux
-- if Windows is not fully validated, document that explicitly instead of implying parity
+- v1 now ships a first-party R manager on macOS, Linux, and Windows x64
+- keep the Windows x64 / Windows ARM64 validation split explicit in public wording
 
 ### 7. Docs alignment
 
 - [ ] `README.md` matches actual CLI flags and current behavior
 - [ ] `docs/design.md` no longer contradicts implemented multi-R support
 - [ ] `docs/roadmap.md` reflects current baseline and remaining deferrals
+- [ ] rootless/toolchain docs match actual `--bootstrap-toolchain` behavior and current preset list
 
 ### 8. Support statement
 
@@ -102,18 +103,21 @@ Decide and publish the v1 support boundary:
 
 - [ ] supported OS list
 - [ ] whether Windows is supported, experimental, or deferred
-- [ ] whether Windows remains deferred while macOS/Linux use the native R manager
+- [ ] whether the Windows x64 / Windows ARM64 split is described clearly enough
 - [ ] which commands are stable for automation today
+- [ ] whether rootless/source-build guidance is described clearly enough for user-local environments
 
 ## Recommended v1 Support Statement
 
 Unless additional validation changes this, the safest public statement is:
 
-- runtime commands are supported on macOS and Linux
+- runtime commands are supported on macOS, Linux, and Windows x64
 - explicit interpreter selection via `rscript` and `--rscript` is supported
-- `rs r ...` is a first-party native R manager on macOS and Linux
-- Windows is best-effort until validated in CI and smoke-tested with multiple R installs
-- stable automation-oriented commands today are `scan`, `list`, `doctor`, `check`, `lock`, `sync`, `run`, `exec`, `shell`, and `rs r list|install|use|which` on macOS and Linux
+- `rs r ...` is a first-party native R manager on macOS, Linux, and Windows x64
+- rootless source-build flows support detected user-local prefixes by default, plus explicit `--bootstrap-toolchain` opt-in for manager-driven prefix creation
+- the current conda-style bootstrap priority is `enva > micromamba > mamba > conda`
+- Windows ARM64 remains a shipped secondary artifact with lighter validation depth
+- stable automation-oriented commands today are `scan`, `list`, `doctor`, `check`, `lock`, `sync`, `run`, `exec`, `shell`, and `rs r list|install|use|which` on macOS, Linux, and Windows x64
 
 ## Release Artifacts
 
@@ -125,21 +129,25 @@ Unless additional validation changes this, the safest public statement is:
 
 The current GitHub Actions workflow is split into these release-facing jobs:
 
-- `go-test`: repository unit and package tests on Linux and macOS
-- `cli-smoke`: real-R command coverage for `scan`, `list`, `doctor`, `lock`, `check`, `exec`, `shell`, `run`, cache commands, and interpreter selection
-- `r-bootstrap-guidance`: missing-R guidance and `RS_AUTO_INSTALL_R` bootstrap messaging on Linux and macOS
-- `release-install-smoke`: build a host release artifact, install it through `install.sh`, and verify the installed binary starts on Linux and macOS
+- `go-test`: repository unit and package tests on Linux, macOS, and Windows x64
+- `cli-smoke`: real-R command coverage for `scan`, `list`, `doctor`, `lock`, `check`, `exec`, `shell`, `run`, cache commands, and interpreter selection on Linux, macOS, and Windows x64
+- `r-bootstrap-guidance`: missing-R guidance and `RS_AUTO_INSTALL_R` bootstrap messaging on Linux, macOS, and Windows x64
+- `toolchain-doctor`: end-to-end verification of rootless toolchain-only validation and diagnostics on Linux and macOS
+- `toolchain-cli`: end-to-end verification of toolchain detect/template/bootstrap CLI behavior on Linux and macOS
+- `toolchain-enva`: end-to-end verification that `enva` is preferred over micromamba when actively bootstrapping a new rootless toolchain prefix
+- `toolchain-enva-runtime`: end-to-end verification that `rs run --bootstrap-toolchain` injects the bootstrapped `enva` prefix into the real runtime environment
+- `release-install-smoke`: build a host release artifact, install it through `install.sh` or `install.ps1`, and verify the installed binary starts on Linux, macOS, and Windows x64
 - `local-source-drift`: end-to-end verification that local source fingerprint drift breaks `check`, `--locked`, and `--frozen` as expected
 - `doctor-failures`: end-to-end verification of blocking doctor failure output
 - `git-source`: end-to-end verification of generic git sources
 - `cache-rebuild`: end-to-end verification of managed-library rebuild behavior
 - `multi-script-project`: end-to-end verification of project-level multi-script behavior
-- `native-backend`: end-to-end verification that `RS_INSTALL_BACKEND=auto` stays on the native path
+- `native-backend`: end-to-end verification that `RS_INSTALL_BACKEND=auto` stays on the native path, including Windows binary-first package installs
 - `native-cran-archive`: end-to-end verification of CRAN archive resolution on the native installer
 - `native-github`: end-to-end verification of standard GitHub sources on the native installer
 - `native-bioc`: end-to-end verification of Bioconductor installs on the native installer
-- `pak-backend`: explicit compatibility coverage for the `pak` backend
-- `native-r-manager`: macOS and Linux smoke coverage for `rs r list/install/use/which`
+- `pak-backend`: explicit compatibility coverage for the `pak` backend on Linux and Windows x64
+- `native-r-manager`: macOS, Linux, and Windows x64 smoke coverage for `rs r list/install/use/which`
 - `native-r-manager-source`: Ubuntu end-to-end verification of explicit `rs r install --method source`
 
 ## Final Human Sign-Off Before Tagging
@@ -147,7 +155,7 @@ The current GitHub Actions workflow is split into these release-facing jobs:
 Even with the automated coverage above, the last release pass should still confirm:
 
 - [ ] the intended release branch commit is pushed and CI is green on GitHub, not just locally
-- [ ] the published support statement is acceptable for v1, especially the Windows best-effort language
+- [ ] the published support statement is acceptable for v1, especially the Windows x64 / Windows ARM64 split
 - [ ] the native R manager has been judged sufficiently validated for the promised scope, or the public wording has been reduced accordingly
 - [ ] the release workflow is triggered from the intended revision and the date tag outcome is checked once after publish
 

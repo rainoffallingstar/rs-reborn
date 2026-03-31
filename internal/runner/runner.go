@@ -12,7 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,107 +24,116 @@ import (
 	"gr/internal/project"
 	"gr/internal/rdeps"
 	"gr/internal/rmanager"
+	"gr/internal/toolchainenv"
 )
 
 type RunOptions struct {
-	ScriptPath    string
-	ScriptArgs    []string
-	ExtraDeps     []string
-	ExtraBiocDeps []string
-	ExcludeDeps   []string
-	Repo          string
-	CacheDir      string
-	RscriptPath   string
-	SkipInstall   bool
-	Locked        bool
-	Frozen        bool
-	Verbose       bool
-	Stdout        io.Writer
-	Stderr        io.Writer
-	AutoInstallR  bool
+	ScriptPath         string
+	ScriptArgs         []string
+	ExtraDeps          []string
+	ExtraBiocDeps      []string
+	ExcludeDeps        []string
+	Repo               string
+	CacheDir           string
+	RscriptPath        string
+	SkipInstall        bool
+	Locked             bool
+	Frozen             bool
+	Verbose            bool
+	BootstrapToolchain bool
+	Stdout             io.Writer
+	Stderr             io.Writer
+	AutoInstallR       bool
 }
 
 type ShellOptions struct {
-	ScriptPath    string
-	ExtraDeps     []string
-	ExtraBiocDeps []string
-	ExcludeDeps   []string
-	Repo          string
-	CacheDir      string
-	RscriptPath   string
-	SkipInstall   bool
-	Locked        bool
-	Frozen        bool
-	Verbose       bool
-	Stdout        io.Writer
-	Stderr        io.Writer
+	ScriptPath         string
+	ExtraDeps          []string
+	ExtraBiocDeps      []string
+	ExcludeDeps        []string
+	Repo               string
+	CacheDir           string
+	RscriptPath        string
+	SkipInstall        bool
+	Locked             bool
+	Frozen             bool
+	Verbose            bool
+	BootstrapToolchain bool
+	Stdout             io.Writer
+	Stderr             io.Writer
 }
 
 type ExecOptions struct {
-	ScriptPath    string
-	Expression    string
-	ExtraDeps     []string
-	ExtraBiocDeps []string
-	ExcludeDeps   []string
-	Repo          string
-	CacheDir      string
-	RscriptPath   string
-	SkipInstall   bool
-	Locked        bool
-	Frozen        bool
-	Verbose       bool
-	Stdout        io.Writer
-	Stderr        io.Writer
+	ScriptPath         string
+	Expression         string
+	ExtraDeps          []string
+	ExtraBiocDeps      []string
+	ExcludeDeps        []string
+	Repo               string
+	CacheDir           string
+	RscriptPath        string
+	SkipInstall        bool
+	Locked             bool
+	Frozen             bool
+	Verbose            bool
+	BootstrapToolchain bool
+	Stdout             io.Writer
+	Stderr             io.Writer
 }
 
 type SyncOptions struct {
-	ScriptPath    string
-	ExtraDeps     []string
-	ExtraBiocDeps []string
-	ExcludeDeps   []string
-	Repo          string
-	CacheDir      string
-	RscriptPath   string
-	Verbose       bool
-	Stdout        io.Writer
-	Stderr        io.Writer
+	ScriptPath         string
+	ExtraDeps          []string
+	ExtraBiocDeps      []string
+	ExcludeDeps        []string
+	Repo               string
+	CacheDir           string
+	RscriptPath        string
+	Verbose            bool
+	BootstrapToolchain bool
+	Stdout             io.Writer
+	Stderr             io.Writer
 }
 
 type LockOptions = SyncOptions
 
 type CheckOptions struct {
-	ScriptPath      string
-	ExtraDeps       []string
-	ExtraBiocDeps   []string
-	ExcludeDeps     []string
-	IncludeDeps     []string
-	IncludeBiocDeps []string
-	Repo            string
-	CacheDir        string
-	RscriptPath     string
-	JSON            bool
-	Verbose         bool
-	Stdout          io.Writer
-	Stderr          io.Writer
+	ScriptPath         string
+	ExtraDeps          []string
+	ExtraBiocDeps      []string
+	ExcludeDeps        []string
+	IncludeDeps        []string
+	IncludeBiocDeps    []string
+	Repo               string
+	CacheDir           string
+	RscriptPath        string
+	JSON               bool
+	Verbose            bool
+	BootstrapToolchain bool
+	Stdout             io.Writer
+	Stderr             io.Writer
 }
 
 type DoctorOptions struct {
-	ScriptPath      string
-	ExtraDeps       []string
-	ExtraBiocDeps   []string
-	ExcludeDeps     []string
-	IncludeDeps     []string
-	IncludeBiocDeps []string
-	Repo            string
-	CacheDir        string
-	RscriptPath     string
-	JSON            bool
-	Strict          bool
-	Quiet           bool
-	SummaryOnly     bool
-	Verbose         bool
-	Stdout          io.Writer
-	Stderr          io.Writer
+	ScriptPath         string
+	ProjectDir         string
+	ExtraDeps          []string
+	ExtraBiocDeps      []string
+	ExcludeDeps        []string
+	IncludeDeps        []string
+	IncludeBiocDeps    []string
+	Repo               string
+	CacheDir           string
+	RscriptPath        string
+	JSON               bool
+	Strict             bool
+	Quiet              bool
+	SummaryOnly        bool
+	ToolchainOnly      bool
+	Verbose            bool
+	BootstrapToolchain bool
+	Stdout             io.Writer
+	Stderr             io.Writer
 }
 
 type ListOptions struct {
@@ -195,33 +206,36 @@ func (e ReportedError) Unwrap() error {
 }
 
 type ResolvedEnvironment struct {
-	ScriptPath    string
-	ScriptArgs    []string
-	Repo          string
-	CacheRoot     string
-	LibraryPath   string
-	BootstrapPath string
-	LockfilePath  string
-	Interpreter   string
-	Runtime       RuntimeMetadata
-	DetectedDeps  []string
-	CRANDeps      []string
-	BiocDeps      []string
-	SourceDeps    map[string]project.SourceSpec
-	ProjectConfig project.Config
-	ScriptConfig  project.ResolvedScriptConfig
-	Verbose       bool
-	Stdout        io.Writer
-	Stderr        io.Writer
+	ScriptPath        string
+	ScriptArgs        []string
+	Repo              string
+	CacheRoot         string
+	LibraryPath       string
+	BootstrapPath     string
+	LockfilePath      string
+	Interpreter       string
+	Runtime           RuntimeMetadata
+	DetectedDeps      []string
+	CRANDeps          []string
+	BiocDeps          []string
+	SourceDeps        map[string]project.SourceSpec
+	ToolchainPrefixes []string
+	PkgConfigPath     []string
+	ProjectConfig     project.Config
+	ScriptConfig      project.ResolvedScriptConfig
+	Verbose           bool
+	Stdout            io.Writer
+	Stderr            io.Writer
 }
 
 type RuntimeMetadata struct {
-	Interpreter string
-	RVersion    string
-	Platform    string
-	Arch        string
-	OS          string
-	PackageType string
+	Interpreter     string
+	RVersion        string
+	Platform        string
+	Arch            string
+	OS              string
+	PackageType     string
+	InterpreterKind string
 }
 
 type sourceMetadata struct {
@@ -262,6 +276,7 @@ var nativeValidatePlan = func(req installer.Request) error {
 }
 
 var resolveManagedRscript = rmanager.ResolveVersionOrPath
+var resolveCurrentManagedRscript = rmanager.CurrentManagedRscript
 var resolveSelectedRscript = resolveConfiguredInterpreterPath
 
 var ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
@@ -269,6 +284,7 @@ var ensureManagedRscript = func(selected string, stderr io.Writer) (string, erro
 }
 
 var rManagerBootstrapAdvice = rmanager.BootstrapAdvice
+var rManagerBootstrapAdviceFor = rmanager.BootstrapAdviceFor
 var autoInstallR = rmanager.AutoInstallREnabled
 
 type interpreterSelection struct {
@@ -623,6 +639,9 @@ type dependencyPlan struct {
 	IncludedBioc      []string
 	ExcludedDeps      []string
 	SourceDeps        map[string]project.SourceSpec
+	ToolchainPrefixes []string
+	PkgConfigPath     []string
+	Runtime           RuntimeMetadata
 }
 
 type ListReport struct {
@@ -730,6 +749,12 @@ type DoctorReport struct {
 	IncludedCRAN      []string            `json:"included_cran_packages"`
 	IncludedBioc      []string            `json:"included_bioc_packages"`
 	ExcludedDeps      []string            `json:"excluded_packages"`
+	ToolchainPrefixes []string            `json:"toolchain_prefixes"`
+	PkgConfigPath     []string            `json:"pkg_config_path"`
+	ToolchainPath     []string            `json:"toolchain_path"`
+	ToolchainCPPFLAGS []string            `json:"toolchain_cppflags"`
+	ToolchainLDFLAGS  []string            `json:"toolchain_ldflags"`
+	ToolchainPkgPath  []string            `json:"toolchain_pkg_config_path"`
 	CustomSources     []string            `json:"custom_sources"`
 	Warnings          []string            `json:"warnings"`
 	Errors            []string            `json:"errors"`
@@ -791,6 +816,8 @@ type NextStepDetail struct {
 	Kind     string `json:"kind"`
 	Message  string `json:"message"`
 	Command  string `json:"command,omitempty"`
+	Note     string `json:"note,omitempty"`
+	Preset   string `json:"preset,omitempty"`
 	Blocking bool   `json:"blocking"`
 }
 
@@ -815,6 +842,11 @@ func Run(opts RunOptions) error {
 		return err
 	}
 	defer os.Remove(env.BootstrapPath)
+	if opts.BootstrapToolchain {
+		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
+			return err
+		}
+	}
 
 	if opts.Frozen {
 		if err := ValidateLockfile(env, ValidationModeFrozen); err != nil {
@@ -881,6 +913,11 @@ func Shell(opts ShellOptions) error {
 		return err
 	}
 	defer os.Remove(env.BootstrapPath)
+	if opts.BootstrapToolchain {
+		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
+			return err
+		}
+	}
 
 	if opts.Frozen {
 		if err := ValidateLockfile(env, ValidationModeFrozen); err != nil {
@@ -954,6 +991,11 @@ func Exec(opts ExecOptions) error {
 		return err
 	}
 	defer os.Remove(env.BootstrapPath)
+	if opts.BootstrapToolchain {
+		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
+			return err
+		}
+	}
 
 	if opts.Frozen {
 		if err := ValidateLockfile(env, ValidationModeFrozen); err != nil {
@@ -1016,6 +1058,11 @@ func Sync(opts SyncOptions) error {
 		return err
 	}
 	defer os.Remove(env.BootstrapPath)
+	if opts.BootstrapToolchain {
+		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
+			return err
+		}
+	}
 
 	if err := EnsureInstalled(env); err != nil {
 		return err
@@ -1381,6 +1428,11 @@ func Check(opts CheckOptions) error {
 		return err
 	}
 	defer os.Remove(env.BootstrapPath)
+	if opts.BootstrapToolchain {
+		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
+			return err
+		}
+	}
 
 	if opts.JSON {
 		report, resultErr := buildCheckReport(env, opts)
@@ -1413,32 +1465,55 @@ func Doctor(opts DoctorOptions) error {
 		opts.Stderr = os.Stderr
 	}
 
-	info, err := os.Stat(opts.ScriptPath)
-	if err != nil {
-		return fmt.Errorf("stat script: %w", err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("%s is a directory, expected an R script", opts.ScriptPath)
-	}
+	var (
+		plan dependencyPlan
+		err  error
+	)
+	if opts.ToolchainOnly {
+		plan, err = resolveToolchainOnlyPlan(opts)
+		if err != nil {
+			return err
+		}
+	} else {
+		info, err := os.Stat(opts.ScriptPath)
+		if err != nil {
+			return fmt.Errorf("stat script: %w", err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("%s is a directory, expected an R script", opts.ScriptPath)
+		}
 
-	plan, err := resolveDependencyPlanWithProgress(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath, opts.Stderr)
-	if err != nil {
-		return err
+		plan, err = resolveDependencyPlanWithProgress(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath, opts.Stderr)
+		if err != nil {
+			return err
+		}
+	}
+	if opts.BootstrapToolchain {
+		if err := maybeBootstrapPlanToolchain(&plan, opts.Stdout, opts.Stderr); err != nil {
+			return err
+		}
 	}
 
 	var errorsList []string
 	var warnings []string
+	toolchainPreview := toolchainenv.BuildPreview(plan.ToolchainPrefixes, plan.PkgConfigPath)
 	systemHintDetails := collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps)
+	if opts.ToolchainOnly {
+		systemHintDetails = []SystemHintDetail{}
+	}
 	systemHints := renderSystemHints(systemHintDetails)
 
 	rscriptPath := plan.RscriptPath
 	var rscriptErr error
-	if plan.RscriptIssue != "" {
+	if !opts.ToolchainOnly && plan.RscriptIssue != "" {
 		rscriptErr = fmt.Errorf(plan.RscriptIssue)
 		errorsList = append(errorsList, plan.RscriptIssue)
 	}
 
 	needsGit := hasSourceType(plan.SourceDeps, "git")
+	if opts.ToolchainOnly {
+		needsGit = false
+	}
 	gitPath := ""
 	if needsGit {
 		if foundGitPath, err := exec.LookPath("git"); err != nil {
@@ -1450,7 +1525,14 @@ func Doctor(opts DoctorOptions) error {
 
 	errorsList = append(errorsList, collectSourceDefinitionIssues(plan.SourceDeps)...)
 	errorsList = append(errorsList, collectSourceAvailabilityIssues(plan.SourceDeps)...)
-	if rscriptErr == nil {
+	toolchainIssues := toolchainenv.Validate(
+		plan.ToolchainPrefixes,
+		plan.PkgConfigPath,
+		toolchainenv.Apply(os.Environ(), plan.ToolchainPrefixes, plan.PkgConfigPath),
+	)
+	errorsList = append(errorsList, toolchainIssues.Errors...)
+	warnings = append(warnings, toolchainIssues.Warnings...)
+	if !opts.ToolchainOnly && rscriptErr == nil {
 		backend := installBackend()
 		if backend == "native" || backend == "auto" {
 			env := ResolvedEnvironment{
@@ -1474,15 +1556,22 @@ func Doctor(opts DoctorOptions) error {
 		}
 	}
 
-	if _, err := os.Stat(plan.LockfilePath); errors.Is(err, os.ErrNotExist) {
-		warnings = append(warnings, fmt.Sprintf("lockfile not found: %s", plan.LockfilePath))
+	if !opts.ToolchainOnly && plan.LockfilePath != "" {
+		if _, err := os.Stat(plan.LockfilePath); errors.Is(err, os.ErrNotExist) {
+			warnings = append(warnings, fmt.Sprintf("lockfile not found: %s", plan.LockfilePath))
+		}
 	}
-	if _, err := os.Stat(plan.LibraryPath); errors.Is(err, os.ErrNotExist) {
-		warnings = append(warnings, fmt.Sprintf("managed library directory does not exist yet: %s", plan.LibraryPath))
+	if !opts.ToolchainOnly && plan.LibraryPath != "" {
+		if _, err := os.Stat(plan.LibraryPath); errors.Is(err, os.ErrNotExist) {
+			warnings = append(warnings, fmt.Sprintf("managed library directory does not exist yet: %s", plan.LibraryPath))
+		}
+	}
+	if !opts.ToolchainOnly && plan.Runtime.InterpreterKind == "external-conda" {
+		warnings = append(warnings, fmt.Sprintf("selected interpreter %s is an external Conda-style R installation; source package compilation may be less reliable than a managed rs R", plan.RscriptPath))
 	}
 
 	nextSteps := buildDoctorNextSteps(plan, rscriptErr, needsGit, warnings, errorsList, systemHintDetails)
-	report := buildDoctorReport(plan, opts, rscriptPath, rscriptErr, gitPath, needsGit, warnings, errorsList, systemHints, systemHintDetails, nextSteps)
+	report := buildDoctorReport(plan, opts, rscriptPath, rscriptErr, gitPath, needsGit, warnings, errorsList, systemHints, systemHintDetails, nextSteps, toolchainPreview)
 
 	if opts.JSON {
 		data, err := json.MarshalIndent(report, "", "  ")
@@ -1510,76 +1599,108 @@ func Doctor(opts DoctorOptions) error {
 	}
 
 	if !opts.Quiet {
-		fmt.Fprintf(opts.Stdout, "[info] script: %s\n", plan.ScriptPath)
-		if plan.ProjectPath != "" {
-			fmt.Fprintf(opts.Stdout, "[info] project config: %s\n", plan.ProjectPath)
-		}
-		if plan.ScriptKey != "" {
-			fmt.Fprintf(opts.Stdout, "[info] script profile: %s\n", plan.ScriptKey)
-		}
-		if rscriptErr == nil {
-			fmt.Fprintf(opts.Stdout, "[info] Rscript: %s\n", rscriptPath)
-		}
-		fmt.Fprintf(opts.Stdout, "[info] repo: %s\n", plan.Repo)
-		fmt.Fprintf(opts.Stdout, "[info] lockfile: %s\n", plan.LockfilePath)
-		fmt.Fprintf(opts.Stdout, "[info] managed library: %s\n", plan.LibraryPath)
-		if opts.Verbose {
-			fmt.Fprintf(opts.Stdout, "[info] cache root: %s\n", plan.CacheRoot)
-			if needsGit && gitPath != "" {
-				fmt.Fprintf(opts.Stdout, "[info] git: %s\n", gitPath)
+		if opts.ToolchainOnly {
+			target := firstNonEmpty(plan.ScriptPath, plan.ProjectPath, plan.CacheRoot)
+			fmt.Fprintf(opts.Stdout, "[info] toolchain target: %s\n", target)
+			if plan.ProjectPath != "" {
+				fmt.Fprintf(opts.Stdout, "[info] project config: %s\n", plan.ProjectPath)
 			}
-		}
-		if len(plan.DetectedDeps) == 0 {
-			fmt.Fprintln(opts.Stdout, "[info] detected packages: <none>")
+			if len(plan.ToolchainPrefixes) == 0 {
+				fmt.Fprintln(opts.Stdout, "[info] toolchain prefixes: <none>")
+			} else {
+				fmt.Fprintf(opts.Stdout, "[info] toolchain prefixes: %s\n", strings.Join(plan.ToolchainPrefixes, ", "))
+			}
+			if len(plan.PkgConfigPath) == 0 {
+				fmt.Fprintln(opts.Stdout, "[info] pkg-config path: <none>")
+			} else {
+				fmt.Fprintf(opts.Stdout, "[info] pkg-config path: %s\n", strings.Join(plan.PkgConfigPath, ", "))
+			}
+			printDoctorToolchainPreview(opts.Stdout, toolchainPreview)
 		} else {
-			fmt.Fprintf(opts.Stdout, "[info] detected packages: %s\n", strings.Join(plan.DetectedDeps, ", "))
-		}
-		if len(plan.CRANDeps) == 0 {
-			fmt.Fprintln(opts.Stdout, "[info] resolved CRAN packages: <none>")
-		} else {
-			fmt.Fprintf(opts.Stdout, "[info] resolved CRAN packages: %s\n", strings.Join(plan.CRANDeps, ", "))
-		}
-		if len(plan.BiocDeps) == 0 {
-			fmt.Fprintln(opts.Stdout, "[info] resolved Bioconductor packages: <none>")
-		} else {
-			fmt.Fprintf(opts.Stdout, "[info] resolved Bioconductor packages: %s\n", strings.Join(plan.BiocDeps, ", "))
-		}
-		printAppliedAdjustments(opts.Stdout, "[info] ", opts.IncludeDeps, opts.IncludeBiocDeps, opts.ExcludeDeps)
-		if len(plan.SourceDeps) == 0 {
-			fmt.Fprintln(opts.Stdout, "[info] resolved custom sources: <none>")
-		} else {
-			fmt.Fprintf(opts.Stdout, "[info] resolved custom sources: %s\n", strings.Join(sourceSummary(plan.SourceDeps), ", "))
+			fmt.Fprintf(opts.Stdout, "[info] script: %s\n", plan.ScriptPath)
+			if plan.ProjectPath != "" {
+				fmt.Fprintf(opts.Stdout, "[info] project config: %s\n", plan.ProjectPath)
+			}
+			if plan.ScriptKey != "" {
+				fmt.Fprintf(opts.Stdout, "[info] script profile: %s\n", plan.ScriptKey)
+			}
+			if rscriptErr == nil {
+				fmt.Fprintf(opts.Stdout, "[info] Rscript: %s\n", rscriptPath)
+			}
+			fmt.Fprintf(opts.Stdout, "[info] repo: %s\n", plan.Repo)
+			fmt.Fprintf(opts.Stdout, "[info] lockfile: %s\n", plan.LockfilePath)
+			fmt.Fprintf(opts.Stdout, "[info] managed library: %s\n", plan.LibraryPath)
 			if opts.Verbose {
-				for _, name := range sourceDepNames(plan.SourceDeps) {
-					spec := plan.SourceDeps[name]
-					fmt.Fprintf(opts.Stdout, "[info] source %s: type=%s", name, spec.Type)
-					switch spec.Type {
-					case "github":
-						fmt.Fprintf(opts.Stdout, " repo=%s", spec.Repo)
-						if spec.Host != "" {
-							fmt.Fprintf(opts.Stdout, " host=%s", spec.Host)
+				fmt.Fprintf(opts.Stdout, "[info] cache root: %s\n", plan.CacheRoot)
+				if needsGit && gitPath != "" {
+					fmt.Fprintf(opts.Stdout, "[info] git: %s\n", gitPath)
+				}
+			}
+			if len(plan.DetectedDeps) == 0 {
+				fmt.Fprintln(opts.Stdout, "[info] detected packages: <none>")
+			} else {
+				fmt.Fprintf(opts.Stdout, "[info] detected packages: %s\n", strings.Join(plan.DetectedDeps, ", "))
+			}
+			if len(plan.CRANDeps) == 0 {
+				fmt.Fprintln(opts.Stdout, "[info] resolved CRAN packages: <none>")
+			} else {
+				fmt.Fprintf(opts.Stdout, "[info] resolved CRAN packages: %s\n", strings.Join(plan.CRANDeps, ", "))
+			}
+			if len(plan.BiocDeps) == 0 {
+				fmt.Fprintln(opts.Stdout, "[info] resolved Bioconductor packages: <none>")
+			} else {
+				fmt.Fprintf(opts.Stdout, "[info] resolved Bioconductor packages: %s\n", strings.Join(plan.BiocDeps, ", "))
+			}
+			if len(plan.ToolchainPrefixes) == 0 {
+				fmt.Fprintln(opts.Stdout, "[info] toolchain prefixes: <none>")
+			} else {
+				fmt.Fprintf(opts.Stdout, "[info] toolchain prefixes: %s\n", strings.Join(plan.ToolchainPrefixes, ", "))
+			}
+			if len(plan.PkgConfigPath) == 0 {
+				fmt.Fprintln(opts.Stdout, "[info] pkg-config path: <none>")
+			} else {
+				fmt.Fprintf(opts.Stdout, "[info] pkg-config path: %s\n", strings.Join(plan.PkgConfigPath, ", "))
+			}
+			if opts.Verbose {
+				printDoctorToolchainPreview(opts.Stdout, toolchainPreview)
+			}
+			printAppliedAdjustments(opts.Stdout, "[info] ", opts.IncludeDeps, opts.IncludeBiocDeps, opts.ExcludeDeps)
+			if len(plan.SourceDeps) == 0 {
+				fmt.Fprintln(opts.Stdout, "[info] resolved custom sources: <none>")
+			} else {
+				fmt.Fprintf(opts.Stdout, "[info] resolved custom sources: %s\n", strings.Join(sourceSummary(plan.SourceDeps), ", "))
+				if opts.Verbose {
+					for _, name := range sourceDepNames(plan.SourceDeps) {
+						spec := plan.SourceDeps[name]
+						fmt.Fprintf(opts.Stdout, "[info] source %s: type=%s", name, spec.Type)
+						switch spec.Type {
+						case "github":
+							fmt.Fprintf(opts.Stdout, " repo=%s", spec.Repo)
+							if spec.Host != "" {
+								fmt.Fprintf(opts.Stdout, " host=%s", spec.Host)
+							}
+							if spec.Ref != "" {
+								fmt.Fprintf(opts.Stdout, " ref=%s", spec.Ref)
+							}
+							if spec.Subdir != "" {
+								fmt.Fprintf(opts.Stdout, " subdir=%s", spec.Subdir)
+							}
+							if spec.TokenEnv != "" {
+								fmt.Fprintf(opts.Stdout, " token_env=%s", spec.TokenEnv)
+							}
+						case "git":
+							fmt.Fprintf(opts.Stdout, " url=%s", spec.URL)
+							if spec.Ref != "" {
+								fmt.Fprintf(opts.Stdout, " ref=%s", spec.Ref)
+							}
+							if spec.Subdir != "" {
+								fmt.Fprintf(opts.Stdout, " subdir=%s", spec.Subdir)
+							}
+						case "local":
+							fmt.Fprintf(opts.Stdout, " path=%s", spec.Path)
 						}
-						if spec.Ref != "" {
-							fmt.Fprintf(opts.Stdout, " ref=%s", spec.Ref)
-						}
-						if spec.Subdir != "" {
-							fmt.Fprintf(opts.Stdout, " subdir=%s", spec.Subdir)
-						}
-						if spec.TokenEnv != "" {
-							fmt.Fprintf(opts.Stdout, " token_env=%s", spec.TokenEnv)
-						}
-					case "git":
-						fmt.Fprintf(opts.Stdout, " url=%s", spec.URL)
-						if spec.Ref != "" {
-							fmt.Fprintf(opts.Stdout, " ref=%s", spec.Ref)
-						}
-						if spec.Subdir != "" {
-							fmt.Fprintf(opts.Stdout, " subdir=%s", spec.Subdir)
-						}
-					case "local":
-						fmt.Fprintf(opts.Stdout, " path=%s", spec.Path)
+						fmt.Fprintln(opts.Stdout)
 					}
-					fmt.Fprintln(opts.Stdout)
 				}
 			}
 		}
@@ -1616,6 +1737,69 @@ func Doctor(opts DoctorOptions) error {
 
 func resolveDependencyPlan(scriptPath string, extraDeps, extraBiocDeps, excludeDeps []string, repoOverride, cacheDirOverride, rscriptOverride string) (dependencyPlan, error) {
 	return resolveDependencyPlanWithProgress(scriptPath, extraDeps, extraBiocDeps, excludeDeps, repoOverride, cacheDirOverride, rscriptOverride, io.Discard)
+}
+
+func resolveToolchainOnlyPlan(opts DoctorOptions) (dependencyPlan, error) {
+	baseDir := opts.ProjectDir
+	if strings.TrimSpace(baseDir) == "" && strings.TrimSpace(opts.ScriptPath) == "" {
+		baseDir = "."
+	}
+
+	plan := dependencyPlan{
+		ScriptPath: strings.TrimSpace(opts.ScriptPath),
+	}
+	if plan.ScriptPath != "" {
+		info, err := os.Stat(plan.ScriptPath)
+		if err != nil {
+			return dependencyPlan{}, fmt.Errorf("stat script: %w", err)
+		}
+		if info.IsDir() {
+			return dependencyPlan{}, fmt.Errorf("%s is a directory, expected an R script", plan.ScriptPath)
+		}
+		baseDir = filepath.Dir(plan.ScriptPath)
+	}
+
+	projectCfg, found, err := project.Discover(baseDir)
+	if err != nil {
+		return dependencyPlan{}, fmt.Errorf("discover project config: %w", err)
+	}
+
+	resolvedCfg := project.ResolvedScriptConfig{}
+	if found {
+		plan.ProjectPath = projectCfg.Path
+		if plan.ScriptPath != "" {
+			resolvedCfg, err = projectCfg.ResolveForScript(plan.ScriptPath)
+			if err != nil {
+				return dependencyPlan{}, fmt.Errorf("resolve script config: %w", err)
+			}
+			plan.ScriptKey = resolvedCfg.ScriptKey
+		} else {
+			resolvedCfg = project.ResolvedScriptConfig{
+				Repo:              projectCfg.Defaults.Repo,
+				CacheDir:          projectCfg.Defaults.CacheDir,
+				Lockfile:          projectCfg.Defaults.Lockfile,
+				Rscript:           projectCfg.Defaults.Rscript,
+				RVersion:          projectCfg.Defaults.RVersion,
+				ToolchainPrefixes: append([]string(nil), projectCfg.Defaults.ToolchainPrefixes...),
+				PkgConfigPath:     append([]string(nil), projectCfg.Defaults.PkgConfigPath...),
+			}
+		}
+	}
+
+	plan.Repo = firstNonEmpty(opts.Repo, resolvedCfg.Repo, "https://cloud.r-project.org")
+	plan.CacheRoot = predictedCacheRoot(firstNonEmpty(opts.CacheDir, resolvedCfg.CacheDir))
+	if resolvedCfg.Lockfile != "" {
+		plan.LockfilePath = resolvedCfg.Lockfile
+	}
+	if plan.LockfilePath == "" && found && projectCfg.RootDir != "" && plan.ScriptPath != "" {
+		plan.LockfilePath = defaultLockfilePath(projectCfg.RootDir, plan.ScriptPath)
+	}
+	if plan.ScriptPath != "" {
+		plan.LibraryPath = predictedLibraryPath(plan.CacheRoot, plan.ScriptPath, nil, nil, nil, plan.Repo, RuntimeMetadata{})
+	}
+	plan.ToolchainPrefixes = mergeUniqueStringLists(resolvedCfg.ToolchainPrefixes, toolchainenv.PrefixesFromEnv(os.Environ()))
+	plan.PkgConfigPath = mergeUniqueStringLists(resolvedCfg.PkgConfigPath, toolchainenv.PkgConfigPathsFromEnv(os.Environ()))
+	return plan, nil
 }
 
 func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDeps, excludeDeps []string, repoOverride, cacheDirOverride, rscriptOverride string, progress io.Writer) (dependencyPlan, error) {
@@ -1679,6 +1863,9 @@ func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDe
 		BiocDeps:          biocDeps,
 		ExcludedDeps:      copyStrings(excludeDeps),
 		SourceDeps:        sourceDeps,
+		ToolchainPrefixes: copyStrings(scriptCfg.ToolchainPrefixes),
+		PkgConfigPath:     copyStrings(scriptCfg.PkgConfigPath),
+		Runtime:           runtime,
 	}, nil
 }
 
@@ -1724,6 +1911,25 @@ func copyStrings(values []string) []string {
 		return []string{}
 	}
 	return append([]string(nil), values...)
+}
+
+func mergeUniqueStringLists(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, group := range groups {
+		for _, value := range group {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func cloneSourceSpecMap(values map[string]project.SourceSpec) map[string]project.SourceSpec {
@@ -1902,7 +2108,7 @@ func normalizeCheckReport(report *CheckReport) {
 	}
 }
 
-func buildDoctorReport(plan dependencyPlan, opts DoctorOptions, rscriptPath string, rscriptErr error, gitPath string, needsGit bool, warnings, errorsList, systemHints []string, systemHintDetails []SystemHintDetail, nextSteps []NextStepDetail) DoctorReport {
+func buildDoctorReport(plan dependencyPlan, opts DoctorOptions, rscriptPath string, rscriptErr error, gitPath string, needsGit bool, warnings, errorsList, systemHints []string, systemHintDetails []SystemHintDetail, nextSteps []NextStepDetail, toolchainPreview toolchainenv.Preview) DoctorReport {
 	setupErrors, sourceErrors, networkErrors, runtimeErrors, otherErrors := categorizeDoctorErrors(errorsList)
 	lockWarnings, cacheWarnings, otherWarnings := categorizeDoctorWarnings(warnings)
 	errorDetails := buildDoctorIssueDetails(errorsList, false)
@@ -1925,6 +2131,12 @@ func buildDoctorReport(plan dependencyPlan, opts DoctorOptions, rscriptPath stri
 		IncludedCRAN:      copyStrings(opts.IncludeDeps),
 		IncludedBioc:      copyStrings(opts.IncludeBiocDeps),
 		ExcludedDeps:      copyStrings(opts.ExcludeDeps),
+		ToolchainPrefixes: copyStrings(plan.ToolchainPrefixes),
+		PkgConfigPath:     copyStrings(plan.PkgConfigPath),
+		ToolchainPath:     copyStrings(toolchainPreview.Path),
+		ToolchainCPPFLAGS: copyStrings(toolchainPreview.CPPFLAGS),
+		ToolchainLDFLAGS:  copyStrings(toolchainPreview.LDFLAGS),
+		ToolchainPkgPath:  copyStrings(toolchainPreview.PkgConfigPath),
 		CustomSources:     sourceSummary(plan.SourceDeps),
 		Warnings:          copyStrings(warnings),
 		Errors:            copyStrings(errorsList),
@@ -1977,6 +2189,24 @@ func normalizeDoctorReport(report *DoctorReport) {
 	if report.ExcludedDeps == nil {
 		report.ExcludedDeps = []string{}
 	}
+	if report.ToolchainPrefixes == nil {
+		report.ToolchainPrefixes = []string{}
+	}
+	if report.PkgConfigPath == nil {
+		report.PkgConfigPath = []string{}
+	}
+	if report.ToolchainPath == nil {
+		report.ToolchainPath = []string{}
+	}
+	if report.ToolchainCPPFLAGS == nil {
+		report.ToolchainCPPFLAGS = []string{}
+	}
+	if report.ToolchainLDFLAGS == nil {
+		report.ToolchainLDFLAGS = []string{}
+	}
+	if report.ToolchainPkgPath == nil {
+		report.ToolchainPkgPath = []string{}
+	}
 	if report.CustomSources == nil {
 		report.CustomSources = []string{}
 	}
@@ -2027,6 +2257,29 @@ func normalizeDoctorReport(report *DoctorReport) {
 	}
 	if report.Status == "" {
 		report.Status = "ok"
+	}
+}
+
+func printDoctorToolchainPreview(w io.Writer, preview toolchainenv.Preview) {
+	if len(preview.Path) == 0 {
+		fmt.Fprintln(w, "[info] toolchain PATH: <none>")
+	} else {
+		fmt.Fprintf(w, "[info] toolchain PATH: %s\n", strings.Join(preview.Path, string(os.PathListSeparator)))
+	}
+	if len(preview.CPPFLAGS) == 0 {
+		fmt.Fprintln(w, "[info] toolchain CPPFLAGS: <none>")
+	} else {
+		fmt.Fprintf(w, "[info] toolchain CPPFLAGS: %s\n", strings.Join(preview.CPPFLAGS, " "))
+	}
+	if len(preview.LDFLAGS) == 0 {
+		fmt.Fprintln(w, "[info] toolchain LDFLAGS: <none>")
+	} else {
+		fmt.Fprintf(w, "[info] toolchain LDFLAGS: %s\n", strings.Join(preview.LDFLAGS, " "))
+	}
+	if len(preview.PkgConfigPath) == 0 {
+		fmt.Fprintln(w, "[info] toolchain PKG_CONFIG_PATH: <none>")
+	} else {
+		fmt.Fprintf(w, "[info] toolchain PKG_CONFIG_PATH: %s\n", strings.Join(preview.PkgConfigPath, string(os.PathListSeparator)))
 	}
 }
 
@@ -2243,6 +2496,9 @@ func doctorIssueDetail(issue string, warning bool) DoctorIssueDetail {
 			detail.Category = "cache"
 			detail.Kind = "missing_managed_library"
 			detail.Path = strings.TrimPrefix(issue, "managed library directory does not exist yet: ")
+		case strings.HasPrefix(issue, "pkg-config is not available on PATH; "):
+			detail.Category = "setup"
+			detail.Kind = "missing_pkg_config_binary"
 		default:
 			detail.Kind = "warning"
 		}
@@ -2256,6 +2512,28 @@ func doctorIssueDetail(issue string, warning bool) DoctorIssueDetail {
 	case issue == "git is required for git sources but is not available on PATH":
 		detail.Category = "setup"
 		detail.Kind = "missing_git"
+	case strings.HasPrefix(issue, "toolchain prefix does not exist: "):
+		detail.Category = "setup"
+		detail.Kind = "missing_toolchain_prefix"
+		detail.Path = strings.TrimPrefix(issue, "toolchain prefix does not exist: ")
+	case strings.HasPrefix(issue, "toolchain prefix is not a directory: "):
+		detail.Category = "setup"
+		detail.Kind = "invalid_toolchain_prefix"
+		detail.Path = strings.TrimPrefix(issue, "toolchain prefix is not a directory: ")
+	case strings.HasPrefix(issue, "pkg-config path does not exist: "):
+		detail.Category = "setup"
+		detail.Kind = "missing_pkg_config_path"
+		detail.Path = strings.TrimPrefix(issue, "pkg-config path does not exist: ")
+	case strings.HasPrefix(issue, "pkg-config path is not a directory: "):
+		detail.Category = "setup"
+		detail.Kind = "invalid_pkg_config_path"
+		detail.Path = strings.TrimPrefix(issue, "pkg-config path is not a directory: ")
+	case strings.HasPrefix(issue, "could not inspect toolchain prefix "):
+		detail.Category = "setup"
+		detail.Kind = "unreadable_toolchain_prefix"
+	case strings.HasPrefix(issue, "could not inspect pkg-config path "):
+		detail.Category = "setup"
+		detail.Kind = "unreadable_pkg_config_path"
 	case strings.HasPrefix(issue, "source \"") && strings.Contains(issue, "\" requires environment variable "):
 		detail.Category = "network"
 		detail.Kind = "missing_token_env"
@@ -2483,6 +2761,16 @@ func collectSystemDependencyHintDetails(cranDeps, biocDeps []string, sourceDeps 
 			Message:  rule.message,
 		})
 	}
+	if runtime.GOOS == "windows" && len(sourceDeps) > 0 {
+		packages := sourceDepNames(sourceDeps)
+		if len(packages) > 0 {
+			hints = append(hints, SystemHintDetail{
+				Category: "toolchain",
+				Packages: packages,
+				Message:  "Windows source-based custom packages may require Rtools; install it and ensure make.exe and gcc.exe are on PATH before retrying compilation-heavy installs",
+			})
+		}
+	}
 	return hints
 }
 
@@ -2530,6 +2818,8 @@ func copyNextStepDetails(details []NextStepDetail) []NextStepDetail {
 			Kind:     detail.Kind,
 			Message:  detail.Message,
 			Command:  detail.Command,
+			Note:     detail.Note,
+			Preset:   detail.Preset,
 			Blocking: detail.Blocking,
 		})
 	}
@@ -2609,7 +2899,7 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 		if step.Kind == "" || step.Message == "" {
 			return
 		}
-		key := step.Kind + "\x00" + step.Message + "\x00" + step.Command
+		key := step.Kind + "\x00" + step.Message + "\x00" + step.Command + "\x00" + step.Preset + "\x00" + strconv.FormatBool(step.Blocking)
 		if _, ok := seen[key]; ok {
 			return
 		}
@@ -2617,8 +2907,26 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 		steps = append(steps, step)
 	}
 
+	addToolchainFollowups := func(blocking bool) {
+		add(NextStepDetail{
+			Category: "setup",
+			Kind:     "detect_toolchain",
+			Message:  "detect common rootless toolchain layouts on this machine before choosing prefixes to wire into rs",
+			Command:  "rs toolchain detect",
+			Blocking: false,
+		})
+		add(NextStepDetail{
+			Category: "setup",
+			Kind:     "validate_toolchain_only",
+			Message:  "re-run the toolchain-only doctor after updating toolchain_prefixes/pkg_config_path or exporting RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH",
+			Command:  doctorToolchainOnlyCommand(plan),
+			Blocking: false,
+		})
+		addRecommendedToolchainFollowups(plan, blocking, add)
+	}
+
 	if rscriptErr != nil {
-		advice := rManagerBootstrapAdvice()
+		advice := rManagerBootstrapAdviceFor(plan.RequestedR)
 		if shouldSuggestNativeBootstrap(plan.RequestedR) {
 			add(NextStepDetail{
 				Category: "setup",
@@ -2658,6 +2966,17 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 
 	for _, issue := range errorsList {
 		switch {
+		case strings.HasPrefix(issue, "toolchain prefix "),
+			strings.HasPrefix(issue, "pkg-config path "),
+			strings.HasPrefix(issue, "could not inspect toolchain prefix "),
+			strings.HasPrefix(issue, "could not inspect pkg-config path "):
+			add(NextStepDetail{
+				Category: "setup",
+				Kind:     "fix_toolchain_config",
+				Message:  "fix toolchain_prefixes/pkg_config_path so they point at real user-local dependency directories, or export RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH before retrying native builds",
+				Blocking: true,
+			})
+			addToolchainFollowups(true)
 		case strings.Contains(issue, "requires environment variable "):
 			add(NextStepDetail{
 				Category: "network",
@@ -2705,7 +3024,19 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 				Command:  fmt.Sprintf("rs run %s", plan.ScriptPath),
 				Blocking: false,
 			})
+		case strings.HasPrefix(warning, "pkg-config is not available on PATH; "):
+			add(NextStepDetail{
+				Category: "setup",
+				Kind:     "install_pkg_config",
+				Message:  "install pkg-config in a user-local prefix such as enva, Homebrew-in-home, micromamba, mamba, conda, or Spack, then expose it through toolchain_prefixes or PATH",
+				Blocking: false,
+			})
+			addToolchainFollowups(false)
 		}
+	}
+
+	if len(systemHintDetails) > 0 && len(plan.ToolchainPrefixes) == 0 && len(plan.PkgConfigPath) == 0 {
+		addToolchainFollowups(false)
 	}
 
 	for _, detail := range systemHintDetails {
@@ -2717,8 +3048,18 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 			Blocking: false,
 		})
 	}
+	if plan.Runtime.InterpreterKind == "external-conda" {
+		target := firstNonEmpty(plan.Runtime.RVersion, plan.RequestedRVersion, "4.4")
+		add(NextStepDetail{
+			Category: "setup",
+			Kind:     "switch_to_managed_r",
+			Message:  "switch to a managed rs R if source package installs fail under the current external Conda-style interpreter",
+			Command:  fmt.Sprintf("rs r install %s && rs r use %s", target, target),
+			Blocking: false,
+		})
+	}
 
-	if len(steps) == 0 && len(errorsList) == 0 && len(warnings) == 0 {
+	if len(steps) == 0 && len(errorsList) == 0 && len(warnings) == 0 && strings.TrimSpace(plan.ScriptPath) != "" {
 		add(NextStepDetail{
 			Category: "run",
 			Kind:     "run_script",
@@ -2729,6 +3070,46 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 	}
 
 	return steps
+}
+
+func doctorToolchainOnlyCommand(plan dependencyPlan) string {
+	switch {
+	case strings.TrimSpace(plan.ScriptPath) != "":
+		return fmt.Sprintf("rs doctor --toolchain-only %s", plan.ScriptPath)
+	case strings.TrimSpace(plan.ProjectPath) != "":
+		return fmt.Sprintf("rs doctor --toolchain-only %s", filepath.Dir(plan.ProjectPath))
+	default:
+		return "rs doctor --toolchain-only"
+	}
+}
+
+func addRecommendedToolchainFollowups(plan dependencyPlan, blocking bool, add func(NextStepDetail)) {
+	candidate, err := toolchainenv.RecommendedCandidate("")
+	if err != nil || candidate == nil {
+		return
+	}
+	setupMessage := candidate.SuggestedSetupNote
+	if strings.TrimSpace(setupMessage) == "" {
+		setupMessage = fmt.Sprintf("prepare the recommended %s toolchain prefix on this machine", candidate.Preset)
+	}
+	add(NextStepDetail{
+		Category: "setup",
+		Kind:     "setup_detected_toolchain",
+		Message:  setupMessage,
+		Command:  candidate.SuggestedSetupCommand,
+		Note:     candidate.SuggestedSetupNote,
+		Preset:   candidate.Preset,
+		Blocking: blocking,
+	})
+	add(NextStepDetail{
+		Category: "setup",
+		Kind:     "init_detected_toolchain",
+		Message:  fmt.Sprintf("write the recommended %s toolchain preset into project config", candidate.Preset),
+		Command:  candidate.SuggestedInitCommand,
+		Note:     fmt.Sprintf("detected recommended preset on this machine: %s", candidate.Preset),
+		Preset:   candidate.Preset,
+		Blocking: blocking,
+	})
 }
 
 func shouldSuggestNativeBootstrap(requestedR string) bool {
@@ -2997,6 +3378,11 @@ func ResolveRscriptPath(override, configValue string) (string, error) {
 }
 
 func resolveConfiguredInterpreterPath(override, configValue string) (string, error) {
+	if strings.TrimSpace(override) == "" && strings.TrimSpace(configValue) == "" {
+		if current, err := resolveCurrentManagedRscript(); err == nil {
+			return current, nil
+		}
+	}
 	selected := firstNonEmpty(override, configValue, "Rscript")
 	if !looksLikePath(selected) &&
 		!strings.EqualFold(selected, "Rscript") &&
@@ -3021,7 +3407,7 @@ func resolveRunnableRscriptPath(override, configValue string, stderr io.Writer) 
 		return "", err
 	}
 	if !autoInstallR() {
-		advice := rManagerBootstrapAdvice()
+		advice := rManagerBootstrapAdviceFor(selected)
 		return "", fmt.Errorf("%v\nnext step: %s\nexplicit auto-install: set %s=1 and retry", err, advice.ManualMessageWithCommand(), advice.AutoEnableEnv)
 	}
 
@@ -3045,7 +3431,7 @@ func selectInterpreterTarget(override, configuredPath, configuredVersion string)
 	case configuredVersion != "":
 		return configuredVersion, configuredVersion
 	default:
-		return "Rscript", ""
+		return "", ""
 	}
 }
 
@@ -3095,9 +3481,15 @@ func resolveRShellPath(rscriptPath string) (string, error) {
 				return candidate, nil
 			}
 		case "Rscript.exe":
-			candidate := filepath.Join(dir, "R.exe")
-			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-				return candidate, nil
+			for _, candidate := range []string{
+				filepath.Join(dir, "Rterm.exe"),
+				filepath.Join(dir, "R.exe"),
+				filepath.Join(dir, "x64", "Rterm.exe"),
+				filepath.Join(dir, "x64", "R.exe"),
+			} {
+				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+					return candidate, nil
+				}
 			}
 		}
 	}
@@ -3196,24 +3588,26 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 	}
 
 	env := ResolvedEnvironment{
-		ScriptPath:    opts.ScriptPath,
-		ScriptArgs:    opts.ScriptArgs,
-		Repo:          repo,
-		CacheRoot:     cacheRoot,
-		LibraryPath:   libPath,
-		BootstrapPath: bootstrapPath,
-		LockfilePath:  lockfilePath,
-		Interpreter:   interpreter,
-		Runtime:       runtime,
-		DetectedDeps:  detectedDeps,
-		CRANDeps:      cranDeps,
-		BiocDeps:      biocDeps,
-		SourceDeps:    sourceDeps,
-		ProjectConfig: projectCfg,
-		ScriptConfig:  scriptCfg,
-		Verbose:       opts.Verbose,
-		Stdout:        opts.Stdout,
-		Stderr:        opts.Stderr,
+		ScriptPath:        opts.ScriptPath,
+		ScriptArgs:        opts.ScriptArgs,
+		Repo:              repo,
+		CacheRoot:         cacheRoot,
+		LibraryPath:       libPath,
+		BootstrapPath:     bootstrapPath,
+		LockfilePath:      lockfilePath,
+		Interpreter:       interpreter,
+		Runtime:           runtime,
+		DetectedDeps:      detectedDeps,
+		CRANDeps:          cranDeps,
+		BiocDeps:          biocDeps,
+		SourceDeps:        sourceDeps,
+		ToolchainPrefixes: append([]string(nil), scriptCfg.ToolchainPrefixes...),
+		PkgConfigPath:     append([]string(nil), scriptCfg.PkgConfigPath...),
+		ProjectConfig:     projectCfg,
+		ScriptConfig:      scriptCfg,
+		Verbose:           opts.Verbose,
+		Stdout:            opts.Stdout,
+		Stderr:            opts.Stderr,
 	}
 
 	if opts.Verbose {
@@ -3377,13 +3771,23 @@ func ensureInstalledNative(env ResolvedEnvironment) error {
 	if err != nil {
 		return err
 	}
-	return nativeInstall(req)
+	if err := nativeInstall(req); err != nil {
+		return wrapExternalInterpreterInstallError(err, env.Runtime)
+	}
+	return nil
 }
 
 func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.Writer) (installer.Request, error) {
 	runtime, err := InspectRuntime(env)
 	if err != nil {
 		return installer.Request{}, err
+	}
+	effectivePrefixes, effectivePkgConfig, detectedToolchain, err := effectiveToolchainConfig(env.ToolchainPrefixes, env.PkgConfigPath)
+	if err != nil {
+		return installer.Request{}, err
+	}
+	if detectedToolchain != nil && stderr != nil {
+		fmt.Fprintf(stderr, "[rs] auto-detected rootless toolchain preset: %s\n", detectedToolchain.Preset)
 	}
 	sourceDeps := make(map[string]project.SourceSpec, len(env.SourceDeps))
 	for name, spec := range env.SourceDeps {
@@ -3394,6 +3798,7 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 		WorkDir:     filepath.Dir(env.ScriptPath),
 		LibraryPath: env.LibraryPath,
 		Repo:        env.Repo,
+		Environment: toolchainenv.Apply(os.Environ(), effectivePrefixes, effectivePkgConfig),
 		Runtime: installer.Runtime{
 			RVersion: runtime.RVersion,
 		},
@@ -3883,7 +4288,13 @@ func displayOrNone(value string) string {
 }
 
 func runtimeEnv(env ResolvedEnvironment, installEnabled bool) []string {
-	return append(os.Environ(),
+	effectivePrefixes, effectivePkgConfig, _, err := effectiveToolchainConfig(env.ToolchainPrefixes, env.PkgConfigPath)
+	if err != nil {
+		effectivePrefixes = env.ToolchainPrefixes
+		effectivePkgConfig = env.PkgConfigPath
+	}
+	base := toolchainenv.Apply(os.Environ(), effectivePrefixes, effectivePkgConfig)
+	return append(base,
 		"R_PROFILE_USER="+env.BootstrapPath,
 		"R_LIBS_USER="+env.LibraryPath,
 		"RS_LIB_PATH="+env.LibraryPath,
@@ -3895,6 +4306,54 @@ func runtimeEnv(env ResolvedEnvironment, installEnabled bool) []string {
 		"RS_INSTALL_BACKEND="+installBackend(),
 		fmt.Sprintf("RS_INSTALL_ENABLED=%t", installEnabled),
 	)
+}
+
+func effectiveToolchainConfig(prefixes, pkgConfig []string) ([]string, []string, *toolchainenv.Candidate, error) {
+	return toolchainenv.MergeWithDetected(prefixes, pkgConfig, "")
+}
+
+func maybeBootstrapResolvedEnvironment(env *ResolvedEnvironment) error {
+	if env == nil {
+		return nil
+	}
+	candidate, err := maybeBootstrapToolchain(env.ToolchainPrefixes, env.PkgConfigPath, env.Stdout, env.Stderr)
+	if err != nil {
+		return err
+	}
+	if candidate != nil && len(env.ToolchainPrefixes) == 0 && len(env.PkgConfigPath) == 0 {
+		env.ToolchainPrefixes = append([]string(nil), candidate.ToolchainPrefixes...)
+		env.PkgConfigPath = append([]string(nil), candidate.PkgConfigPath...)
+	}
+	return nil
+}
+
+func maybeBootstrapPlanToolchain(plan *dependencyPlan, stdout, stderr io.Writer) error {
+	if plan == nil {
+		return nil
+	}
+	candidate, err := maybeBootstrapToolchain(plan.ToolchainPrefixes, plan.PkgConfigPath, stdout, stderr)
+	if err != nil {
+		return err
+	}
+	if candidate != nil && len(plan.ToolchainPrefixes) == 0 && len(plan.PkgConfigPath) == 0 {
+		plan.ToolchainPrefixes = append([]string(nil), candidate.ToolchainPrefixes...)
+		plan.PkgConfigPath = append([]string(nil), candidate.PkgConfigPath...)
+	}
+	return nil
+}
+
+func maybeBootstrapToolchain(prefixes, pkgConfig []string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+	if len(toolchainenv.PrefixesFromEnv(os.Environ())) > 0 || len(toolchainenv.PkgConfigPathsFromEnv(os.Environ())) > 0 || len(prefixes) > 0 || len(pkgConfig) > 0 {
+		return nil, nil
+	}
+	recommended, err := toolchainenv.RecommendedCandidate("")
+	if err != nil {
+		return nil, err
+	}
+	if recommended != nil && recommended.Complete {
+		return recommended, nil
+	}
+	return toolchainenv.Bootstrap("auto", "", os.Environ(), stdout, stderr)
 }
 
 func installBackend() string {
@@ -3925,6 +4384,11 @@ func defaultLockfilePath(projectRoot, scriptPath string) string {
 }
 
 func printEnvironment(env ResolvedEnvironment) {
+	effectivePrefixes, effectivePkgConfig, detectedToolchain, err := effectiveToolchainConfig(env.ToolchainPrefixes, env.PkgConfigPath)
+	if err != nil {
+		effectivePrefixes = env.ToolchainPrefixes
+		effectivePkgConfig = env.PkgConfigPath
+	}
 	fmt.Fprintf(env.Stderr, "[rs] script: %s\n", env.ScriptPath)
 	if env.ProjectConfig.Path != "" {
 		fmt.Fprintf(env.Stderr, "[rs] project config: %s\n", env.ProjectConfig.Path)
@@ -3935,6 +4399,19 @@ func printEnvironment(env ResolvedEnvironment) {
 	fmt.Fprintf(env.Stderr, "[rs] interpreter: %s\n", env.Interpreter)
 	fmt.Fprintf(env.Stderr, "[rs] library: %s\n", env.LibraryPath)
 	fmt.Fprintf(env.Stderr, "[rs] lockfile: %s\n", env.LockfilePath)
+	if detectedToolchain != nil {
+		fmt.Fprintf(env.Stderr, "[rs] auto-detected toolchain preset: %s\n", detectedToolchain.Preset)
+	}
+	if len(effectivePrefixes) == 0 {
+		fmt.Fprintln(env.Stderr, "[rs] toolchain prefixes: <none>")
+	} else {
+		fmt.Fprintf(env.Stderr, "[rs] toolchain prefixes: %s\n", strings.Join(effectivePrefixes, ", "))
+	}
+	if len(effectivePkgConfig) == 0 {
+		fmt.Fprintln(env.Stderr, "[rs] pkg-config path: <none>")
+	} else {
+		fmt.Fprintf(env.Stderr, "[rs] pkg-config path: %s\n", strings.Join(effectivePkgConfig, ", "))
+	}
 	if len(env.DetectedDeps) == 0 {
 		fmt.Fprintln(env.Stderr, "[rs] detected packages: <none>")
 	} else {
@@ -4358,7 +4835,8 @@ cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")
 	}
 
 	meta := RuntimeMetadata{
-		Interpreter: interpreter,
+		Interpreter:     interpreter,
+		InterpreterKind: classifyInterpreterKind(interpreter),
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 		if line == "" {
@@ -4382,6 +4860,116 @@ cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")
 		}
 	}
 	return meta, nil
+}
+
+func classifyInterpreterKind(interpreter string) string {
+	path := strings.TrimSpace(interpreter)
+	if path == "" {
+		return ""
+	}
+	if root, err := managedRRoot(); err == nil {
+		managedVersions := filepath.Join(root, "versions") + string(filepath.Separator)
+		cleaned := filepath.Clean(path)
+		if strings.HasPrefix(cleaned, managedVersions) {
+			return "managed"
+		}
+	}
+	lower := strings.ToLower(filepath.ToSlash(path))
+	condaMarkers := []string{
+		"/miniconda",
+		"/anaconda",
+		"/mambaforge",
+		"/micromamba",
+		"/conda/",
+		"/envs/",
+	}
+	for _, marker := range condaMarkers {
+		if strings.Contains(lower, marker) {
+			return "external-conda"
+		}
+	}
+	return "external-standard"
+}
+
+func managedRRoot() (string, error) {
+	if value := strings.TrimSpace(os.Getenv("RS_R_ROOT")); value != "" {
+		return value, nil
+	}
+	if home := strings.TrimSpace(os.Getenv("RS_HOME")); home != "" {
+		return filepath.Join(home, "r"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "rs", "r"), nil
+	case "windows":
+		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+			return filepath.Join(localAppData, "rs", "r"), nil
+		}
+		return filepath.Join(home, "AppData", "Local", "rs", "r"), nil
+	default:
+		return filepath.Join(home, ".local", "share", "rs", "r"), nil
+	}
+}
+
+func wrapExternalInterpreterInstallError(err error, runtime RuntimeMetadata) error {
+	if err == nil || runtime.InterpreterKind != "external-conda" || !looksLikePackageInstallFailure(err) {
+		return err
+	}
+	target := firstNonEmpty(runtime.RVersion, "4.4")
+	hints := []string{
+		fmt.Sprintf("hint: the selected interpreter %s looks like an external Conda-style R; source package installs can be less reliable there. Consider switching to a managed rs R with `rs r install %s && rs r use %s`", runtime.Interpreter, target, target),
+	}
+	if looksLikeToolchainFailure(err) {
+		toolchainHint := "hint: if you must stay on the current interpreter, provide a user-local toolchain prefix and validate it with `rs toolchain detect`, `rs toolchain template auto`, and `rs doctor --toolchain-only`"
+		if candidate, detectErr := toolchainenv.RecommendedCandidate(""); detectErr == nil && candidate != nil {
+			toolchainHint = fmt.Sprintf("%s. Detected recommended preset on this machine: %s. Setup follow-up: `%s`. Project follow-up: `%s`", toolchainHint, candidate.Preset, candidate.SuggestedSetupCommand, candidate.SuggestedInitCommand)
+		}
+		hints = append(hints, toolchainHint)
+	}
+	return fmt.Errorf("%w\n%s", err, strings.Join(hints, "\n"))
+}
+
+func looksLikePackageInstallFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "install ") &&
+		(strings.Contains(message, " from cran") ||
+			strings.Contains(message, " from bioconductor") ||
+			strings.Contains(message, " from local source") ||
+			strings.Contains(message, " from git source") ||
+			strings.Contains(message, " from github source"))
+}
+
+func looksLikeToolchainFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	markers := []string{
+		"requires linux source build tools",
+		"required compilers are missing",
+		"compiler",
+		"gfortran",
+		"g++",
+		"gcc",
+		"make",
+		"pkg-config",
+		"cannot create executables",
+		"configuration failed",
+		"fatal error:",
+	}
+	for _, marker := range markers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func enrichLockedPackages(env ResolvedEnvironment, pkgs []lockfile.Package) {

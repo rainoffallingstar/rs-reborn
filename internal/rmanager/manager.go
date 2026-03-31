@@ -19,10 +19,11 @@ const (
 )
 
 type InstallOptions struct {
-	Version string
-	Method  InstallMethod
-	Stdout  io.Writer
-	Stderr  io.Writer
+	Version            string
+	Method             InstallMethod
+	BootstrapToolchain bool
+	Stdout             io.Writer
+	Stderr             io.Writer
 }
 
 type Installation struct {
@@ -67,12 +68,24 @@ func ResolveVersionOrPath(spec string) (string, error) {
 	return nativeResolveVersionOrPath(spec)
 }
 
+func ResolveVersionSelector(spec string) (string, error) {
+	return resolveConcreteVersion(spec)
+}
+
+func CurrentManagedRscript() (string, error) {
+	return currentManagedRscript()
+}
+
 func EnsureInstalledRscript(spec string, stdout, stderr io.Writer) (string, error) {
 	return nativeEnsureInstalledRscript(spec, stdout, stderr)
 }
 
 func BootstrapAdvice() RBootstrapAdvice {
 	return nativeBootstrapAdvice()
+}
+
+func BootstrapAdviceFor(spec string) RBootstrapAdvice {
+	return nativeBootstrapAdviceFor(spec)
 }
 
 func AutoInstallREnabled() bool {

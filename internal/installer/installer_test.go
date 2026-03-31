@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"gr/internal/project"
@@ -61,7 +63,7 @@ func TestFetchRepoIndexParsesPackagesGz(t *testing.T) {
 	}))
 	defer server.Close()
 
-	index, err := fetchRepoIndex(server.Client(), server.URL, sourceCRAN)
+	index, err := fetchRepoIndex(server.Client(), server.URL, sourceCRAN, "4.4.3")
 	if err != nil {
 		t.Fatalf("fetchRepoIndex() error = %v", err)
 	}
@@ -88,6 +90,44 @@ func TestFetchRepoIndexParsesPackagesGz(t *testing.T) {
 	jsonlite := jsonliteCandidates[0]
 	if !reflect.DeepEqual(jsonlite.Dependencies, []packageRequirement{{Name: "methods"}}) {
 		t.Fatalf("jsonlite.Dependencies = %v", jsonlite.Dependencies)
+	}
+}
+
+func TestFetchRepoIndexUsesWindowsBinaryRepositories(t *testing.T) {
+	oldGOOS := installerGOOS
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+	})
+	installerGOOS = "windows"
+
+	packages := "Package: cli\nVersion: 3.6.5\nNeedsCompilation: yes\n\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/bin/windows/contrib/4.4/PACKAGES.gz" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		_, _ = gz.Write([]byte(packages))
+		_ = gz.Close()
+		_, _ = w.Write(buf.Bytes())
+	}))
+	defer server.Close()
+
+	index, err := fetchRepoIndex(server.Client(), server.URL, sourceCRAN, "4.4.3")
+	if err != nil {
+		t.Fatalf("fetchRepoIndex() error = %v", err)
+	}
+	candidates := index["cli"]
+	if len(candidates) != 1 {
+		t.Fatalf("len(cli candidates) = %d, want 1", len(candidates))
+	}
+	if candidates[0].TarballURL != server.URL+"/bin/windows/contrib/4.4/cli_3.6.5.zip" {
+		t.Fatalf("TarballURL = %q", candidates[0].TarballURL)
+	}
+	if !candidates[0].NeedsCompilation {
+		t.Fatalf("NeedsCompilation = false, want true")
 	}
 }
 
@@ -214,6 +254,182 @@ func TestBiocRepositoryURLsForR(t *testing.T) {
 	}
 	if got := biocExperimentRepositoryURL("4.5.1"); got != "https://bioconductor.org/packages/3.21/data/experiment" {
 		t.Fatalf("biocExperimentRepositoryURL() = %q", got)
+	}
+}
+
+func TestRepositoryContribURLUsesWindowsBinaryPath(t *testing.T) {
+	oldGOOS := installerGOOS
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+	})
+	installerGOOS = "windows"
+
+	gotURL, gotExt := repositoryContribURL("https://cloud.r-project.org", sourceCRAN, "4.4.3")
+	if gotURL != "https://cloud.r-project.org/bin/windows/contrib/4.4" || gotExt != ".zip" {
+		t.Fatalf("repositoryContribURL() = (%q, %q)", gotURL, gotExt)
+	}
+}
+
+func TestInstallPreparedSourceWindowsNeedsCompilationFailsWithoutRtools(t *testing.T) {
+	oldGOOS := installerGOOS
+	oldLookPath := installerLookPath
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+		installerLookPath = oldLookPath
+	})
+	installerGOOS = "windows"
+	installerLookPath = func(file string) (string, error) {
+		return "", errors.New("missing " + file)
+	}
+
+	inst := nativeInstaller{
+		stdout: bytes.NewBuffer(nil),
+		stderr: bytes.NewBuffer(nil),
+	}
+	err := inst.installPreparedSource(preparedSource{
+		Name:             "mypkg",
+		Source:           sourceLocal,
+		Location:         `C:\src\mypkg`,
+		InstallPath:      `C:\src\mypkg`,
+		NeedsCompilation: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "Rtools was not detected") {
+		t.Fatalf("installPreparedSource() error = %v", err)
+	}
+}
+
+func TestInstallRepoPackageWindowsSourceNeedsCompilationFailsWithoutRtools(t *testing.T) {
+	oldGOOS := installerGOOS
+	oldLookPath := installerLookPath
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+		installerLookPath = oldLookPath
+	})
+	installerGOOS = "windows"
+	installerLookPath = func(file string) (string, error) {
+		return "", errors.New("missing " + file)
+	}
+
+	inst := nativeInstaller{
+		stdout: bytes.NewBuffer(nil),
+		stderr: bytes.NewBuffer(nil),
+	}
+	err := inst.installRepoPackage(repoRecord{
+		Name:             "cli",
+		Version:          "3.6.5",
+		Source:           sourceCRAN,
+		TarballURL:       "https://example.com/src/contrib/cli_3.6.5.tar.gz",
+		DepsLoaded:       true,
+		NeedsCompilation: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "Rtools was not detected") {
+		t.Fatalf("installRepoPackage() error = %v", err)
+	}
+}
+
+func TestEnsureLinuxSourceBuildToolsUsesDistroAdvice(t *testing.T) {
+	oldGOOS := installerGOOS
+	oldLookPath := installerLookPath
+	oldReadFile := installerReadFile
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+		installerLookPath = oldLookPath
+		installerReadFile = oldReadFile
+	})
+	installerGOOS = "linux"
+	installerLookPath = func(file string) (string, error) {
+		return "", errors.New("missing " + file)
+	}
+	installerReadFile = func(path string) ([]byte, error) {
+		if path != "/etc/os-release" {
+			return nil, errors.New("unexpected path")
+		}
+		return []byte("ID=ubuntu\n"), nil
+	}
+
+	err := ensureLinuxSourceBuildTools("stringi", nil)
+	if err == nil {
+		t.Fatal("ensureLinuxSourceBuildTools() error = nil, want missing compiler guidance")
+	}
+	if !strings.Contains(err.Error(), "build-essential gfortran") {
+		t.Fatalf("ensureLinuxSourceBuildTools() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "rs toolchain detect") {
+		t.Fatalf("ensureLinuxSourceBuildTools() error missing rootless guidance = %v", err)
+	}
+	if !strings.Contains(err.Error(), "rs doctor --toolchain-only") {
+		t.Fatalf("ensureLinuxSourceBuildTools() error missing toolchain-only guidance = %v", err)
+	}
+}
+
+func TestWithLibraryEnvPreservesToolchainEnvironment(t *testing.T) {
+	env := withLibraryEnv([]string{
+		"PATH=/opt/demo/bin:/usr/bin",
+		"RS_TOOLCHAIN_PREFIXES=/opt/demo",
+		"RS_PKG_CONFIG_PATH=/opt/demo/lib/pkgconfig",
+	}, "/tmp/lib")
+	if !slices.Contains(env, "R_LIBS=/tmp/lib") || !slices.Contains(env, "R_LIBS_USER=/tmp/lib") {
+		t.Fatalf("withLibraryEnv() = %v", env)
+	}
+	if !slices.Contains(env, "RS_TOOLCHAIN_PREFIXES=/opt/demo") || !slices.Contains(env, "RS_PKG_CONFIG_PATH=/opt/demo/lib/pkgconfig") {
+		t.Fatalf("withLibraryEnv() lost toolchain env: %v", env)
+	}
+}
+
+func TestValidateBuildPrerequisitesFailsEarlyOnLinuxCompilationPackage(t *testing.T) {
+	oldGOOS := installerGOOS
+	oldLookPath := installerLookPath
+	oldReadFile := installerReadFile
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+		installerLookPath = oldLookPath
+		installerReadFile = oldReadFile
+	})
+	installerGOOS = "linux"
+	installerLookPath = func(file string) (string, error) {
+		return "", errors.New("missing " + file)
+	}
+	installerReadFile = func(path string) ([]byte, error) {
+		return []byte("ID=ubuntu\n"), nil
+	}
+
+	inst := nativeInstaller{}
+	err := inst.validateBuildPrerequisites(plannedPackage{
+		Name: "stringi",
+		Repo: &repoRecord{
+			Name:             "stringi",
+			Version:          "1.8.7",
+			NeedsCompilation: true,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "package stringi requires Linux source build tools") {
+		t.Fatalf("validateBuildPrerequisites() error = %v", err)
+	}
+}
+
+func TestRootlessToolchainAdviceIncludesDetectedPresetRecommendation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	advice := rootlessToolchainAdvice()
+	if !strings.Contains(advice, "detected recommended preset on this machine: homebrew") {
+		t.Fatalf("rootlessToolchainAdvice() = %q", advice)
+	}
+	if !strings.Contains(advice, filepath.Join(homebrewPrefix, "bin", "brew")) {
+		t.Fatalf("rootlessToolchainAdvice() = %q", advice)
+	}
+	if !strings.Contains(advice, "rs init --toolchain-preset homebrew") {
+		t.Fatalf("rootlessToolchainAdvice() = %q", advice)
 	}
 }
 

@@ -204,6 +204,32 @@ func TestResolveConcreteVersionUsesAvailableVersionsForPartialSelector(t *testin
 	}
 }
 
+func TestResolveConcreteVersionRejectsUnknownExplicitVersion(t *testing.T) {
+	oldClient := nativeHTTPClient
+	t.Cleanup(func() {
+		nativeHTTPClient = oldClient
+	})
+	nativeHTTPClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body := io.NopCloser(strings.NewReader(`{"r_versions":["4.5.3","4.4.7","4.4.2"]}`))
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       body,
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	_, err := resolveConcreteVersion("5.3.2")
+	if err == nil {
+		t.Fatal("resolveConcreteVersion() error = nil, want unknown explicit version failure")
+	}
+	if !strings.Contains(err.Error(), `could not resolve R version selector "5.3.2"`) {
+		t.Fatalf("resolveConcreteVersion() error = %v", err)
+	}
+}
+
 func TestDiscoverInstallationsMarksCurrentManagedInterpreter(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv(managerRootEnv, root)
@@ -236,6 +262,32 @@ func TestDiscoverInstallationsMarksCurrentManagedInterpreter(t *testing.T) {
 	}
 }
 
+func TestCurrentManagedRscriptReturnsCurrentManagedInstall(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(managerRootEnv, root)
+
+	currentPath := writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.5.3-"+runtime.GOOS+"-"+runtime.GOARCH), "4.5.3")
+	_ = writeFakeManagedRscript(t, filepath.Join(root, "versions", "4.4.3-"+runtime.GOOS+"-"+runtime.GOARCH), "4.4.3")
+	if err := setCurrentInstall(filepath.Dir(filepath.Dir(currentPath))); err != nil {
+		t.Fatalf("setCurrentInstall() error = %v", err)
+	}
+
+	got, err := CurrentManagedRscript()
+	if err != nil {
+		t.Fatalf("CurrentManagedRscript() error = %v", err)
+	}
+	if got != currentPath {
+		t.Fatalf("CurrentManagedRscript() = %q, want %q", got, currentPath)
+	}
+}
+
+func TestBootstrapAdviceForUsesRequestedVersion(t *testing.T) {
+	advice := BootstrapAdviceFor("5.3.2")
+	if !strings.Contains(advice.ManualCommand, "rs r install 5.3.2") {
+		t.Fatalf("BootstrapAdviceFor() command = %q", advice.ManualCommand)
+	}
+}
+
 func TestSelectInstallAction(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -251,6 +303,9 @@ func TestSelectInstallAction(t *testing.T) {
 		{name: "linux arch auto", goos: "linux", distro: linuxDistro{ID: "arch"}, method: InstallMethodAuto, want: installActionSource},
 		{name: "linux unsupported auto falls back to source", goos: "linux", distro: linuxDistro{ID: "gentoo", VersionID: "latest"}, method: InstallMethodAuto, want: installActionSource},
 		{name: "linux unsupported binary fails", goos: "linux", distro: linuxDistro{ID: "gentoo", VersionID: "latest"}, method: InstallMethodBinary, errSub: "unsupported Linux distribution"},
+		{name: "windows auto", goos: "windows", method: InstallMethodAuto, want: installActionWindowsBinary},
+		{name: "windows binary", goos: "windows", method: InstallMethodBinary, want: installActionWindowsBinary},
+		{name: "windows source unsupported", goos: "windows", method: InstallMethodSource, errSub: "currently support only binary installs"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -271,16 +326,97 @@ func TestSelectInstallAction(t *testing.T) {
 	}
 }
 
-func TestPreflightSourceBuildMissingTools(t *testing.T) {
-	oldLookPath := nativeLookPath
+func TestManagedRootWindowsUsesLocalAppData(t *testing.T) {
+	oldGOOS := nativeGOOS
 	t.Cleanup(func() {
-		nativeLookPath = oldLookPath
+		nativeGOOS = oldGOOS
 	})
-	nativeLookPath = func(file string) (string, error) {
-		return "", fmt.Errorf("missing %s", file)
+	nativeGOOS = "windows"
+	t.Setenv("LOCALAPPDATA", `C:\Users\alice\AppData\Local`)
+
+	got, err := managedRoot()
+	if err != nil {
+		t.Fatalf("managedRoot() error = %v", err)
+	}
+	want := filepath.Join(`C:\Users\alice\AppData\Local`, "rs", "r")
+	if got != want {
+		t.Fatalf("managedRoot() = %q, want %q", got, want)
+	}
+}
+
+func TestWindowsInstallerURL(t *testing.T) {
+	if got := windowsInstallerURL("4.4.3"); got != "https://cran.r-project.org/bin/windows/base/old/4.4.3/R-4.4.3-win.exe" {
+		t.Fatalf("windowsInstallerURL() = %q", got)
+	}
+}
+
+func TestParseWindowsRegistryInstallPaths(t *testing.T) {
+	output := `
+HKEY_LOCAL_MACHINE\Software\R-core\R\4.4.3
+    InstallPath    REG_SZ    C:\Program Files\R\R-4.4.3
+
+HKEY_CURRENT_USER\Software\R-core\R
+    InstallPath    REG_SZ    C:\Users\alice\AppData\Local\Programs\R\R-4.5.0
+`
+	got := parseWindowsRegistryInstallPaths(output)
+	want := []string{
+		`C:\Program Files\R\R-4.4.3`,
+		`C:\Users\alice\AppData\Local\Programs\R\R-4.5.0`,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parseWindowsRegistryInstallPaths() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("parseWindowsRegistryInstallPaths()[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestManagedWindowsHelpersPreferX64Binaries(t *testing.T) {
+	oldGOOS := nativeGOOS
+	t.Cleanup(func() {
+		nativeGOOS = oldGOOS
+	})
+	nativeGOOS = "windows"
+
+	root := t.TempDir()
+	rscriptPath := filepath.Join(root, "bin", "x64", "Rscript.exe")
+	rPath := filepath.Join(root, "bin", "x64", "R.exe")
+	if err := os.MkdirAll(filepath.Dir(rscriptPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(rscriptPath, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(Rscript.exe) error = %v", err)
+	}
+	if err := os.WriteFile(rPath, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(R.exe) error = %v", err)
 	}
 
-	err := preflightSourceBuild()
+	if got := managedRscriptPath(root); got != rscriptPath {
+		t.Fatalf("managedRscriptPath() = %q, want %q", got, rscriptPath)
+	}
+	if got := managedRExecutablePath(root); got != rPath {
+		t.Fatalf("managedRExecutablePath() = %q, want %q", got, rPath)
+	}
+	if got := rRootFromRscriptPath(rscriptPath); got != root {
+		t.Fatalf("rRootFromRscriptPath() = %q, want %q", got, root)
+	}
+}
+
+func TestPreflightSourceBuildMissingTools(t *testing.T) {
+	oldFindInPath := nativeFindInPath
+	oldCheckHeader := nativeCheckHeader
+	t.Cleanup(func() {
+		nativeFindInPath = oldFindInPath
+		nativeCheckHeader = oldCheckHeader
+	})
+	nativeFindInPath = func(file string, env []string) (string, error) {
+		return "", fmt.Errorf("missing %s", file)
+	}
+	nativeCheckHeader = func(header string) error { return fmt.Errorf("missing %s", header) }
+
+	err := preflightSourceBuild("4.4.3")
 	if err == nil {
 		t.Fatal("preflightSourceBuild() error = nil, want missing tools")
 	}
@@ -295,15 +431,18 @@ func TestPreflightSourceBuildArchHint(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Arch-specific source build hint only applies on Linux")
 	}
-	oldLookPath := nativeLookPath
+	oldFindInPath := nativeFindInPath
 	oldReadFile := nativeReadFile
+	oldCheckHeader := nativeCheckHeader
 	t.Cleanup(func() {
-		nativeLookPath = oldLookPath
+		nativeFindInPath = oldFindInPath
 		nativeReadFile = oldReadFile
+		nativeCheckHeader = oldCheckHeader
 	})
-	nativeLookPath = func(file string) (string, error) {
+	nativeFindInPath = func(file string, env []string) (string, error) {
 		return "", fmt.Errorf("missing %s", file)
 	}
+	nativeCheckHeader = func(header string) error { return fmt.Errorf("missing %s", header) }
 	nativeReadFile = func(path string) ([]byte, error) {
 		if path == "/etc/os-release" {
 			return []byte("ID=arch\nID_LIKE=arch\nVERSION_ID=rolling\n"), nil
@@ -311,12 +450,113 @@ func TestPreflightSourceBuildArchHint(t *testing.T) {
 		return nil, fmt.Errorf("unexpected read %s", path)
 	}
 
-	err := preflightSourceBuild()
+	err := preflightSourceBuild("4.4.3")
 	if err == nil {
 		t.Fatal("preflightSourceBuild() error = nil, want Arch hint")
 	}
 	if !strings.Contains(err.Error(), "pacman -S --needed base-devel gcc-fortran curl xz bzip2 zlib readline pcre2 icu") {
 		t.Fatalf("preflightSourceBuild() error = %v", err)
+	}
+}
+
+func TestPreflightSourceBuildMacOSMissingLzmaHeader(t *testing.T) {
+	oldGOOS := nativeGOOS
+	oldFindInPath := nativeFindInPath
+	oldCheckHeader := nativeCheckHeader
+	t.Cleanup(func() {
+		nativeGOOS = oldGOOS
+		nativeFindInPath = oldFindInPath
+		nativeCheckHeader = oldCheckHeader
+	})
+	nativeGOOS = "darwin"
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	nativeFindInPath = func(file string, env []string) (string, error) {
+		return "/usr/bin/" + file, nil
+	}
+	nativeCheckHeader = func(header string) error { return fmt.Errorf("missing %s", header) }
+
+	err := preflightSourceBuild("4.4.3")
+	if err == nil {
+		t.Fatal("preflightSourceBuild() error = nil, want missing macOS header")
+	}
+	if !strings.Contains(err.Error(), "lzma.h header") {
+		t.Fatalf("preflightSourceBuild() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "rs r install 4.4.3 --method binary") {
+		t.Fatalf("preflightSourceBuild() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "rootless environment") {
+		t.Fatalf("preflightSourceBuild() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), "detected recommended preset on this machine: homebrew") {
+		t.Fatalf("preflightSourceBuild() error = %v", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(homebrewPrefix, "bin", "brew")) {
+		t.Fatalf("preflightSourceBuild() error = %v", err)
+	}
+}
+
+func TestSourceBuildEnvironmentUsesRSToolchainPrefixes(t *testing.T) {
+	t.Setenv("RS_TOOLCHAIN_PREFIXES", strings.Join([]string{"/opt/demo", "/opt/demo2"}, string(os.PathListSeparator)))
+	t.Setenv("RS_PKG_CONFIG_PATH", strings.Join([]string{"/opt/pkgconfig"}, string(os.PathListSeparator)))
+
+	env := sourceBuildEnvironment()
+	var pathValue, prefixValue, pkgValue string
+	for _, entry := range env {
+		switch {
+		case strings.HasPrefix(entry, "PATH="):
+			pathValue = strings.TrimPrefix(entry, "PATH=")
+		case strings.HasPrefix(entry, "RS_TOOLCHAIN_PREFIXES="):
+			prefixValue = strings.TrimPrefix(entry, "RS_TOOLCHAIN_PREFIXES=")
+		case strings.HasPrefix(entry, "RS_PKG_CONFIG_PATH="):
+			pkgValue = strings.TrimPrefix(entry, "RS_PKG_CONFIG_PATH=")
+		}
+	}
+	if !strings.HasPrefix(pathValue, filepath.Join("/opt/demo2", "bin")+string(os.PathListSeparator)) && !strings.HasPrefix(pathValue, filepath.Join("/opt/demo", "bin")+string(os.PathListSeparator)) {
+		t.Fatalf("PATH = %q", pathValue)
+	}
+	if prefixValue == "" || pkgValue == "" {
+		t.Fatalf("sourceBuildEnvironment() missing rs toolchain markers: %v", env)
+	}
+}
+
+func TestSourceBuildEnvironmentAutoDetectsToolchainWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("RS_TOOLCHAIN_PREFIXES", "")
+	t.Setenv("RS_PKG_CONFIG_PATH", "")
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	env := sourceBuildEnvironment()
+	var prefixValue string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "RS_TOOLCHAIN_PREFIXES=") {
+			prefixValue = strings.TrimPrefix(entry, "RS_TOOLCHAIN_PREFIXES=")
+			break
+		}
+	}
+	if prefixValue != homebrewPrefix {
+		t.Fatalf("RS_TOOLCHAIN_PREFIXES = %q, want %q (%v)", prefixValue, homebrewPrefix, env)
 	}
 }
 

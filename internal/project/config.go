@@ -12,21 +12,23 @@ import (
 
 const ConfigFileName = "rs.toml"
 
-var configKeys = []string{"repo", "cache_dir", "lockfile", "rscript", "r_version", "packages", "bioc_packages"}
+var configKeys = []string{"repo", "cache_dir", "lockfile", "rscript", "r_version", "toolchain_prefixes", "pkg_config_path", "packages", "bioc_packages"}
 var sourceKeys = []string{"type", "host", "repo", "url", "ref", "path", "subdir", "token_env"}
 var sourceTypes = []string{"github", "git", "local"}
 var sectionPrefixes = []string{"scripts", "sources"}
 var scriptSubsections = []string{"sources"}
 
 type ScriptConfig struct {
-	Repo         string
-	CacheDir     string
-	Lockfile     string
-	Rscript      string
-	RVersion     string
-	Packages     []string
-	BiocPackages []string
-	Sources      map[string]SourceSpec
+	Repo              string
+	CacheDir          string
+	Lockfile          string
+	Rscript           string
+	RVersion          string
+	ToolchainPrefixes []string
+	PkgConfigPath     []string
+	Packages          []string
+	BiocPackages      []string
+	Sources           map[string]SourceSpec
 }
 
 type SourceSpec struct {
@@ -79,15 +81,17 @@ type EditMetadata struct {
 }
 
 type ResolvedScriptConfig struct {
-	Repo         string
-	CacheDir     string
-	Lockfile     string
-	Rscript      string
-	RVersion     string
-	Packages     []string
-	BiocPackages []string
-	Sources      map[string]SourceSpec
-	ScriptKey    string
+	Repo              string
+	CacheDir          string
+	Lockfile          string
+	Rscript           string
+	RVersion          string
+	ToolchainPrefixes []string
+	PkgConfigPath     []string
+	Packages          []string
+	BiocPackages      []string
+	Sources           map[string]SourceSpec
+	ScriptKey         string
 }
 
 func Discover(start string) (Config, bool, error) {
@@ -450,14 +454,16 @@ func currentSectionLabel(scriptName, sourceName, scriptSourceName string) string
 
 func (c Config) ResolveForScript(scriptPath string) (ResolvedScriptConfig, error) {
 	resolved := ResolvedScriptConfig{
-		Repo:         c.Defaults.Repo,
-		CacheDir:     c.Defaults.CacheDir,
-		Lockfile:     c.Defaults.Lockfile,
-		Rscript:      c.Defaults.Rscript,
-		RVersion:     c.Defaults.RVersion,
-		Packages:     append([]string(nil), c.Defaults.Packages...),
-		BiocPackages: append([]string(nil), c.Defaults.BiocPackages...),
-		Sources:      cloneSourceMap(c.Sources),
+		Repo:              c.Defaults.Repo,
+		CacheDir:          c.Defaults.CacheDir,
+		Lockfile:          c.Defaults.Lockfile,
+		Rscript:           c.Defaults.Rscript,
+		RVersion:          c.Defaults.RVersion,
+		ToolchainPrefixes: append([]string(nil), c.Defaults.ToolchainPrefixes...),
+		PkgConfigPath:     append([]string(nil), c.Defaults.PkgConfigPath...),
+		Packages:          append([]string(nil), c.Defaults.Packages...),
+		BiocPackages:      append([]string(nil), c.Defaults.BiocPackages...),
+		Sources:           cloneSourceMap(c.Sources),
 	}
 
 	if c.RootDir == "" || len(c.Scripts) == 0 {
@@ -493,6 +499,8 @@ func mergeScriptConfig(dst *ResolvedScriptConfig, key string, src ScriptConfig) 
 	if src.RVersion != "" {
 		dst.RVersion = src.RVersion
 	}
+	dst.ToolchainPrefixes = mergeStrings(dst.ToolchainPrefixes, src.ToolchainPrefixes)
+	dst.PkgConfigPath = mergeStrings(dst.PkgConfigPath, src.PkgConfigPath)
 	dst.Packages = mergeStrings(dst.Packages, src.Packages)
 	dst.BiocPackages = mergeStrings(dst.BiocPackages, src.BiocPackages)
 	dst.Sources = mergeSourceMaps(dst.Sources, src.Sources)
@@ -507,7 +515,24 @@ func resolvePaths(root string, cfg ScriptConfig) ScriptConfig {
 		cfg.Lockfile = filepath.Join(root, cfg.Lockfile)
 	}
 	cfg.Rscript = resolveCommandPath(root, cfg.Rscript)
+	cfg.ToolchainPrefixes = resolvePathList(root, cfg.ToolchainPrefixes)
+	cfg.PkgConfigPath = resolvePathList(root, cfg.PkgConfigPath)
 	return cfg
+}
+
+func resolvePathList(root string, values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	resolved := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || filepath.IsAbs(value) {
+			resolved = append(resolved, value)
+			continue
+		}
+		resolved = append(resolved, filepath.Join(root, value))
+	}
+	return resolved
 }
 
 func resolveCommandPath(root, value string) string {
@@ -729,6 +754,18 @@ func assignLineValue(cfg *Config, scriptKey, key, rawValue string) error {
 			return err
 		}
 		target.RVersion = value
+	case "toolchain_prefixes":
+		value, err := parseStringArrayValueForKey(key, rawValue)
+		if err != nil {
+			return err
+		}
+		target.ToolchainPrefixes = value
+	case "pkg_config_path":
+		value, err := parseStringArrayValueForKey(key, rawValue)
+		if err != nil {
+			return err
+		}
+		target.PkgConfigPath = value
 	case "packages":
 		value, err := parseStringArrayValueForKey(key, rawValue)
 		if err != nil {

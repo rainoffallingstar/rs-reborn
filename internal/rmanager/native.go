@@ -14,32 +14,34 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"gr/internal/progresscmd"
+	"gr/internal/toolchainenv"
 )
 
 var (
-	nativeHTTPClient = &http.Client{Timeout: 60 * time.Second}
-	nativeCommand    = exec.Command
-	nativeLookPath   = exec.LookPath
-	nativeReadFile   = os.ReadFile
-	nativeReadDir    = os.ReadDir
-	nativeMkdirAll   = os.MkdirAll
-	nativeRemoveAll  = os.RemoveAll
-	nativeRename     = os.Rename
-	nativeSymlink    = os.Symlink
-	nativeLstat      = os.Lstat
-	nativeReadlink   = os.Readlink
-	nativeWriteFile  = os.WriteFile
-	nativeStat       = os.Stat
-	nativeWalkDir    = filepath.WalkDir
-	nativeTempDir    = os.MkdirTemp
-	nativeInstallSrc = installFromSource
+	nativeHTTPClient  = &http.Client{Timeout: 60 * time.Second}
+	nativeCommand     = exec.Command
+	nativeLookPath    = exec.LookPath
+	nativeReadFile    = os.ReadFile
+	nativeReadDir     = os.ReadDir
+	nativeMkdirAll    = os.MkdirAll
+	nativeRemoveAll   = os.RemoveAll
+	nativeRename      = os.Rename
+	nativeSymlink     = os.Symlink
+	nativeLstat       = os.Lstat
+	nativeReadlink    = os.Readlink
+	nativeWriteFile   = os.WriteFile
+	nativeStat        = os.Stat
+	nativeWalkDir     = filepath.WalkDir
+	nativeTempDir     = os.MkdirTemp
+	nativeInstallSrc  = installFromSource
+	nativeCheckHeader = checkHeaderWithCompiler
+	nativeFindInPath  = toolchainenv.FindInPath
 )
 
 const versionsIndexURL = "https://cdn.posit.co/r/versions.json"
@@ -106,6 +108,11 @@ func nativeInstallWithOptions(opts InstallOptions) error {
 	if err := validateVersionSelector(version); err != nil {
 		return err
 	}
+	if opts.BootstrapToolchain {
+		if err := maybeBootstrapNativeToolchain(opts); err != nil {
+			return err
+		}
+	}
 	concrete, err := resolveConcreteVersion(version)
 	if err != nil {
 		return err
@@ -114,9 +121,9 @@ func nativeInstallWithOptions(opts InstallOptions) error {
 	if err != nil {
 		return err
 	}
-	if info, err := nativeStat(filepath.Join(targetDir, "bin", rscriptExecutableName())); err == nil && !info.IsDir() {
+	if existing := managedRscriptPath(targetDir); existing != "" {
 		if err := repairManagedInstall(targetDir); err != nil {
-			if runtime.GOOS == "darwin" {
+			if nativeGOOS == "darwin" {
 				return fmt.Errorf("repair managed macOS R install: %w", err)
 			}
 			return fmt.Errorf("repair managed R install: %w", err)
@@ -124,7 +131,7 @@ func nativeInstallWithOptions(opts InstallOptions) error {
 		if err := sanityCheckManagedR(targetDir); err != nil {
 			if method == InstallMethodAuto {
 				if opts.Stderr != nil {
-					if runtime.GOOS == "darwin" {
+					if nativeGOOS == "darwin" {
 						fmt.Fprintf(opts.Stderr, "[rs] existing managed macOS R %s is not runnable after repair; rebuilding from source\n", concrete)
 					} else {
 						fmt.Fprintf(opts.Stderr, "[rs] existing managed R %s is not runnable after repair; rebuilding from source\n", concrete)
@@ -161,8 +168,8 @@ func nativeInstallWithOptions(opts InstallOptions) error {
 		Selector:    version,
 		Name:        concrete,
 		Path:        targetDir,
-		RscriptPath: filepath.Join(targetDir, "bin", rscriptExecutableName()),
-		RPath:       filepath.Join(targetDir, "bin", nativeRExecutableName()),
+		RscriptPath: managedRscriptPath(targetDir),
+		RPath:       managedRExecutablePath(targetDir),
 		Managed:     true,
 		Source:      "native",
 		InstalledAt: time.Now().UTC(),
@@ -175,6 +182,18 @@ func nativeInstallWithOptions(opts InstallOptions) error {
 	}
 	fmt.Fprintf(opts.Stdout, "installed R %s to %s\n", concrete, targetDir)
 	return nil
+}
+
+func maybeBootstrapNativeToolchain(opts InstallOptions) error {
+	recommended, err := toolchainenv.RecommendedCandidate("")
+	if err != nil {
+		return err
+	}
+	if recommended != nil && recommended.Complete {
+		return nil
+	}
+	_, err = toolchainenv.Bootstrap("auto", "", os.Environ(), opts.Stdout, opts.Stderr)
+	return err
 }
 
 func nativeResolveVersionOrPath(spec string) (string, error) {
@@ -235,23 +254,32 @@ func nativeEnsureInstalledRscript(spec string, stdout, stderr io.Writer) (string
 }
 
 func nativeBootstrapAdvice() RBootstrapAdvice {
+	return nativeBootstrapAdviceFor("")
+}
+
+func nativeBootstrapAdviceFor(spec string) RBootstrapAdvice {
 	advice := RBootstrapAdvice{
 		AutoEnableEnv: autoInstallREnv,
 	}
-	switch runtime.GOOS {
+	installTarget := bootstrapAdviceInstallTarget(spec)
+	switch nativeGOOS {
 	case "linux":
 		distro, err := detectLinuxDistro()
 		if err == nil && isArchLinux(distro) {
 			advice.ManualMessage = "install R build dependencies and then install a managed R version with rs"
-			advice.ManualCommand = "pacman -S --needed base-devel gcc-fortran curl xz bzip2 zlib readline pcre2 icu && rs r install 4.4 --method source"
+			advice.ManualCommand = fmt.Sprintf("pacman -S --needed base-devel gcc-fortran curl xz bzip2 zlib readline pcre2 icu && rs r install %s --method source", installTarget)
 			return advice
 		}
 		advice.ManualMessage = "install a managed R version with rs or set rs.toml rscript manually"
-		advice.ManualCommand = "rs r install 4.4"
+		advice.ManualCommand = "rs r install " + installTarget
 		return advice
 	case "darwin":
 		advice.ManualMessage = "install a managed R version with rs or set rs.toml rscript manually"
-		advice.ManualCommand = "rs r install 4.4"
+		advice.ManualCommand = "rs r install " + installTarget
+		return advice
+	case "windows":
+		advice.ManualMessage = "install a managed R version with rs or set rs.toml rscript manually"
+		advice.ManualCommand = "rs r install " + installTarget
 		return advice
 	default:
 		advice.ManualMessage = "set rs.toml rscript manually"
@@ -259,16 +287,30 @@ func nativeBootstrapAdvice() RBootstrapAdvice {
 	}
 }
 
+func bootstrapAdviceInstallTarget(spec string) string {
+	spec = strings.TrimSpace(spec)
+	switch {
+	case spec == "":
+		return "4.4"
+	case strings.EqualFold(spec, "Rscript"), strings.EqualFold(spec, "Rscript.exe"):
+		return "4.4"
+	case LooksLikeVersionSpec(spec):
+		return spec
+	default:
+		return "4.4"
+	}
+}
+
 func installConcreteVersion(version, selector string, method InstallMethod, targetDir string, stdout, stderr io.Writer) error {
 	distro := linuxDistro{}
-	if runtime.GOOS == "linux" {
+	if nativeGOOS == "linux" {
 		detected, err := detectLinuxDistro()
 		if err != nil {
 			return err
 		}
 		distro = detected
 	}
-	action, err := selectInstallAction(runtime.GOOS, distro, method)
+	action, err := selectInstallAction(nativeGOOS, distro, method)
 	if err != nil {
 		return err
 	}
@@ -299,6 +341,14 @@ func installConcreteVersion(version, selector string, method InstallMethod, targ
 				return installLinuxBinary(version, distro, targetDir, stdout, stderr)
 			},
 		)
+	case installActionWindowsBinary:
+		if err := installWindowsBinary(version, targetDir, stdout, stderr); err != nil {
+			return err
+		}
+		if err := sanityCheckManagedR(targetDir); err != nil {
+			return fmt.Errorf("managed Windows R install is not runnable: %w", err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported install action %q", action)
 	}
@@ -393,10 +443,47 @@ func installLinuxBinary(version string, distro linuxDistro, targetDir string, st
 	return installNormalizedRoot(root, mode, targetDir)
 }
 
-func installFromSource(version, targetDir string, stdout, stderr io.Writer) error {
-	if err := preflightSourceBuild(); err != nil {
+func installWindowsBinary(version, targetDir string, stdout, stderr io.Writer) error {
+	archiveDir, err := buildRoot()
+	if err != nil {
 		return err
 	}
+	downloadURL := windowsInstallerURL(version)
+	installerPath := filepath.Join(archiveDir, filepath.Base(downloadURL))
+	if err := downloadFile(downloadURL, installerPath, "downloading Windows R "+version+" installer", stderr); err != nil {
+		return fmt.Errorf("download Windows R installer: %w", err)
+	}
+	if err := nativeRemoveAll(targetDir); err != nil {
+		return fmt.Errorf("prepare Windows install dir: %w", err)
+	}
+	if err := nativeMkdirAll(filepath.Dir(targetDir), 0o755); err != nil {
+		return fmt.Errorf("create Windows install parent dir: %w", err)
+	}
+	progresscmd.Stage(stderr, "installing Windows R "+version)
+	cmd := nativeCommand(
+		installerPath,
+		"/VERYSILENT",
+		"/SUPPRESSMSGBOXES",
+		"/NORESTART",
+		"/SP-",
+		"/CURRENTUSER",
+		"/NOICONS",
+		"/DIR="+targetDir,
+	)
+	if err := progresscmd.Run(cmd, "installing Windows R "+version, stderr, stderr); err != nil {
+		return fmt.Errorf("run Windows R installer: %w", err)
+	}
+	if managedRscriptPath(targetDir) == "" {
+		return fmt.Errorf("managed Windows install is missing %s after install", rscriptExecutableName())
+	}
+	return nil
+}
+
+func installFromSource(version, targetDir string, stdout, stderr io.Writer) error {
+	if err := preflightSourceBuild(version); err != nil {
+		return err
+	}
+	buildEnv := sourceBuildEnvironment()
 	archiveDir, err := buildRoot()
 	if err != nil {
 		return err
@@ -432,6 +519,7 @@ func installFromSource(version, targetDir string, stdout, stderr io.Writer) erro
 		cmd := nativeCommand(cmdArgs[0], cmdArgs[1:]...)
 		cmd.Dir = srcDir
 		cmd.Stdin = os.Stdin
+		cmd.Env = buildEnv
 		if err := progresscmd.Run(cmd, sourceBuildStepLabel(version, cmdArgs), stderr, stderr); err != nil {
 			return fmt.Errorf("run %s: %w", strings.Join(cmdArgs, " "), err)
 		}
@@ -455,7 +543,7 @@ func sourceBuildStepLabel(version string, cmdArgs []string) string {
 
 func sourceConfigureArgs(targetDir string) []string {
 	args := []string{"./configure", "--prefix=" + targetDir}
-	if runtime.GOOS == "darwin" {
+	if nativeGOOS == "darwin" {
 		args = append(args, "--without-x")
 	}
 	return args
@@ -466,7 +554,7 @@ func managedInstallPaths(version string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	id := fmt.Sprintf("%s-%s-%s", sanitizeVersion(version), runtime.GOOS, runtime.GOARCH)
+	id := fmt.Sprintf("%s-%s-%s", sanitizeVersion(version), nativeGOOS, nativeGOARCH)
 	return filepath.Join(root, "versions", id), filepath.Join(root, "metadata", id+".json"), nil
 }
 
@@ -481,9 +569,14 @@ func managedRoot() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("locate user home dir: %w", err)
 	}
-	switch runtime.GOOS {
+	switch nativeGOOS {
 	case "darwin":
 		return filepath.Join(home, "Library", "Application Support", "rs", "r"), nil
+	case "windows":
+		if localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); localAppData != "" {
+			return filepath.Join(localAppData, "rs", "r"), nil
+		}
+		return filepath.Join(home, "AppData", "Local", "rs", "r"), nil
 	default:
 		return filepath.Join(home, ".local", "share", "rs", "r"), nil
 	}
@@ -646,9 +739,9 @@ func discoverManagedFromVersionsDir(root string) ([]Installation, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		path := filepath.Join(versionsDir, entry.Name(), "bin", rscriptExecutableName())
-		info, err := nativeStat(path)
-		if err != nil || info.IsDir() {
+		targetDir := filepath.Join(versionsDir, entry.Name())
+		path := managedRscriptPath(targetDir)
+		if path == "" {
 			continue
 		}
 		version, _ := inspectRscriptVersion(path)
@@ -656,7 +749,7 @@ func discoverManagedFromVersionsDir(root string) ([]Installation, error) {
 			Name:        entry.Name(),
 			Version:     firstNonEmpty(version, versionFromPath(path)),
 			RscriptPath: path,
-			RPath:       filepath.Join(filepath.Dir(path), nativeRExecutableName()),
+			RPath:       managedRExecutablePath(targetDir),
 			Managed:     true,
 			Source:      "native",
 		})
@@ -671,6 +764,16 @@ func discoverExternalInstallations() ([]Installation, error) {
 	}
 	if path, err := nativeLookPath("Rscript"); err == nil {
 		candidates = append(candidates, path)
+	}
+	if nativeGOOS == "windows" {
+		if path, err := nativeLookPath("Rscript.exe"); err == nil {
+			candidates = append(candidates, path)
+		}
+		registryCandidates, err := windowsRegistryRscriptCandidates()
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, registryCandidates...)
 	}
 	root, _ := managedRoot()
 	seen := map[string]struct{}{}
@@ -693,12 +796,85 @@ func discoverExternalInstallations() ([]Installation, error) {
 			Name:        filepath.Base(candidate),
 			Version:     firstNonEmpty(version, versionFromPath(candidate)),
 			RscriptPath: candidate,
-			RPath:       filepath.Join(filepath.Dir(candidate), nativeRExecutableName()),
+			RPath:       rExecutablePathFromRscript(candidate),
 			External:    true,
 			Source:      "external",
 		})
 	}
 	return installs, nil
+}
+
+func currentManagedRscript() (string, error) {
+	installs, err := discoverInstallations()
+	if err != nil {
+		return "", err
+	}
+	for _, inst := range installs {
+		if inst.Managed && inst.Current && inst.RscriptPath != "" {
+			return inst.RscriptPath, nil
+		}
+	}
+	return "", fmt.Errorf("no current managed R installation is configured")
+}
+
+func windowsRegistryRscriptCandidates() ([]string, error) {
+	if nativeGOOS != "windows" {
+		return nil, nil
+	}
+	keys := []string{
+		`HKCU\Software\R-core\R`,
+		`HKLM\Software\R-core\R`,
+		`HKLM\Software\WOW6432Node\R-core\R`,
+	}
+	seen := map[string]struct{}{}
+	var candidates []string
+	for _, key := range keys {
+		cmd := nativeCommand("reg", "query", key, "/s", "/v", "InstallPath")
+		output, err := cmd.Output()
+		if err != nil {
+			continue
+		}
+		for _, installPath := range parseWindowsRegistryInstallPaths(string(output)) {
+			for _, candidate := range []string{
+				filepath.Join(installPath, "bin", rscriptExecutableName()),
+				filepath.Join(installPath, "bin", "x64", rscriptExecutableName()),
+			} {
+				if _, ok := seen[candidate]; ok {
+					continue
+				}
+				seen[candidate] = struct{}{}
+				candidates = append(candidates, candidate)
+			}
+		}
+	}
+	return candidates, nil
+}
+
+func parseWindowsRegistryInstallPaths(output string) []string {
+	seen := map[string]struct{}{}
+	var paths []string
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.Contains(line, "InstallPath") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		value := strings.Join(fields[2:], " ")
+		value = strings.TrimSpace(strings.Trim(value, `"`))
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		paths = append(paths, value)
+	}
+	return paths
 }
 
 func selectBestInstallation(installs []Installation, spec string) *Installation {
@@ -736,7 +912,14 @@ func resolveConcreteVersion(spec string) (string, error) {
 		return "", err
 	}
 	if spec != "release" && strings.Count(spec, ".") >= 2 {
-		return spec, nil
+		installs, err := discoverInstallations()
+		if err == nil {
+			for _, inst := range installs {
+				if inst.Version == spec {
+					return spec, nil
+				}
+			}
+		}
 	}
 	versions, err := availableVersions()
 	if err != nil {
@@ -904,7 +1087,13 @@ func installNormalizedRoot(root, mode, targetDir string) error {
 }
 
 func repairManagedInstall(targetDir string) error {
-	if runtime.GOOS == "darwin" {
+	if nativeGOOS == "windows" {
+		if managedRscriptPath(targetDir) == "" {
+			return fmt.Errorf("managed Windows install is missing %s", rscriptExecutableName())
+		}
+		return nil
+	}
+	if nativeGOOS == "darwin" {
 		if err := relinkMacOSInstallNames(targetDir); err != nil {
 			return err
 		}
@@ -1016,10 +1205,13 @@ func macOSResourcesRoot(path string) (string, bool) {
 }
 
 func rewriteManagedLaunchers(targetDir string) error {
+	if nativeGOOS == "windows" {
+		return nil
+	}
 	if err := rewriteManagedRLauncher(filepath.Join(targetDir, "bin", "R"), targetDir); err != nil {
 		return err
 	}
-	if runtime.GOOS == "darwin" {
+	if nativeGOOS == "darwin" {
 		if err := rewriteMacOSRenviron(filepath.Join(targetDir, "etc", "Renviron"), targetDir); err != nil {
 			return err
 		}
@@ -1374,7 +1566,7 @@ func linuxBinaryOSIdentifier(distro linuxDistro) (string, error) {
 
 func linuxBinaryURL(version, osID string) string {
 	archSuffix := ""
-	if runtime.GOARCH == "arm64" {
+	if nativeGOARCH == "arm64" {
 		archSuffix = "-arm64"
 	}
 	return fmt.Sprintf("https://cdn.posit.co/r/%s/R-%s-%s%s.tar.gz", osID, version, osID, archSuffix)
@@ -1390,7 +1582,7 @@ func sourceTarballURL(version string) string {
 }
 
 func macOSPkgURL(version string) string {
-	switch runtime.GOARCH {
+	switch nativeGOARCH {
 	case "arm64":
 		return fmt.Sprintf("https://mac.r-project.org/bin/macosx/big-sur-arm64/base/R-%s-arm64.pkg", version)
 	default:
@@ -1398,26 +1590,144 @@ func macOSPkgURL(version string) string {
 	}
 }
 
-func preflightSourceBuild() error {
+func windowsInstallerURL(version string) string {
+	return fmt.Sprintf("https://cran.r-project.org/bin/windows/base/old/%s/R-%s-win.exe", version, version)
+}
+
+func preflightSourceBuild(version string) error {
+	missingTools := sourceBuildMissingTools()
+	missingHeaders := sourceBuildMissingHeaders()
+	if len(missingTools) == 0 && len(missingHeaders) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"source build prerequisites are missing: %s\nnext step: %s",
+		formatMissingSourceBuildRequirements(missingTools, missingHeaders),
+		sourceBuildAdvice(version, missingTools, missingHeaders),
+	)
+}
+
+func sourceBuildMissingTools() []string {
 	missingTools := []string{}
-	for _, tool := range []string{"gcc", "g++", "make", "curl", "xz"} {
-		if _, err := nativeLookPath(tool); err != nil {
+	for _, tool := range []string{"gcc", "g++", "make", "curl", "xz", "gfortran"} {
+		if _, err := findSourceBuildTool(tool); err != nil {
 			missingTools = append(missingTools, tool)
 		}
 	}
-	if _, err := nativeLookPath("gfortran"); err != nil {
-		missingTools = append(missingTools, "gfortran")
-	}
-	if len(missingTools) == 0 {
+	return missingTools
+}
+
+func sourceBuildMissingHeaders() []string {
+	headers := []string{}
+	switch nativeGOOS {
+	case "darwin":
+		headers = []string{"lzma.h"}
+	case "linux":
+		headers = []string{"lzma.h", "bzlib.h", "zlib.h", "readline/readline.h", "pcre2.h"}
+	default:
 		return nil
 	}
-	if runtime.GOOS == "linux" {
-		distro, err := detectLinuxDistro()
-		if err == nil && isArchLinux(distro) {
-			return fmt.Errorf("source build prerequisites are missing: %s\nnext step: pacman -S --needed base-devel gcc-fortran curl xz bzip2 zlib readline pcre2 icu", strings.Join(missingTools, ", "))
+	missing := make([]string, 0, len(headers))
+	for _, header := range headers {
+		if !sourceBuildHeaderAvailable(header) {
+			missing = append(missing, header)
 		}
 	}
-	return fmt.Errorf("source build prerequisites are missing: %s", strings.Join(missingTools, ", "))
+	return missing
+}
+
+func sourceBuildHeaderAvailable(header string) bool {
+	return nativeCheckHeader(header) == nil
+}
+
+func checkHeaderWithCompiler(header string) error {
+	compiler := firstAvailableCompiler()
+	if compiler == "" {
+		return fmt.Errorf("no C compiler available for header probe")
+	}
+	cmd := nativeCommand(compiler, "-x", "c", "-E", "-")
+	cmd.Stdin = strings.NewReader("#include <" + header + ">\n")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	cmd.Env = sourceBuildEnvironment()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func firstAvailableCompiler() string {
+	candidates := []string{}
+	if cc := strings.TrimSpace(os.Getenv("CC")); cc != "" {
+		candidates = append(candidates, cc)
+	}
+	candidates = append(candidates, "cc", "gcc", "clang")
+	for _, candidate := range candidates {
+		if _, err := findSourceBuildTool(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func formatMissingSourceBuildRequirements(missingTools, missingHeaders []string) string {
+	requirements := make([]string, 0, len(missingTools)+len(missingHeaders))
+	requirements = append(requirements, missingTools...)
+	for _, header := range missingHeaders {
+		requirements = append(requirements, header+" header")
+	}
+	return strings.Join(requirements, ", ")
+}
+
+func sourceBuildAdvice(version string, missingTools, missingHeaders []string) string {
+	target := strings.TrimSpace(version)
+	if target == "" {
+		target = defaultAutoInstallVersion()
+	}
+	rootlessNote := "if you are in a rootless environment, set RS_TOOLCHAIN_PREFIXES=/path/to/prefix and optionally RS_PKG_CONFIG_PATH=/path/to/pkgconfig before retrying, or configure toolchain_prefixes/pkg_config_path in rs.toml for project-managed package builds"
+	if candidate, err := toolchainenv.RecommendedCandidate(""); err == nil && candidate != nil {
+		rootlessNote = fmt.Sprintf("%s; detected recommended preset on this machine: %s; setup follow-up: `%s`; project follow-up: `%s`", rootlessNote, candidate.Preset, candidate.SuggestedSetupCommand, candidate.SuggestedInitCommand)
+	}
+
+	switch nativeGOOS {
+	case "darwin":
+		parts := []string{
+			fmt.Sprintf("prefer a managed binary install first: rs r install %s --method binary", target),
+			"if source build is required, install Xcode Command Line Tools plus the missing libraries in a user-local prefix such as Homebrew or Conda",
+		}
+		if len(missingHeaders) > 0 {
+			parts = append(parts, "for example make sure xz/liblzma headers are available")
+		}
+		parts = append(parts, rootlessNote)
+		return strings.Join(parts, "; ")
+	case "linux":
+		if distro, err := detectLinuxDistro(); err == nil {
+			switch {
+			case isArchLinux(distro):
+				return "pacman -S --needed base-devel gcc-fortran curl xz bzip2 zlib readline pcre2 icu; " + rootlessNote
+			case isDebianLike(distro):
+				return "apt-get update && apt-get install -y build-essential gfortran curl xz-utils libbz2-dev zlib1g-dev libreadline-dev libpcre2-dev liblzma-dev; " + rootlessNote
+			case isRHELLike(distro):
+				return "dnf install -y gcc gcc-c++ gcc-gfortran make curl xz xz-devel bzip2-devel zlib-devel readline-devel pcre2-devel; " + rootlessNote
+			}
+		}
+		return "install the missing C/C++/Fortran toolchain and source-build headers for R, then retry; " + rootlessNote
+	default:
+		return "install the missing source-build toolchain and headers, then retry"
+	}
+}
+
+func sourceBuildEnvironment() []string {
+	env := os.Environ()
+	prefixes, pkgConfig, _, err := toolchainenv.MergeWithDetected(toolchainenv.PrefixesFromEnv(env), toolchainenv.PkgConfigPathsFromEnv(env), "")
+	if err != nil {
+		return toolchainenv.Apply(env, toolchainenv.PrefixesFromEnv(env), toolchainenv.PkgConfigPathsFromEnv(env))
+	}
+	return toolchainenv.Apply(env, prefixes, pkgConfig)
+}
+
+func findSourceBuildTool(name string) (string, error) {
+	return nativeFindInPath(name, sourceBuildEnvironment())
 }
 
 func isArchLinux(distro linuxDistro) bool {
@@ -1426,6 +1736,28 @@ func isArchLinux(distro linuxDistro) bool {
 	}
 	for _, id := range distro.IDLike {
 		if strings.EqualFold(id, "arch") {
+			return true
+		}
+	}
+	return false
+}
+
+func isDebianLike(distro linuxDistro) bool {
+	if strings.EqualFold(distro.ID, "debian") || strings.EqualFold(distro.ID, "ubuntu") {
+		return true
+	}
+	for _, id := range distro.IDLike {
+		if strings.EqualFold(id, "debian") || strings.EqualFold(id, "ubuntu") {
+			return true
+		}
+	}
+	return false
+}
+
+func isRHELLike(distro linuxDistro) bool {
+	for _, value := range append([]string{distro.ID}, distro.IDLike...) {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "rhel", "centos", "rocky", "almalinux", "fedora":
 			return true
 		}
 	}
@@ -1456,9 +1788,10 @@ func unsupportedNativeSelector(spec string) bool {
 type installAction string
 
 const (
-	installActionSource      installAction = "source"
-	installActionMacOSBinary installAction = "macos_binary"
-	installActionLinuxBinary installAction = "linux_binary"
+	installActionSource        installAction = "source"
+	installActionMacOSBinary   installAction = "macos_binary"
+	installActionLinuxBinary   installAction = "linux_binary"
+	installActionWindowsBinary installAction = "windows_binary"
 )
 
 func selectInstallAction(goos string, distro linuxDistro, method InstallMethod) (installAction, error) {
@@ -1498,6 +1831,15 @@ func selectInstallAction(goos string, distro linuxDistro, method InstallMethod) 
 		default:
 			return "", fmt.Errorf("unsupported install method %q", method)
 		}
+	case "windows":
+		switch method {
+		case InstallMethodBinary, InstallMethodAuto:
+			return installActionWindowsBinary, nil
+		case InstallMethodSource:
+			return "", fmt.Errorf("native Windows R installs currently support only binary installs; use --method auto or --method binary")
+		default:
+			return "", fmt.Errorf("unsupported install method %q", method)
+		}
 	default:
 		return "", fmt.Errorf("native R manager is not supported on %s", goos)
 	}
@@ -1520,19 +1862,78 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
+func managedRscriptPath(targetDir string) string {
+	return firstExistingPath(managedRscriptCandidates(targetDir)...)
+}
+
+func managedRExecutablePath(targetDir string) string {
+	return firstExistingPath(managedRExecutableCandidates(targetDir)...)
+}
+
+func managedRscriptCandidates(targetDir string) []string {
+	candidates := []string{filepath.Join(targetDir, "bin", rscriptExecutableName())}
+	if nativeGOOS == "windows" {
+		candidates = append(candidates, filepath.Join(targetDir, "bin", "x64", rscriptExecutableName()))
+	}
+	return candidates
+}
+
+func managedRExecutableCandidates(targetDir string) []string {
+	candidates := []string{filepath.Join(targetDir, "bin", nativeRExecutableName())}
+	if nativeGOOS == "windows" {
+		candidates = append(candidates, filepath.Join(targetDir, "bin", "x64", nativeRExecutableName()))
+	}
+	return candidates
+}
+
+func firstExistingPath(candidates ...string) string {
+	for _, candidate := range candidates {
+		info, err := nativeStat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func rExecutablePathFromRscript(path string) string {
+	dir := filepath.Dir(path)
+	candidates := []string{filepath.Join(dir, nativeRExecutableName())}
+	if nativeGOOS == "windows" && strings.EqualFold(filepath.Base(dir), "x64") {
+		candidates = append(candidates, filepath.Join(filepath.Dir(dir), nativeRExecutableName()))
+	} else if nativeGOOS == "windows" {
+		candidates = append(candidates, filepath.Join(dir, "x64", nativeRExecutableName()))
+	}
+	return firstExistingPath(candidates...)
+}
+
+func rRootFromRscriptPath(path string) string {
+	dir := filepath.Dir(path)
+	if nativeGOOS == "windows" && strings.EqualFold(filepath.Base(dir), "x64") {
+		dir = filepath.Dir(dir)
+	}
+	return filepath.Dir(dir)
+}
+
 func samePath(left, right string) bool {
 	if left == "" || right == "" {
 		return false
 	}
-	return filepath.Clean(left) == filepath.Clean(right)
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if nativeGOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
 }
 
 func instRRoot(inst Installation) string {
-	return filepath.Dir(filepath.Dir(inst.RscriptPath))
+	return rRootFromRscriptPath(inst.RscriptPath)
 }
 
 func versionFromPath(path string) string {
-	if version, ok := parseLeadingVersion(filepath.Base(filepath.Dir(filepath.Dir(path)))); ok {
+	root := rRootFromRscriptPath(path)
+	if version, ok := parseLeadingVersion(filepath.Base(root)); ok {
 		parts := make([]string, 0, len(version))
 		for _, part := range version {
 			parts = append(parts, strconv.Itoa(part))
@@ -1559,7 +1960,10 @@ func inspectRscriptVersion(path string) (string, error) {
 }
 
 func sanityCheckManagedR(targetDir string) error {
-	path := filepath.Join(targetDir, "bin", rscriptExecutableName())
+	path := managedRscriptPath(targetDir)
+	if path == "" {
+		return fmt.Errorf("managed R install is missing %s", rscriptExecutableName())
+	}
 	if _, err := inspectRscriptVersion(path); err != nil {
 		return err
 	}
@@ -1567,7 +1971,7 @@ func sanityCheckManagedR(targetDir string) error {
 }
 
 func nativeRExecutableName() string {
-	if runtime.GOOS == "windows" {
+	if nativeGOOS == "windows" {
 		return "R.exe"
 	}
 	return "R"

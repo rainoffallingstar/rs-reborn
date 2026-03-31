@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"gr/internal/progresscmd"
 	"gr/internal/project"
 	"gr/internal/rdeps"
+	"gr/internal/toolchainenv"
 )
 
 const (
@@ -38,6 +40,12 @@ const (
 	localKindError      = "unavailable"
 )
 
+var (
+	installerGOOS     = runtime.GOOS
+	installerLookPath = exec.LookPath
+	installerReadFile = os.ReadFile
+)
+
 type Runtime struct {
 	RVersion string
 }
@@ -47,6 +55,7 @@ type Request struct {
 	WorkDir     string
 	LibraryPath string
 	Repo        string
+	Environment []string
 	Runtime     Runtime
 	CRANDeps    []string
 	BiocDeps    []string
@@ -80,6 +89,7 @@ type nativeInstaller struct {
 	installedPackages map[string]installedPackage
 	requirements      map[string][]constraintRequest
 	selectedVersions  map[string]string
+	buildToolsChecked bool
 }
 
 func (i *nativeInstaller) stage(label string) {
@@ -96,27 +106,29 @@ type plannedPackage struct {
 }
 
 type repoRecord struct {
-	Name         string
-	Version      string
-	Dependencies []packageRequirement
-	TarballURL   string
-	Source       string
-	DepsLoaded   bool
+	Name             string
+	Version          string
+	Dependencies     []packageRequirement
+	TarballURL       string
+	Source           string
+	DepsLoaded       bool
+	NeedsCompilation bool
 }
 
 type preparedSource struct {
-	Name            string
-	Version         string
-	Source          string
-	Host            string
-	Location        string
-	Ref             string
-	Commit          string
-	Subdir          string
-	Fingerprint     string
-	FingerprintKind string
-	Dependencies    []packageRequirement
-	InstallPath     string
+	Name             string
+	Version          string
+	Source           string
+	Host             string
+	Location         string
+	Ref              string
+	Commit           string
+	Subdir           string
+	Fingerprint      string
+	FingerprintKind  string
+	Dependencies     []packageRequirement
+	InstallPath      string
+	NeedsCompilation bool
 }
 
 type installedPackage struct {
@@ -133,9 +145,10 @@ type installedPackage struct {
 }
 
 type description struct {
-	Package      string
-	Version      string
-	Dependencies []packageRequirement
+	Package          string
+	Version          string
+	Dependencies     []packageRequirement
+	NeedsCompilation bool
 }
 
 type packageRequirement struct {
@@ -297,6 +310,9 @@ func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {
 	inst.rBinary, err = resolveRBinary(req.Interpreter, req.WorkDir, stderr)
 	if err != nil {
 		return nil, err
+	}
+	if len(inst.req.Environment) == 0 {
+		inst.req.Environment = os.Environ()
 	}
 
 	if err := inst.loadInstalledPackages(); err != nil {
@@ -489,6 +505,9 @@ func (i *nativeInstaller) planConcretePackage(pkg plannedPackage, chain []string
 	if err := i.validatePackageRequirements(pkg); err != nil {
 		return err
 	}
+	if err := i.validateBuildPrerequisites(pkg); err != nil {
+		return err
+	}
 	i.planned[pkg.Name] = pkg
 	childChain := append(append([]string(nil), chain...), pkg.Name)
 	if err := i.planDependencyList(pkg.Deps, 0, pkg.Name, childChain, skips); err != nil {
@@ -496,6 +515,27 @@ func (i *nativeInstaller) planConcretePackage(pkg plannedPackage, chain []string
 	}
 	i.resolved[pkg.Name] = true
 	i.order = append(i.order, pkg.Name)
+	return nil
+}
+
+func (i *nativeInstaller) validateBuildPrerequisites(pkg plannedPackage) error {
+	needsCompilation := false
+	switch {
+	case pkg.Repo != nil:
+		needsCompilation = pkg.Repo.NeedsCompilation
+	case pkg.Prepared != nil:
+		needsCompilation = pkg.Prepared.NeedsCompilation
+	}
+	if !needsCompilation {
+		return nil
+	}
+	if i.buildToolsChecked {
+		return nil
+	}
+	if err := i.ensurePackageBuildTools(pkg.Name); err != nil {
+		return err
+	}
+	i.buildToolsChecked = true
 	return nil
 }
 
@@ -797,14 +837,15 @@ func (i *nativeInstaller) prepareSource(spec project.SourceSpec) (preparedSource
 		}
 		kind, fingerprint := describeLocalFingerprint(spec.Path)
 		prepared = preparedSource{
-			Name:            desc.Package,
-			Version:         desc.Version,
-			Source:          sourceLocal,
-			Location:        spec.Path,
-			Fingerprint:     fingerprint,
-			FingerprintKind: kind,
-			Dependencies:    desc.Dependencies,
-			InstallPath:     spec.Path,
+			Name:             desc.Package,
+			Version:          desc.Version,
+			Source:           sourceLocal,
+			Location:         spec.Path,
+			Fingerprint:      fingerprint,
+			FingerprintKind:  kind,
+			Dependencies:     desc.Dependencies,
+			InstallPath:      spec.Path,
+			NeedsCompilation: desc.NeedsCompilation,
 		}
 	case sourceGit:
 		cloneDir, err := i.cloneGitSource(spec.URL, spec.Ref, spec.Package, "")
@@ -827,15 +868,16 @@ func (i *nativeInstaller) prepareSource(spec project.SourceSpec) (preparedSource
 			return preparedSource{}, fmt.Errorf("resolve git commit for %s: %w", spec.Package, err)
 		}
 		prepared = preparedSource{
-			Name:         desc.Package,
-			Version:      desc.Version,
-			Source:       sourceGit,
-			Location:     spec.URL,
-			Ref:          spec.Ref,
-			Commit:       strings.TrimSpace(commit),
-			Subdir:       spec.Subdir,
-			Dependencies: desc.Dependencies,
-			InstallPath:  installPath,
+			Name:             desc.Package,
+			Version:          desc.Version,
+			Source:           sourceGit,
+			Location:         spec.URL,
+			Ref:              spec.Ref,
+			Commit:           strings.TrimSpace(commit),
+			Subdir:           spec.Subdir,
+			Dependencies:     desc.Dependencies,
+			InstallPath:      installPath,
+			NeedsCompilation: desc.NeedsCompilation,
 		}
 	case sourceGitHub:
 		cloneURL, metaHost, err := githubCloneURL(spec)
@@ -862,16 +904,17 @@ func (i *nativeInstaller) prepareSource(spec project.SourceSpec) (preparedSource
 			return preparedSource{}, fmt.Errorf("resolve github commit for %s: %w", spec.Package, err)
 		}
 		prepared = preparedSource{
-			Name:         desc.Package,
-			Version:      desc.Version,
-			Source:       sourceGitHub,
-			Host:         spec.Host,
-			Location:     spec.Repo,
-			Ref:          spec.Ref,
-			Commit:       strings.TrimSpace(commit),
-			Subdir:       spec.Subdir,
-			Dependencies: desc.Dependencies,
-			InstallPath:  installPath,
+			Name:             desc.Package,
+			Version:          desc.Version,
+			Source:           sourceGitHub,
+			Host:             spec.Host,
+			Location:         spec.Repo,
+			Ref:              spec.Ref,
+			Commit:           strings.TrimSpace(commit),
+			Subdir:           spec.Subdir,
+			Dependencies:     desc.Dependencies,
+			InstallPath:      installPath,
+			NeedsCompilation: desc.NeedsCompilation,
 		}
 		if prepared.Host == "" {
 			prepared.Host = metaHost
@@ -886,7 +929,22 @@ func (i *nativeInstaller) prepareSource(spec project.SourceSpec) (preparedSource
 
 func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 	fmt.Fprintf(i.stdout, "[rs] installing %s package %s %s via native backend\n", record.Source, record.Name, record.Version)
-	target, err := i.download(record.TarballURL, fmt.Sprintf("%s_%s.tar.gz", record.Name, record.Version))
+	if strings.HasSuffix(strings.ToLower(record.TarballURL), ".tar.gz") {
+		needsCompilation := record.NeedsCompilation
+		if !record.DepsLoaded {
+			desc, err := readDescriptionFromTarballURL(i.httpClient, record.TarballURL)
+			if err != nil {
+				return fmt.Errorf("inspect %s source package: %w", record.Name, err)
+			}
+			needsCompilation = desc.NeedsCompilation
+		}
+		if needsCompilation {
+			if err := i.ensurePackageBuildTools(record.Name); err != nil {
+				return err
+			}
+		}
+	}
+	target, err := i.download(record.TarballURL, repoDownloadName(record))
 	if err != nil {
 		return fmt.Errorf("download %s: %w", record.Name, err)
 	}
@@ -897,6 +955,18 @@ func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 		return err
 	}
 	return nil
+}
+
+func repoDownloadName(record repoRecord) string {
+	ext := ".tar.gz"
+	lower := strings.ToLower(record.TarballURL)
+	switch {
+	case strings.HasSuffix(lower, ".zip"):
+		ext = ".zip"
+	case strings.HasSuffix(lower, ".tgz"):
+		ext = ".tgz"
+	}
+	return fmt.Sprintf("%s_%s%s", record.Name, record.Version, ext)
 }
 
 func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
@@ -912,6 +982,11 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 		}
 		fmt.Fprintf(i.stdout, "[rs] installing github package %s from %s via native backend\n", prepared.Name, label)
 	}
+	if prepared.NeedsCompilation {
+		if err := i.ensurePackageBuildTools(prepared.Name); err != nil {
+			return err
+		}
+	}
 	if err := i.runRCommandInstall(prepared.InstallPath); err != nil {
 		return fmt.Errorf("install %s from %s source: %w", prepared.Name, prepared.Source, err)
 	}
@@ -921,7 +996,7 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 func (i *nativeInstaller) runRCommandInstall(target string) error {
 	cmd := exec.Command(i.rBinary, "CMD", "INSTALL", "-l", i.req.LibraryPath, target)
 	cmd.Dir = i.req.WorkDir
-	cmd.Env = withLibraryEnv(os.Environ(), i.req.LibraryPath)
+	cmd.Env = withLibraryEnv(i.req.Environment, i.req.LibraryPath)
 	label := fmt.Sprintf("installing R package %s", filepath.Base(target))
 	if err := progresscmd.Run(cmd, label, i.stderr, i.stderr); err != nil {
 		return err
@@ -1115,7 +1190,7 @@ func (i *nativeInstaller) ensureCRANIndex() error {
 		return nil
 	}
 	i.stage("fetching CRAN package index")
-	index, err := fetchRepoIndex(i.httpClient, strings.TrimRight(i.req.Repo, "/"), sourceCRAN)
+	index, err := fetchRepoIndex(i.httpClient, strings.TrimRight(i.req.Repo, "/"), sourceCRAN, i.req.Runtime.RVersion)
 	if err != nil {
 		return fmt.Errorf("load CRAN index: %w", err)
 	}
@@ -1162,7 +1237,7 @@ func (i *nativeInstaller) ensureBiocMainIndex() error {
 		return nil
 	}
 	i.stage("fetching Bioconductor package index")
-	records, err := fetchRepoIndex(i.httpClient, biocMainRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor)
+	records, err := fetchRepoIndex(i.httpClient, biocMainRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion)
 	if err != nil {
 		return fmt.Errorf("load Bioconductor index: %w", err)
 	}
@@ -1176,7 +1251,7 @@ func (i *nativeInstaller) ensureBiocAnnotationIndex() error {
 		return nil
 	}
 	i.stage("fetching Bioconductor annotation index")
-	records, err := fetchRepoIndex(i.httpClient, biocAnnotationRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor)
+	records, err := fetchRepoIndex(i.httpClient, biocAnnotationRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion)
 	if err != nil {
 		return fmt.Errorf("load Bioconductor annotation index: %w", err)
 	}
@@ -1190,7 +1265,7 @@ func (i *nativeInstaller) ensureBiocExperimentIndex() error {
 		return nil
 	}
 	i.stage("fetching Bioconductor experiment index")
-	records, err := fetchRepoIndex(i.httpClient, biocExperimentRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor)
+	records, err := fetchRepoIndex(i.httpClient, biocExperimentRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion)
 	if err != nil {
 		return fmt.Errorf("load Bioconductor experiment index: %w", err)
 	}
@@ -1199,9 +1274,8 @@ func (i *nativeInstaller) ensureBiocExperimentIndex() error {
 	return nil
 }
 
-func fetchRepoIndex(client *http.Client, baseURL, source string) (map[string][]repoRecord, error) {
-	baseURL = strings.TrimRight(baseURL, "/")
-	contribURL := baseURL + "/src/contrib"
+func fetchRepoIndex(client *http.Client, baseURL, source, rVersion string) (map[string][]repoRecord, error) {
+	contribURL, archiveExt := repositoryContribURL(strings.TrimRight(baseURL, "/"), source, rVersion)
 
 	data, err := fetchPackagesFile(client, contribURL+"/PACKAGES.gz")
 	if err != nil {
@@ -1220,12 +1294,13 @@ func fetchRepoIndex(client *http.Client, baseURL, source string) (map[string][]r
 			continue
 		}
 		appendRepoCandidate(index, repoRecord{
-			Name:         name,
-			Version:      version,
-			Dependencies: parseDependencies(fields["Depends"], fields["Imports"], fields["LinkingTo"]),
-			TarballURL:   fmt.Sprintf("%s/%s_%s.tar.gz", contribURL, name, version),
-			Source:       source,
-			DepsLoaded:   true,
+			Name:             name,
+			Version:          version,
+			Dependencies:     parseDependencies(fields["Depends"], fields["Imports"], fields["LinkingTo"]),
+			TarballURL:       fmt.Sprintf("%s/%s_%s%s", contribURL, name, version, archiveExt),
+			Source:           source,
+			DepsLoaded:       true,
+			NeedsCompilation: parseNeedsCompilation(fields["NeedsCompilation"]),
 		})
 	}
 	return index, nil
@@ -1632,9 +1707,10 @@ func parseDescription(data []byte) description {
 		break
 	}
 	return description{
-		Package:      fields["Package"],
-		Version:      fields["Version"],
-		Dependencies: parseDependencies(fields["Depends"], fields["Imports"], fields["LinkingTo"]),
+		Package:          fields["Package"],
+		Version:          fields["Version"],
+		Dependencies:     parseDependencies(fields["Depends"], fields["Imports"], fields["LinkingTo"]),
+		NeedsCompilation: parseNeedsCompilation(fields["NeedsCompilation"]),
 	}
 }
 
@@ -1649,7 +1725,11 @@ func resolveRBinary(interpreter, workDir string, stderr io.Writer) (string, erro
 		}
 	}
 
-	cmd := exec.Command(interpreter, "-e", `cat(file.path(R.home("bin"), "R"))`)
+	binaryName := "R"
+	if installerGOOS == "windows" {
+		binaryName = "R.exe"
+	}
+	cmd := exec.Command(interpreter, "-e", fmt.Sprintf(`cat(file.path(R.home("bin"), %q))`, binaryName))
 	cmd.Dir = workDir
 	if stderr != nil {
 		cmd.Stderr = stderr
@@ -1714,6 +1794,193 @@ func biocVersionForR(rVersion string) string {
 	default:
 		return ""
 	}
+}
+
+func repositoryContribURL(baseURL, source, rVersion string) (string, string) {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if installerGOOS == "windows" && (source == sourceCRAN || source == sourceBioconductor) {
+		return fmt.Sprintf("%s/bin/windows/contrib/%s", baseURL, windowsBinaryMinorVersion(rVersion)), ".zip"
+	}
+	return baseURL + "/src/contrib", ".tar.gz"
+}
+
+func windowsBinaryMinorVersion(rVersion string) string {
+	parts := strings.Split(strings.TrimSpace(rVersion), ".")
+	if len(parts) >= 2 {
+		return parts[0] + "." + parts[1]
+	}
+	if len(parts) == 1 && parts[0] != "" {
+		return parts[0]
+	}
+	return "release"
+}
+
+func parseNeedsCompilation(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "yes", "true":
+		return true
+	default:
+		return false
+	}
+}
+
+func (i *nativeInstaller) ensurePackageBuildTools(pkg string) error {
+	switch installerGOOS {
+	case "windows":
+		return ensureWindowsSourceBuildTools(pkg, i.req.Environment)
+	case "linux":
+		return ensureLinuxSourceBuildTools(pkg, i.req.Environment)
+	default:
+		return nil
+	}
+}
+
+func ensureWindowsSourceBuildTools(pkg string, env []string) error {
+	if installerGOOS != "windows" {
+		return nil
+	}
+	if windowsSourceBuildToolsAvailable(env) {
+		return nil
+	}
+	return fmt.Errorf("package %s requires Windows source build tools, but Rtools was not detected\nnext step: install Rtools from https://cran.r-project.org/bin/windows/Rtools/ and ensure make.exe and gcc.exe are on PATH before retrying", pkg)
+}
+
+func windowsSourceBuildToolsAvailable(env []string) bool {
+	required := []string{"make", "gcc"}
+	pathOK := true
+	for _, tool := range required {
+		if _, err := findInstallerTool(tool, env); err != nil {
+			pathOK = false
+			break
+		}
+	}
+	if pathOK {
+		return true
+	}
+
+	roots := []string{
+		strings.TrimSpace(os.Getenv("RTOOLS44_HOME")),
+		strings.TrimSpace(os.Getenv("RTOOLS43_HOME")),
+		strings.TrimSpace(os.Getenv("RTOOLS42_HOME")),
+		strings.TrimSpace(os.Getenv("RTOOLS40_HOME")),
+		`C:\rtools44`,
+		`C:\rtools43`,
+		`C:\rtools42`,
+		`C:\rtools40`,
+	}
+	for _, root := range roots {
+		if root == "" {
+			continue
+		}
+		makePath := filepath.Join(root, "usr", "bin", "make.exe")
+		gccCandidates := []string{
+			filepath.Join(root, "ucrt64", "bin", "gcc.exe"),
+			filepath.Join(root, "mingw64", "bin", "gcc.exe"),
+		}
+		if info, err := os.Stat(makePath); err != nil || info.IsDir() {
+			continue
+		}
+		for _, gccPath := range gccCandidates {
+			if info, err := os.Stat(gccPath); err == nil && !info.IsDir() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func ensureLinuxSourceBuildTools(pkg string, env []string) error {
+	if installerGOOS != "linux" {
+		return nil
+	}
+	missing := missingLinuxSourceBuildTools(env)
+	if len(missing) == 0 {
+		return nil
+	}
+	advice := linuxSourceBuildAdvice()
+	if advice != "" {
+		return fmt.Errorf(
+			"package %s requires Linux source build tools, but required compilers are missing: %s\nnext step: %s\nnext step: %s",
+			pkg,
+			strings.Join(missing, ", "),
+			advice,
+			rootlessToolchainAdvice(),
+		)
+	}
+	return fmt.Errorf(
+		"package %s requires Linux source build tools, but required compilers are missing: %s\nnext step: %s",
+		pkg,
+		strings.Join(missing, ", "),
+		rootlessToolchainAdvice(),
+	)
+}
+
+func missingLinuxSourceBuildTools(env []string) []string {
+	required := []string{"gcc", "g++", "gfortran", "make"}
+	missing := make([]string, 0, len(required))
+	for _, tool := range required {
+		if _, err := findInstallerTool(tool, env); err != nil {
+			missing = append(missing, tool)
+		}
+	}
+	return missing
+}
+
+func findInstallerTool(name string, env []string) (string, error) {
+	if len(env) == 0 {
+		return installerLookPath(name)
+	}
+	return toolchainenv.FindInPath(name, env)
+}
+
+func linuxSourceBuildAdvice() string {
+	distro, err := detectInstallerLinuxDistro()
+	if err != nil {
+		return "install gcc, g++, gfortran, and make before retrying"
+	}
+	switch {
+	case distro == "arch":
+		return "pacman -S --needed base-devel gcc-fortran"
+	case distro == "debian", distro == "ubuntu":
+		return "apt-get update && apt-get install -y build-essential gfortran"
+	case distro == "rhel", distro == "centos", distro == "rocky", distro == "almalinux", distro == "fedora":
+		return "dnf install -y gcc gcc-c++ gcc-gfortran make"
+	default:
+		return "install gcc, g++, gfortran, and make before retrying"
+	}
+}
+
+func rootlessToolchainAdvice() string {
+	base := "if you cannot install system packages, provide a user-local toolchain prefix with enva, Homebrew-in-home, micromamba, mamba, conda, or Spack, then expose it via RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH or rs.toml; start with `rs toolchain detect`, `rs toolchain template auto`, and `rs doctor --toolchain-only`"
+	candidate, err := toolchainenv.RecommendedCandidate("")
+	if err != nil || candidate == nil {
+		return base
+	}
+	return fmt.Sprintf("%s; detected recommended preset on this machine: %s; setup follow-up: `%s`; project follow-up: `%s`", base, candidate.Preset, candidate.SuggestedSetupCommand, candidate.SuggestedInitCommand)
+}
+
+func detectInstallerLinuxDistro() (string, error) {
+	data, err := installerReadFile("/etc/os-release")
+	if err != nil {
+		return "", err
+	}
+	values := map[string]string{}
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		values[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	if id := strings.ToLower(strings.TrimSpace(values["ID"])); id != "" {
+		return id, nil
+	}
+	return "", fmt.Errorf("linux distribution id not found")
 }
 
 func withLibraryEnv(env []string, libraryPath string) []string {

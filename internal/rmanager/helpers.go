@@ -17,6 +17,8 @@ var (
 	rscriptStat     = os.Stat
 	rscriptAbs      = filepath.Abs
 	rscriptHomeDir  = os.UserHomeDir
+	nativeGOOS      = runtime.GOOS
+	nativeGOARCH    = runtime.GOARCH
 )
 
 type RBootstrapAdvice struct {
@@ -110,17 +112,49 @@ func resolveExplicitRscript(target string) (string, error) {
 func installedRscriptCandidates(version string) ([]string, error) {
 	home, _ := rscriptHomeDir()
 
-	patterns := []string{
-		filepath.Join("/Library/Frameworks/R.framework/Versions", version+"*", "Resources", "bin", rscriptExecutableName()),
-		filepath.Join("/opt/R", version+"*", "bin", rscriptExecutableName()),
-		filepath.Join("/usr/local/lib/R", version+"*", "bin", rscriptExecutableName()),
-	}
-	if home != "" {
+	patterns := []string{}
+	switch nativeGOOS {
+	case "windows":
+		programFiles := strings.TrimSpace(os.Getenv("ProgramFiles"))
+		if programFiles != "" {
+			patterns = append(patterns,
+				filepath.Join(programFiles, "R", "R-"+version+"*", "bin", rscriptExecutableName()),
+				filepath.Join(programFiles, "R", "R-"+version+"*", "bin", "x64", rscriptExecutableName()),
+			)
+		}
+		programFilesX86 := strings.TrimSpace(os.Getenv("ProgramFiles(x86)"))
+		if programFilesX86 != "" {
+			patterns = append(patterns,
+				filepath.Join(programFilesX86, "R", "R-"+version+"*", "bin", rscriptExecutableName()),
+				filepath.Join(programFilesX86, "R", "R-"+version+"*", "bin", "x64", rscriptExecutableName()),
+			)
+		}
+		localAppData := strings.TrimSpace(os.Getenv("LOCALAPPDATA"))
+		if localAppData != "" {
+			patterns = append(patterns,
+				filepath.Join(localAppData, "Programs", "R", "R-"+version+"*", "bin", rscriptExecutableName()),
+				filepath.Join(localAppData, "Programs", "R", "R-"+version+"*", "bin", "x64", rscriptExecutableName()),
+			)
+		}
+	default:
 		patterns = append(patterns,
-			filepath.Join(home, ".local", "share", "rs", "r", "versions", version+"*", "bin", rscriptExecutableName()),
-			filepath.Join(home, ".rig", "R", version+"*", "bin", rscriptExecutableName()),
-			filepath.Join(home, ".local", "share", "rig", "R", version+"*", "bin", rscriptExecutableName()),
-			filepath.Join(home, "Library", "Application Support", "rig", "R", version+"*", "bin", rscriptExecutableName()),
+			filepath.Join("/Library/Frameworks/R.framework/Versions", version+"*", "Resources", "bin", rscriptExecutableName()),
+			filepath.Join("/opt/R", version+"*", "bin", rscriptExecutableName()),
+			filepath.Join("/usr/local/lib/R", version+"*", "bin", rscriptExecutableName()),
+		)
+		if home != "" {
+			patterns = append(patterns,
+				filepath.Join(home, ".local", "share", "rs", "r", "versions", version+"*", "bin", rscriptExecutableName()),
+				filepath.Join(home, ".rig", "R", version+"*", "bin", rscriptExecutableName()),
+				filepath.Join(home, ".local", "share", "rig", "R", version+"*", "bin", rscriptExecutableName()),
+				filepath.Join(home, "Library", "Application Support", "rig", "R", version+"*", "bin", rscriptExecutableName()),
+			)
+		}
+	}
+	if home != "" && nativeGOOS == "windows" {
+		patterns = append(patterns,
+			filepath.Join(home, "AppData", "Local", "rs", "r", "versions", version+"*", "bin", rscriptExecutableName()),
+			filepath.Join(home, "AppData", "Local", "Programs", "R", "R-"+version+"*", "bin", rscriptExecutableName()),
 		)
 	}
 
@@ -232,7 +266,7 @@ func isNamedVersionSpec(spec string) bool {
 }
 
 func rscriptExecutableName() string {
-	if runtime.GOOS == "windows" {
+	if nativeGOOS == "windows" {
 		return "Rscript.exe"
 	}
 	return "Rscript"

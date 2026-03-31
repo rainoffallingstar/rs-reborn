@@ -15,6 +15,8 @@ cache_dir = ".rs-cache"
 lockfile = "state/rs.lock.json"
 rscript = "bin/Rscript"
 r_version = "4.4"
+toolchain_prefixes = [".toolchain", "/opt/demo"]
+pkg_config_path = ["pkgconfig", "/opt/demo/lib/pkgconfig"]
 packages = ["dplyr", "jsonlite"]
 bioc_packages = ["Biostrings"]
 
@@ -66,6 +68,12 @@ ref = "feature-branch"
 	}
 	if cfg.Defaults.RVersion != "4.4" {
 		t.Fatalf("Defaults.RVersion = %q", cfg.Defaults.RVersion)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{".toolchain", "/opt/demo"}) {
+		t.Fatalf("Defaults.ToolchainPrefixes = %v", cfg.Defaults.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.PkgConfigPath, []string{"pkgconfig", "/opt/demo/lib/pkgconfig"}) {
+		t.Fatalf("Defaults.PkgConfigPath = %v", cfg.Defaults.PkgConfigPath)
 	}
 	if !reflect.DeepEqual(cfg.Defaults.Packages, []string{"dplyr", "jsonlite"}) {
 		t.Fatalf("Defaults.Packages = %v", cfg.Defaults.Packages)
@@ -120,6 +128,8 @@ func TestLoadResolvesRelativePaths(t *testing.T) {
 lockfile = "locks/rs.lock.json"
 rscript = "bin/Rscript"
 r_version = "4.4"
+toolchain_prefixes = [".toolchain", "/opt/demo"]
+pkg_config_path = ["pkgconfig", "/opt/demo/lib/pkgconfig"]
 
 [sources."localpkg"]
 type = "local"
@@ -155,6 +165,12 @@ path = "vendor/scriptpkg_0.2.0.tar.gz"
 	if cfg.Defaults.RVersion != "4.4" {
 		t.Fatalf("Defaults.RVersion = %q", cfg.Defaults.RVersion)
 	}
+	if !reflect.DeepEqual(cfg.Defaults.ToolchainPrefixes, []string{filepath.Join(dir, ".toolchain"), "/opt/demo"}) {
+		t.Fatalf("Defaults.ToolchainPrefixes = %v", cfg.Defaults.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(cfg.Defaults.PkgConfigPath, []string{filepath.Join(dir, "pkgconfig"), "/opt/demo/lib/pkgconfig"}) {
+		t.Fatalf("Defaults.PkgConfigPath = %v", cfg.Defaults.PkgConfigPath)
+	}
 	if cfg.Sources["localpkg"].Path != filepath.Join(dir, "vendor", "localpkg_0.1.0.tar.gz") {
 		t.Fatalf("Sources[localpkg].Path = %q", cfg.Sources["localpkg"].Path)
 	}
@@ -178,13 +194,15 @@ func TestResolveForScript(t *testing.T) {
 	cfg := Config{
 		RootDir: "/tmp/project",
 		Defaults: ScriptConfig{
-			Repo:         "https://cloud.r-project.org",
-			CacheDir:     "/tmp/project/.rs-cache",
-			Lockfile:     "/tmp/project/rs.lock.json",
-			Rscript:      "/tmp/project/bin/Rscript",
-			RVersion:     "4.4",
-			Packages:     []string{"jsonlite"},
-			BiocPackages: []string{"Biostrings"},
+			Repo:              "https://cloud.r-project.org",
+			CacheDir:          "/tmp/project/.rs-cache",
+			Lockfile:          "/tmp/project/rs.lock.json",
+			Rscript:           "/tmp/project/bin/Rscript",
+			RVersion:          "4.4",
+			ToolchainPrefixes: []string{"/tmp/project/.toolchain"},
+			PkgConfigPath:     []string{"/tmp/project/.toolchain/lib/pkgconfig"},
+			Packages:          []string{"jsonlite"},
+			BiocPackages:      []string{"Biostrings"},
 		},
 		Sources: map[string]SourceSpec{
 			"custompkg": {
@@ -206,11 +224,13 @@ func TestResolveForScript(t *testing.T) {
 		},
 		Scripts: map[string]ScriptConfig{
 			"scripts/report.R": {
-				Repo:         "https://cran.rstudio.com",
-				Rscript:      "/tmp/project/tools/Rscript-4.4",
-				RVersion:     "4.4",
-				Packages:     []string{"cli", "jsonlite"},
-				BiocPackages: []string{"DESeq2"},
+				Repo:              "https://cran.rstudio.com",
+				Rscript:           "/tmp/project/tools/Rscript-4.4",
+				RVersion:          "4.4",
+				ToolchainPrefixes: []string{"/tmp/project/scripts/.toolchain"},
+				PkgConfigPath:     []string{"/tmp/project/scripts/pkgconfig"},
+				Packages:          []string{"cli", "jsonlite"},
+				BiocPackages:      []string{"DESeq2"},
 				Sources: map[string]SourceSpec{
 					"custompkg": {
 						Package:  "custompkg",
@@ -239,6 +259,12 @@ func TestResolveForScript(t *testing.T) {
 	}
 	if resolved.RVersion != "4.4" {
 		t.Fatalf("RVersion = %q", resolved.RVersion)
+	}
+	if !reflect.DeepEqual(resolved.ToolchainPrefixes, []string{"/tmp/project/.toolchain", "/tmp/project/scripts/.toolchain"}) {
+		t.Fatalf("ToolchainPrefixes = %v", resolved.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(resolved.PkgConfigPath, []string{"/tmp/project/.toolchain/lib/pkgconfig", "/tmp/project/scripts/pkgconfig"}) {
+		t.Fatalf("PkgConfigPath = %v", resolved.PkgConfigPath)
 	}
 	if resolved.ScriptKey != "scripts/report.R" {
 		t.Fatalf("ScriptKey = %q", resolved.ScriptKey)
@@ -422,7 +448,7 @@ url = "https://cloud.r-project.org"
 	if err == nil {
 		t.Fatal("Parse() error = nil, want unsupported key error")
 	}
-	if !strings.Contains(err.Error(), `root config: unsupported key "url"; supported keys: repo, cache_dir, lockfile, rscript, r_version, packages, bioc_packages`) {
+	if !strings.Contains(err.Error(), `root config: unsupported key "url"; supported keys: repo, cache_dir, lockfile, rscript, r_version, toolchain_prefixes, pkg_config_path, packages, bioc_packages`) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 }
@@ -437,7 +463,7 @@ url = "https://cloud.r-project.org"
 	if err == nil {
 		t.Fatal("Parse() error = nil, want unsupported key error")
 	}
-	if !strings.Contains(err.Error(), `[scripts."scripts/report.R"]: unsupported key "url"; supported keys: repo, cache_dir, lockfile, rscript, r_version, packages, bioc_packages`) {
+	if !strings.Contains(err.Error(), `[scripts."scripts/report.R"]: unsupported key "url"; supported keys: repo, cache_dir, lockfile, rscript, r_version, toolchain_prefixes, pkg_config_path, packages, bioc_packages`) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 }
@@ -451,7 +477,7 @@ packags = ["jsonlite"]
 	if err == nil {
 		t.Fatal("Parse() error = nil, want unsupported key error")
 	}
-	if !strings.Contains(err.Error(), `root config: unsupported key "packags"; supported keys: repo, cache_dir, lockfile, rscript, r_version, packages, bioc_packages; did you mean "packages"?`) {
+	if !strings.Contains(err.Error(), `root config: unsupported key "packags"; supported keys: repo, cache_dir, lockfile, rscript, r_version, toolchain_prefixes, pkg_config_path, packages, bioc_packages; did you mean "packages"?`) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 }

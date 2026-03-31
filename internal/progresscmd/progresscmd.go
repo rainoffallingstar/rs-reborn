@@ -13,6 +13,8 @@ import (
 
 const defaultTailLines = 120
 
+var progressIsTTY = isTTY
+
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
@@ -34,7 +36,7 @@ func Stage(w io.Writer, label string) {
 	if w == nil || w == io.Discard || label == "" {
 		return
 	}
-	if isTTY(w) {
+	if progressIsTTY(w) {
 		fmt.Fprintf(w, "[rs] %s\n", label)
 		return
 	}
@@ -97,7 +99,7 @@ func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct
 		<-stop
 		return
 	}
-	if !isTTY(w) {
+	if !progressIsTTY(w) {
 		fmt.Fprintf(w, "[rs] %s...\n", label)
 		<-stop
 		return
@@ -107,11 +109,11 @@ func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct
 	defer ticker.Stop()
 	idx := 0
 	for {
-		fmt.Fprintf(w, "\r[rs] %s %s", label, frames[idx%len(frames)])
+		writeTTYLine(w, fmt.Sprintf("[rs] %s %s", label, frames[idx%len(frames)]))
 		idx++
 		select {
 		case <-stop:
-			fmt.Fprint(w, "\r")
+			clearTTYLine(w)
 			return
 		case <-ticker.C:
 		}
@@ -122,8 +124,9 @@ func writeSuccess(w io.Writer, label string) {
 	if w == nil || w == io.Discard || label == "" {
 		return
 	}
-	if isTTY(w) {
-		fmt.Fprintf(w, "[rs] %s done\n", label)
+	if progressIsTTY(w) {
+		writeTTYLine(w, fmt.Sprintf("[rs] %s done", label))
+		fmt.Fprintln(w)
 	}
 }
 
@@ -189,7 +192,7 @@ func (w *progressWriter) animate(stop <-chan struct{}, done chan<- struct{}) {
 		<-stop
 		return
 	}
-	if !isTTY(w.progress) {
+	if !progressIsTTY(w.progress) {
 		fmt.Fprintf(w.progress, "[rs] %s...\n", w.label)
 		<-stop
 		return
@@ -207,11 +210,11 @@ func (w *progressWriter) animate(stop <-chan struct{}, done chan<- struct{}) {
 		if total > 0 {
 			status = fmt.Sprintf("%s/%s", humanBytes(written), humanBytes(total))
 		}
-		fmt.Fprintf(w.progress, "\r[rs] %s %s %s", w.label, frames[idx%len(frames)], status)
+		writeTTYLine(w.progress, fmt.Sprintf("[rs] %s %s %s", w.label, frames[idx%len(frames)], status))
 		idx++
 		select {
 		case <-stop:
-			fmt.Fprint(w.progress, "\r")
+			clearTTYLine(w.progress)
 			return
 		case <-ticker.C:
 		}
@@ -222,9 +225,19 @@ func (w *progressWriter) finish() {
 	if w.progress == nil || w.progress == io.Discard || w.label == "" {
 		return
 	}
-	if isTTY(w.progress) {
-		fmt.Fprintf(w.progress, "[rs] %s done\n", w.label)
+	if progressIsTTY(w.progress) {
+		writeTTYLine(w.progress, fmt.Sprintf("[rs] %s done", w.label))
+		fmt.Fprintln(w.progress)
 	}
+}
+
+func writeTTYLine(w io.Writer, line string) {
+	clearTTYLine(w)
+	fmt.Fprint(w, line)
+}
+
+func clearTTYLine(w io.Writer) {
+	fmt.Fprint(w, "\r\033[2K")
 }
 
 func humanBytes(n int64) string {

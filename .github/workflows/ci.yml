@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -61,8 +61,14 @@ jobs:
           r-version: release
           use-public-rspm: true
 
-      - name: Run CLI smoke coverage
+      - name: Run CLI smoke coverage (Unix)
+        if: matrix.os != 'windows-latest'
         run: bash scripts/ci/e2e-smoke.sh
+
+      - name: Run CLI smoke coverage (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/ci/e2e-smoke.ps1
 
   r-bootstrap-guidance:
     name: R Bootstrap Guidance (${{ matrix.os }})
@@ -71,7 +77,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -82,11 +88,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run R bootstrap guidance E2E
+      - name: Run R bootstrap guidance E2E (Unix)
+        if: matrix.os != 'windows-latest'
         run: bash scripts/ci/e2e-r-bootstrap-guidance.sh
 
-  release-install-smoke:
-    name: Release Install Smoke (${{ matrix.os }})
+      - name: Run R bootstrap guidance E2E (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/ci/e2e-r-bootstrap-guidance.ps1
+
+  managed-current-default:
+    name: Managed Current Default (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -103,8 +115,119 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run release install smoke E2E
+      - name: Run managed-current default E2E
+        run: bash scripts/ci/e2e-r-managed-current.sh
+
+  toolchain-doctor:
+    name: Toolchain Doctor (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run toolchain-only doctor E2E
+        run: bash scripts/ci/e2e-toolchain-doctor.sh
+
+  toolchain-cli:
+    name: Toolchain CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run toolchain CLI E2E
+        run: bash scripts/ci/e2e-toolchain-cli.sh
+
+  toolchain-enva:
+    name: Toolchain Enva Priority (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run toolchain enva-priority E2E
+        run: bash scripts/ci/e2e-toolchain-enva.sh
+
+  toolchain-enva-runtime:
+    name: Toolchain Enva Runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run toolchain enva runtime E2E
+        run: bash scripts/ci/e2e-toolchain-enva-run.sh
+
+  release-install-smoke:
+    name: Release Install Smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run release install smoke E2E (Unix)
+        if: matrix.os != 'windows-latest'
         run: bash scripts/ci/e2e-release-install.sh
+
+      - name: Run release install smoke E2E (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/ci/e2e-release-install.ps1
 
   local-source-drift:
     name: Local Source Drift
@@ -222,9 +345,13 @@ jobs:
         run: bash scripts/ci/e2e-multi-script-project.sh
 
   native-backend:
-    name: Native Backend
-    runs-on: ubuntu-latest
+    name: Native Backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -241,8 +368,14 @@ jobs:
           r-version: release
           use-public-rspm: true
 
-      - name: Run native backend E2E
+      - name: Run native backend E2E (Unix)
+        if: matrix.os != 'windows-latest'
         run: bash scripts/ci/e2e-native-backend.sh
+
+      - name: Run native backend E2E (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/ci/e2e-native-backend.ps1
 
   native-cran-archive:
     name: Native CRAN Archive
@@ -314,9 +447,13 @@ jobs:
         run: bash scripts/ci/e2e-native-bioc.sh
 
   pak-backend:
-    name: Pak Backend
-    runs-on: ubuntu-latest
+    name: Pak Backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -334,12 +471,19 @@ jobs:
           use-public-rspm: true
 
       - name: Install system dependencies for pak
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libcurl4-openssl-dev pkg-config
 
-      - name: Run pak backend E2E
+      - name: Run pak backend E2E (Unix)
+        if: matrix.os != 'windows-latest'
         run: bash scripts/ci/e2e-pak-backend.sh
+
+      - name: Run pak backend E2E (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/ci/e2e-pak-backend.ps1
 
   native-r-manager:
     name: Native R Manager (${{ matrix.os }})
@@ -348,7 +492,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -365,8 +509,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gfortran libbz2-dev libcurl4-openssl-dev libicu-dev liblzma-dev libpcre2-dev libreadline-dev xorg-dev zlib1g-dev
 
-      - name: Run native R manager E2E
+      - name: Run native R manager E2E (Unix)
+        if: matrix.os != 'windows-latest'
         run: bash scripts/ci/e2e-r-manager.sh
+
+      - name: Run native R manager E2E (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: ./scripts/ci/e2e-r-manager.ps1
 
   native-r-manager-source:
     name: Native R Manager Source

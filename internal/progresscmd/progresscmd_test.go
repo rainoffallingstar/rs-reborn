@@ -2,6 +2,7 @@ package progresscmd
 
 import (
 	"bytes"
+	"io"
 	"os/exec"
 	"strings"
 	"testing"
@@ -61,5 +62,27 @@ func TestCopyReportsNonTTYStage(t *testing.T) {
 	}
 	if !strings.Contains(progress.String(), "[rs] downloading file...") {
 		t.Fatalf("progress = %q, want stage line", progress.String())
+	}
+}
+
+func TestWriteTTYLineClearsPreviousOutput(t *testing.T) {
+	var buf bytes.Buffer
+	writeTTYLine(&buf, "[rs] downloading file | 1.0 MiB/5.0 MiB")
+	if !strings.Contains(buf.String(), "\r\033[2K[rs] downloading file | 1.0 MiB/5.0 MiB") {
+		t.Fatalf("writeTTYLine() output = %q", buf.String())
+	}
+}
+
+func TestWriteSuccessClearsTTYLineBeforeDone(t *testing.T) {
+	oldTTY := progressIsTTY
+	t.Cleanup(func() {
+		progressIsTTY = oldTTY
+	})
+	progressIsTTY = func(io.Writer) bool { return true }
+
+	var buf bytes.Buffer
+	writeSuccess(&buf, "downloading file")
+	if !strings.Contains(buf.String(), "\033[2K[rs] downloading file done\n") {
+		t.Fatalf("writeSuccess() output = %q", buf.String())
 	}
 }

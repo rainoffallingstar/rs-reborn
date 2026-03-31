@@ -9,12 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"gr/internal/project"
 	"gr/internal/rdeps"
 	"gr/internal/rmanager"
 	"gr/internal/runner"
+	"gr/internal/toolchainenv"
 )
 
 type stringList []string
@@ -26,6 +28,32 @@ type scanReport struct {
 	BiocPackages    []string `json:"bioc_packages"`
 	InstallableOnly bool     `json:"installable_only"`
 }
+
+type toolchainDetectReport struct {
+	Candidates []toolchainDetection `json:"candidates"`
+}
+
+type toolchainDetection = toolchainenv.Candidate
+
+type toolchainBootstrapReport struct {
+	Candidate            toolchainDetection `json:"candidate"`
+	TemplateCommand      string             `json:"template_command"`
+	EnvTemplateCommand   string             `json:"env_template_command"`
+	InitCommand          string             `json:"init_command"`
+	DoctorCommand        string             `json:"doctor_command"`
+	TemplateCheckCommand string             `json:"template_check_command"`
+}
+
+var (
+	cliValidateVersionSelector = rmanager.ValidateVersionSelector
+	cliResolveVersionOrPath    = rmanager.ResolveVersionOrPath
+	cliResolveVersionSelector  = rmanager.ResolveVersionSelector
+	cliCurrentManagedRscript   = rmanager.CurrentManagedRscript
+	cliInstallRWithOptions     = rmanager.InstallWithOptions
+	cliDoctor                  = runner.Doctor
+	cliUserHomeDir             = os.UserHomeDir
+	cliStat                    = os.Stat
+)
 
 func (s *stringList) String() string {
 	return strings.Join(*s, ",")
@@ -72,6 +100,8 @@ func Run(args []string) error {
 		return checkCommand(args[1:])
 	case "doctor":
 		return doctorCommand(args[1:])
+	case "toolchain":
+		return toolchainCommand(args[1:])
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		return nil
@@ -95,6 +125,7 @@ func runCommand(args []string) error {
 	locked := fs.Bool("locked", false, "require a valid lockfile but allow installing missing packages without updating it")
 	frozen := fs.Bool("frozen", false, "require a valid lockfile and installed packages; do not modify dependencies")
 	verbose := fs.Bool("verbose", false, "print resolved dependency information before execution")
+	bootstrapToolchain := fs.Bool("bootstrap-toolchain", false, "when no rootless toolchain is configured, try to create one automatically with a detected external manager")
 	fs.Var(&packages, "package", "extra R package to install before running the script (repeatable)")
 	fs.Var(&packages, "p", "alias for --package")
 	fs.Var(&biocPackages, "bioc-package", "extra Bioconductor package to install before running the script (repeatable)")
@@ -118,23 +149,227 @@ func runCommand(args []string) error {
 	runArgs := rest[1:]
 	includeCRAN, includeBioc := splitIncludedPackages(includePackages)
 	opts := runner.RunOptions{
-		ScriptPath:    scriptPath,
-		ScriptArgs:    runArgs,
-		ExtraDeps:     mergeInitDeps(packages, includeCRAN),
-		ExtraBiocDeps: mergeInitDeps(biocPackages, includeBioc),
-		ExcludeDeps:   excludePackages,
-		Repo:          *repo,
-		CacheDir:      *cacheDir,
-		RscriptPath:   *rscript,
-		SkipInstall:   *noInstall,
-		Locked:        *locked,
-		Frozen:        *frozen,
-		Verbose:       *verbose,
-		Stdout:        os.Stdout,
-		Stderr:        os.Stderr,
+		ScriptPath:         scriptPath,
+		ScriptArgs:         runArgs,
+		ExtraDeps:          mergeInitDeps(packages, includeCRAN),
+		ExtraBiocDeps:      mergeInitDeps(biocPackages, includeBioc),
+		ExcludeDeps:        excludePackages,
+		Repo:               *repo,
+		CacheDir:           *cacheDir,
+		RscriptPath:        *rscript,
+		SkipInstall:        *noInstall,
+		Locked:             *locked,
+		Frozen:             *frozen,
+		Verbose:            *verbose,
+		BootstrapToolchain: *bootstrapToolchain,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
 	}
 
 	return runner.Run(opts)
+}
+
+func toolchainCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: rs toolchain <template|detect|bootstrap> ...")
+	}
+
+	switch args[0] {
+	case "template":
+		return toolchainTemplateCommand(args[1:])
+	case "detect":
+		return toolchainDetectCommand(args[1:])
+	case "bootstrap":
+		return toolchainBootstrapCommand(args[1:])
+	default:
+		return fmt.Errorf("unknown toolchain subcommand %q\n\n%s", args[0], usageText())
+	}
+}
+
+func toolchainTemplateCommand(args []string) error {
+	fs := flag.NewFlagSet("toolchain template", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	format := fs.String("format", "toml", "output format: toml or env")
+	check := fs.Bool("check", false, "check whether the preset paths exist on this machine")
+	if err := fs.Parse(normalizeToolchainTemplateArgs(args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: rs toolchain template <preset|auto> [--format toml|env] [--check]")
+	}
+
+	prefixes, pkgConfig, err := resolveToolchainPreset(fs.Arg(0))
+	if err != nil {
+		return err
+	}
+
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "toml":
+		fmt.Fprint(os.Stdout, renderToolchainTemplateTOML(prefixes, pkgConfig))
+	case "env":
+		fmt.Fprint(os.Stdout, renderToolchainTemplateEnv(prefixes, pkgConfig))
+	default:
+		return fmt.Errorf("unsupported --format %q; supported formats: toml, env", *format)
+	}
+
+	if *check {
+		issues := checkToolchainTemplatePaths(prefixes, pkgConfig)
+		for _, issue := range issues {
+			fmt.Fprintf(os.Stdout, "[check] %s\n", issue)
+		}
+		if len(issues) == 0 {
+			fmt.Fprintln(os.Stdout, "[ok] all preset toolchain paths exist on this machine")
+			return nil
+		}
+		fmt.Fprintln(os.Stdout, "[summary] preset paths are missing on this machine")
+		return fmt.Errorf("toolchain preset check failed")
+	}
+	return nil
+}
+
+func normalizeToolchainTemplateArgs(args []string) []string {
+	if len(args) <= 1 {
+		return args
+	}
+	if strings.HasPrefix(args[0], "-") {
+		return args
+	}
+	normalized := append([]string(nil), args[1:]...)
+	normalized = append(normalized, args[0])
+	return normalized
+}
+
+func toolchainDetectCommand(args []string) error {
+	fs := flag.NewFlagSet("toolchain detect", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	jsonOutput := fs.Bool("json", false, "print detected toolchain candidates as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: rs toolchain detect [--json]")
+	}
+
+	candidates, err := detectToolchainCandidates()
+	if err != nil {
+		return err
+	}
+
+	if *jsonOutput {
+		report := toolchainDetectReport{Candidates: candidates}
+		if report.Candidates == nil {
+			report.Candidates = []toolchainDetection{}
+		}
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal toolchain detect report: %w", err)
+		}
+		fmt.Fprintln(os.Stdout, string(data))
+		return nil
+	}
+
+	if len(candidates) == 0 {
+		fmt.Fprintln(os.Stdout, "no common rootless toolchain presets detected on this machine")
+		fmt.Fprintf(os.Stdout, "next step: try `rs toolchain template %s`\n", strings.Join(toolchainenv.SupportedPresets(), "`, `rs toolchain template "))
+		return nil
+	}
+
+	for _, candidate := range candidates {
+		status := "partial"
+		if candidate.Complete {
+			status = "complete"
+		}
+		if candidate.Recommended {
+			status += ", recommended"
+		}
+		fmt.Fprintf(os.Stdout, "[detect] %s (%s)\n", candidate.Preset, status)
+		fmt.Fprintf(os.Stdout, "[detect] toolchain prefixes: %s\n", strings.Join(candidate.ToolchainPrefixes, ", "))
+		fmt.Fprintf(os.Stdout, "[detect] pkg-config path: %s\n", strings.Join(candidate.PkgConfigPath, ", "))
+		if len(candidate.ExistingPrefixes) == 0 {
+			fmt.Fprintln(os.Stdout, "[detect] existing prefixes: <none>")
+		} else {
+			fmt.Fprintf(os.Stdout, "[detect] existing prefixes: %s\n", strings.Join(candidate.ExistingPrefixes, ", "))
+		}
+		if len(candidate.ExistingPkgConfigPath) == 0 {
+			fmt.Fprintln(os.Stdout, "[detect] existing pkg-config path: <none>")
+		} else {
+			fmt.Fprintf(os.Stdout, "[detect] existing pkg-config path: %s\n", strings.Join(candidate.ExistingPkgConfigPath, ", "))
+		}
+		if candidate.SuggestedSetupCommand != "" {
+			fmt.Fprintf(os.Stdout, "[next] prepare user-local prefix: %s\n", candidate.SuggestedSetupCommand)
+		}
+		if candidate.SuggestedSetupNote != "" {
+			fmt.Fprintf(os.Stdout, "[next] setup note: %s\n", candidate.SuggestedSetupNote)
+		}
+		fmt.Fprintf(os.Stdout, "[next] preview template: rs toolchain template %s --check\n", candidate.Preset)
+		fmt.Fprintf(os.Stdout, "[next] initialize project defaults: %s\n", candidate.SuggestedInitCommand)
+	}
+	return nil
+}
+
+func toolchainBootstrapCommand(args []string) error {
+	fs := flag.NewFlagSet("toolchain bootstrap", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	jsonOutput := fs.Bool("json", false, "print the bootstrap plan as JSON")
+	if err := fs.Parse(normalizeToolchainTemplateArgs(args)); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: rs toolchain bootstrap <preset|auto> [--json]")
+	}
+
+	home, err := cliUserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory for toolchain bootstrap: %w", err)
+	}
+	candidate, err := toolchainenv.DescribePreset(fs.Arg(0), home)
+	if err != nil {
+		return err
+	}
+	report := toolchainBootstrapReport{
+		Candidate:            *candidate,
+		TemplateCommand:      fmt.Sprintf("rs toolchain template %s", candidate.Preset),
+		EnvTemplateCommand:   fmt.Sprintf("rs toolchain template %s --format env", candidate.Preset),
+		InitCommand:          candidate.SuggestedInitCommand,
+		DoctorCommand:        "rs doctor --toolchain-only",
+		TemplateCheckCommand: fmt.Sprintf("rs toolchain template %s --check", candidate.Preset),
+	}
+
+	if *jsonOutput {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal toolchain bootstrap report: %w", err)
+		}
+		fmt.Fprintln(os.Stdout, string(data))
+		return nil
+	}
+
+	status := "template"
+	if candidate.Complete {
+		status = "detected complete layout"
+	} else if len(candidate.ExistingPrefixes) > 0 || len(candidate.ExistingPkgConfigPath) > 0 {
+		status = "detected partial layout"
+	}
+	if candidate.Recommended {
+		status += ", recommended"
+	}
+	fmt.Fprintf(os.Stdout, "[bootstrap] preset: %s (%s)\n", candidate.Preset, status)
+	fmt.Fprintf(os.Stdout, "[bootstrap] toolchain prefixes: %s\n", strings.Join(candidate.ToolchainPrefixes, ", "))
+	fmt.Fprintf(os.Stdout, "[bootstrap] pkg-config path: %s\n", strings.Join(candidate.PkgConfigPath, ", "))
+	if candidate.SuggestedSetupCommand != "" {
+		fmt.Fprintf(os.Stdout, "[bootstrap] setup command: %s\n", candidate.SuggestedSetupCommand)
+	}
+	if candidate.SuggestedSetupNote != "" {
+		fmt.Fprintf(os.Stdout, "[bootstrap] setup note: %s\n", candidate.SuggestedSetupNote)
+	}
+	fmt.Fprintf(os.Stdout, "[next] preview template: %s\n", report.TemplateCheckCommand)
+	fmt.Fprintf(os.Stdout, "[next] export ad hoc environment: %s\n", report.EnvTemplateCommand)
+	fmt.Fprintf(os.Stdout, "[next] initialize project defaults: %s\n", report.InitCommand)
+	fmt.Fprintf(os.Stdout, "[next] validate toolchain configuration: %s\n", report.DoctorCommand)
+	return nil
 }
 
 func initCommand(args []string) error {
@@ -146,6 +381,9 @@ func initCommand(args []string) error {
 	lockfile := fs.String("lockfile", "rs.lock.json", "lockfile path written to rs.toml")
 	rscript := fs.String("rscript", "", "default Rscript binary or path written to rs.toml")
 	rVersion := fs.String("r-version", "", "default R version selector written to rs.toml")
+	toolchainPreset := fs.String("toolchain-preset", "", "seed toolchain_prefixes/pkg_config_path for auto, enva, micromamba, mamba, conda, homebrew, or spack")
+	var toolchainPrefixes stringList
+	var pkgConfigPath stringList
 	var fromScripts stringList
 	var fromDirs stringList
 	var includePackages stringList
@@ -156,6 +394,8 @@ func initCommand(args []string) error {
 	force := fs.Bool("force", false, "overwrite an existing rs.toml")
 	fs.Var(&fromScripts, "from", "scan packages from an existing R script and seed rs.toml (repeatable)")
 	fs.Var(&fromDirs, "from-dir", "scan all R scripts under a directory and seed rs.toml (repeatable)")
+	fs.Var(&toolchainPrefixes, "toolchain-prefix", "user-local prefix to expose to PATH/CPPFLAGS/LDFLAGS/PKG_CONFIG_PATH during source builds (repeatable)")
+	fs.Var(&pkgConfigPath, "pkg-config-path", "extra pkg-config search path for source builds (repeatable)")
 	fs.Var(&includePackages, "include", "add an extra project-level dependency to generated config (repeatable)")
 	fs.Var(&excludePackages, "exclude", "exclude a detected dependency from generated config (repeatable)")
 	fs.Var(&biocPackages, "bioc-package", "add an extra project-level Bioconductor dependency to generated config (repeatable)")
@@ -179,6 +419,11 @@ func initCommand(args []string) error {
 		return fmt.Errorf("create target dir: %w", err)
 	}
 
+	presetPrefixes, presetPkgConfig, err := resolveToolchainPreset(*toolchainPreset)
+	if err != nil {
+		return err
+	}
+
 	configPath := filepath.Join(targetDir, project.ConfigFileName)
 	if _, err := os.Stat(configPath); err == nil && !*force {
 		return fmt.Errorf("%s already exists\nrerun with --force to overwrite", configPath)
@@ -187,12 +432,14 @@ func initCommand(args []string) error {
 	}
 
 	initOpts := project.InitOptions{
-		Repo:         *repo,
-		CacheDir:     *cacheDir,
-		Lockfile:     *lockfile,
-		Rscript:      *rscript,
-		RVersion:     *rVersion,
-		BiocPackages: biocPackages,
+		Repo:              *repo,
+		CacheDir:          *cacheDir,
+		Lockfile:          *lockfile,
+		Rscript:           *rscript,
+		RVersion:          *rVersion,
+		ToolchainPrefixes: mergeUniqueStrings(presetPrefixes, toolchainPrefixes),
+		PkgConfigPath:     mergeUniqueStrings(presetPkgConfig, pkgConfigPath),
+		BiocPackages:      biocPackages,
 	}
 	includeCRAN, includeBioc := rdeps.SplitBiocPackages(includePackages)
 	initOpts.Packages = mergeInitDeps(initOpts.Packages, includeCRAN)
@@ -261,6 +508,106 @@ func initCommand(args []string) error {
 		}
 	}
 	return nil
+}
+
+func resolveToolchainPreset(name string) ([]string, []string, error) {
+	name = strings.TrimSpace(strings.ToLower(name))
+	if name == "" {
+		return nil, nil, nil
+	}
+
+	home, err := cliUserHomeDir()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve home directory for --toolchain-preset: %w", err)
+	}
+	return toolchainenv.ResolvePreset(name, home)
+}
+
+func mergeUniqueStrings(groups ...[]string) []string {
+	seen := map[string]struct{}{}
+	out := []string{}
+	for _, group := range groups {
+		for _, value := range group {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func renderToolchainTemplateTOML(prefixes, pkgConfig []string) string {
+	lines := []string{
+		"toolchain_prefixes = " + renderCLIStringArray(prefixes),
+		"pkg_config_path = " + renderCLIStringArray(pkgConfig),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func renderToolchainTemplateEnv(prefixes, pkgConfig []string) string {
+	lines := []string{
+		"export RS_TOOLCHAIN_PREFIXES=" + shellQuote(strings.Join(prefixes, string(os.PathListSeparator))),
+		"export RS_PKG_CONFIG_PATH=" + shellQuote(strings.Join(pkgConfig, string(os.PathListSeparator))),
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func renderCLIStringArray(values []string) string {
+	if len(values) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		parts = append(parts, strconv.Quote(value))
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func checkToolchainTemplatePaths(prefixes, pkgConfig []string) []string {
+	issues := []string{}
+	for _, path := range prefixes {
+		if issue, ok := checkTemplatePath("toolchain prefix", path); ok {
+			issues = append(issues, issue)
+		}
+	}
+	for _, path := range pkgConfig {
+		if issue, ok := checkTemplatePath("pkg-config path", path); ok {
+			issues = append(issues, issue)
+		}
+	}
+	return issues
+}
+
+func detectToolchainCandidates() ([]toolchainDetection, error) {
+	home, err := cliUserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve home directory for toolchain detect: %w", err)
+	}
+	return toolchainenv.DetectCandidates(home)
+}
+
+func checkTemplatePath(label, path string) (string, bool) {
+	info, err := cliStat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return fmt.Sprintf("%s missing: %s", label, path), true
+	}
+	if err != nil {
+		return fmt.Sprintf("%s unreadable: %s (%v)", label, path, err), true
+	}
+	if !info.IsDir() {
+		return fmt.Sprintf("%s is not a directory: %s", label, path), true
+	}
+	return "", false
 }
 
 func mergeInitDeps(left, right []string) []string {
@@ -531,6 +878,7 @@ func lockCommand(args []string) error {
 	cacheDir := fs.String("cache-dir", "", "cache directory for managed R libraries")
 	rscript := fs.String("rscript", "", "Rscript binary or path to use while locking")
 	verbose := fs.Bool("verbose", false, "print resolved dependency information before locking")
+	bootstrapToolchain := fs.Bool("bootstrap-toolchain", false, "when no rootless toolchain is configured, try to create one automatically with a detected external manager")
 	fs.Var(&packages, "package", "extra R package to include before writing the lockfile (repeatable)")
 	fs.Var(&packages, "p", "alias for --package")
 	fs.Var(&biocPackages, "bioc-package", "extra Bioconductor package to include before writing the lockfile (repeatable)")
@@ -552,16 +900,17 @@ func lockCommand(args []string) error {
 
 	includeCRAN, includeBioc := splitIncludedPackages(includePackages)
 	return runner.Lock(runner.LockOptions{
-		ScriptPath:    scriptPath,
-		ExtraDeps:     mergeInitDeps(packages, includeCRAN),
-		ExtraBiocDeps: mergeInitDeps(biocPackages, includeBioc),
-		ExcludeDeps:   excludePackages,
-		Repo:          *repo,
-		CacheDir:      *cacheDir,
-		RscriptPath:   *rscript,
-		Verbose:       *verbose,
-		Stdout:        os.Stdout,
-		Stderr:        os.Stderr,
+		ScriptPath:         scriptPath,
+		ExtraDeps:          mergeInitDeps(packages, includeCRAN),
+		ExtraBiocDeps:      mergeInitDeps(biocPackages, includeBioc),
+		ExcludeDeps:        excludePackages,
+		Repo:               *repo,
+		CacheDir:           *cacheDir,
+		RscriptPath:        *rscript,
+		Verbose:            *verbose,
+		BootstrapToolchain: *bootstrapToolchain,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
 	})
 }
 
@@ -659,6 +1008,7 @@ func shellCommand(args []string) error {
 	locked := fs.Bool("locked", false, "require a valid lockfile but allow installing missing packages without updating it")
 	frozen := fs.Bool("frozen", false, "require a valid lockfile and installed packages; do not modify dependencies")
 	verbose := fs.Bool("verbose", false, "print resolved dependency information before opening the shell")
+	bootstrapToolchain := fs.Bool("bootstrap-toolchain", false, "when no rootless toolchain is configured, try to create one automatically with a detected external manager")
 	fs.Var(&packages, "package", "extra R package to install before opening the shell (repeatable)")
 	fs.Var(&packages, "p", "alias for --package")
 	fs.Var(&biocPackages, "bioc-package", "extra Bioconductor package to install before opening the shell (repeatable)")
@@ -680,19 +1030,20 @@ func shellCommand(args []string) error {
 
 	includeCRAN, includeBioc := splitIncludedPackages(includePackages)
 	return runner.Shell(runner.ShellOptions{
-		ScriptPath:    scriptPath,
-		ExtraDeps:     mergeInitDeps(packages, includeCRAN),
-		ExtraBiocDeps: mergeInitDeps(biocPackages, includeBioc),
-		ExcludeDeps:   excludePackages,
-		Repo:          *repo,
-		CacheDir:      *cacheDir,
-		RscriptPath:   *rscript,
-		SkipInstall:   *noInstall,
-		Locked:        *locked,
-		Frozen:        *frozen,
-		Verbose:       *verbose,
-		Stdout:        os.Stdout,
-		Stderr:        os.Stderr,
+		ScriptPath:         scriptPath,
+		ExtraDeps:          mergeInitDeps(packages, includeCRAN),
+		ExtraBiocDeps:      mergeInitDeps(biocPackages, includeBioc),
+		ExcludeDeps:        excludePackages,
+		Repo:               *repo,
+		CacheDir:           *cacheDir,
+		RscriptPath:        *rscript,
+		SkipInstall:        *noInstall,
+		Locked:             *locked,
+		Frozen:             *frozen,
+		Verbose:            *verbose,
+		BootstrapToolchain: *bootstrapToolchain,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
 	})
 }
 
@@ -711,6 +1062,7 @@ func execCommand(args []string) error {
 	locked := fs.Bool("locked", false, "require a valid lockfile but allow installing missing packages without updating it")
 	frozen := fs.Bool("frozen", false, "require a valid lockfile and installed packages; do not modify dependencies")
 	verbose := fs.Bool("verbose", false, "print resolved dependency information before executing the expression")
+	bootstrapToolchain := fs.Bool("bootstrap-toolchain", false, "when no rootless toolchain is configured, try to create one automatically with a detected external manager")
 	expression := fs.String("e", "", "R expression to execute")
 	fs.StringVar(expression, "expr", "", "R expression to execute")
 	fs.Var(&packages, "package", "extra R package to install before executing the expression (repeatable)")
@@ -737,20 +1089,21 @@ func execCommand(args []string) error {
 
 	includeCRAN, includeBioc := splitIncludedPackages(includePackages)
 	return runner.Exec(runner.ExecOptions{
-		ScriptPath:    scriptPath,
-		Expression:    *expression,
-		ExtraDeps:     mergeInitDeps(packages, includeCRAN),
-		ExtraBiocDeps: mergeInitDeps(biocPackages, includeBioc),
-		ExcludeDeps:   excludePackages,
-		Repo:          *repo,
-		CacheDir:      *cacheDir,
-		RscriptPath:   *rscript,
-		SkipInstall:   *noInstall,
-		Locked:        *locked,
-		Frozen:        *frozen,
-		Verbose:       *verbose,
-		Stdout:        os.Stdout,
-		Stderr:        os.Stderr,
+		ScriptPath:         scriptPath,
+		Expression:         *expression,
+		ExtraDeps:          mergeInitDeps(packages, includeCRAN),
+		ExtraBiocDeps:      mergeInitDeps(biocPackages, includeBioc),
+		ExcludeDeps:        excludePackages,
+		Repo:               *repo,
+		CacheDir:           *cacheDir,
+		RscriptPath:        *rscript,
+		SkipInstall:        *noInstall,
+		Locked:             *locked,
+		Frozen:             *frozen,
+		Verbose:            *verbose,
+		BootstrapToolchain: *bootstrapToolchain,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
 	})
 }
 
@@ -904,17 +1257,19 @@ func rInstallCommand(args []string) error {
 	fs := flag.NewFlagSet("r install", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	method := fs.String("method", string(rmanager.InstallMethodAuto), "install method: auto, binary, or source")
+	bootstrapToolchain := fs.Bool("bootstrap-toolchain", false, "when source-build prerequisites are missing, try to create a rootless toolchain automatically with a detected external manager")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs r install [--method auto|binary|source] <version>")
+		return errors.New("usage: rs r install [--method auto|binary|source] [--bootstrap-toolchain] <version>")
 	}
-	return rmanager.InstallWithOptions(rmanager.InstallOptions{
-		Version: fs.Arg(0),
-		Method:  rmanager.InstallMethod(strings.TrimSpace(*method)),
-		Stdout:  os.Stdout,
-		Stderr:  os.Stderr,
+	return cliInstallRWithOptions(rmanager.InstallOptions{
+		Version:            fs.Arg(0),
+		Method:             rmanager.InstallMethod(strings.TrimSpace(*method)),
+		BootstrapToolchain: *bootstrapToolchain,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
 	})
 }
 
@@ -947,13 +1302,18 @@ func rUseCommand(args []string) error {
 	}
 	spec := fs.Arg(0)
 	if rmanager.LooksLikeVersionSpec(spec) && !strings.Contains(strings.ToLower(spec), "rscript") {
-		if err := rmanager.ValidateVersionSelector(spec); err != nil {
+		if err := cliValidateVersionSelector(spec); err != nil {
 			return err
+		}
+		if _, err := cliResolveVersionOrPath(spec); err != nil {
+			if _, resolveErr := cliResolveVersionSelector(spec); resolveErr != nil {
+				return resolveErr
+			}
 		}
 		editable.Defaults.RVersion = spec
 		editable.Defaults.Rscript = ""
 	} else {
-		rscriptPath, err := rmanager.ResolveVersionOrPath(spec)
+		rscriptPath, err := cliResolveVersionOrPath(spec)
 		if err != nil {
 			return err
 		}
@@ -1025,9 +1385,13 @@ func rWhichCommand(args []string) error {
 	}
 
 	if configured == "" {
+		if managed, err := cliCurrentManagedRscript(); err == nil {
+			fmt.Fprintln(os.Stdout, managed)
+			return nil
+		}
 		configured = "Rscript"
 	}
-	rscriptPath, err := rmanager.ResolveVersionOrPath(configured)
+	rscriptPath, err := cliResolveVersionOrPath(configured)
 	if err != nil {
 		return err
 	}
@@ -1048,6 +1412,7 @@ func checkCommand(args []string) error {
 	rscript := fs.String("rscript", "", "Rscript binary or path to use during validation")
 	jsonOutput := fs.Bool("json", false, "print the validation report as JSON")
 	verbose := fs.Bool("verbose", false, "print resolved dependency information before validation")
+	bootstrapToolchain := fs.Bool("bootstrap-toolchain", false, "when no rootless toolchain is configured, try to create one automatically with a detected external manager")
 	fs.Var(&packages, "package", "extra CRAN package to include in validation (repeatable)")
 	fs.Var(&packages, "p", "alias for --package")
 	fs.Var(&biocPackages, "bioc-package", "extra Bioconductor package to include in validation (repeatable)")
@@ -1069,19 +1434,20 @@ func checkCommand(args []string) error {
 
 	includeCRAN, includeBioc := splitIncludedPackages(includePackages)
 	return runner.Check(runner.CheckOptions{
-		ScriptPath:      scriptPath,
-		ExtraDeps:       mergeInitDeps(packages, includeCRAN),
-		ExtraBiocDeps:   mergeInitDeps(biocPackages, includeBioc),
-		ExcludeDeps:     excludePackages,
-		IncludeDeps:     includeCRAN,
-		IncludeBiocDeps: includeBioc,
-		Repo:            *repo,
-		CacheDir:        *cacheDir,
-		RscriptPath:     *rscript,
-		JSON:            *jsonOutput,
-		Verbose:         *verbose,
-		Stdout:          os.Stdout,
-		Stderr:          os.Stderr,
+		ScriptPath:         scriptPath,
+		ExtraDeps:          mergeInitDeps(packages, includeCRAN),
+		ExtraBiocDeps:      mergeInitDeps(biocPackages, includeBioc),
+		ExcludeDeps:        excludePackages,
+		IncludeDeps:        includeCRAN,
+		IncludeBiocDeps:    includeBioc,
+		Repo:               *repo,
+		CacheDir:           *cacheDir,
+		RscriptPath:        *rscript,
+		JSON:               *jsonOutput,
+		Verbose:            *verbose,
+		BootstrapToolchain: *bootstrapToolchain,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
 	})
 }
 
@@ -1100,7 +1466,9 @@ func doctorCommand(args []string) error {
 	strict := fs.Bool("strict", false, "exit non-zero unless doctor status is ok")
 	quiet := fs.Bool("quiet", false, "hide informational lines and print only diagnostics plus summary")
 	summaryOnly := fs.Bool("summary-only", false, "print only the final doctor summary line")
+	toolchainOnly := fs.Bool("toolchain-only", false, "only validate rootless toolchain prefixes and pkg-config paths")
 	verbose := fs.Bool("verbose", false, "print additional environment details")
+	bootstrapToolchain := fs.Bool("bootstrap-toolchain", false, "when no rootless toolchain is configured, try to create one automatically with a detected external manager before diagnosing")
 	fs.Var(&packages, "package", "extra CRAN package to include in diagnosis (repeatable)")
 	fs.Var(&packages, "p", "alias for --package")
 	fs.Var(&biocPackages, "bioc-package", "extra Bioconductor package to include in diagnosis (repeatable)")
@@ -1111,33 +1479,53 @@ func doctorCommand(args []string) error {
 		return err
 	}
 
-	if fs.NArg() != 1 {
+	if !*toolchainOnly && fs.NArg() != 1 {
 		return errors.New("usage: rs doctor [flags] path/to/script.R")
 	}
+	if *toolchainOnly && fs.NArg() > 1 {
+		return errors.New("usage: rs doctor --toolchain-only [path/to/script.R|path/to/project]")
+	}
 
-	scriptPath, err := filepath.Abs(fs.Arg(0))
-	if err != nil {
-		return fmt.Errorf("resolve script path: %w", err)
+	scriptPath := ""
+	projectDir := ""
+	var err error
+	if *toolchainOnly {
+		target := "."
+		if fs.NArg() == 1 {
+			target = fs.Arg(0)
+		}
+		projectDir, scriptPath, err = resolveProjectTarget(target)
+		if err != nil {
+			return err
+		}
+	} else {
+		scriptPath, err = filepath.Abs(fs.Arg(0))
+		if err != nil {
+			return fmt.Errorf("resolve script path: %w", err)
+		}
 	}
 
 	includeCRAN, includeBioc := splitIncludedPackages(includePackages)
-	return runner.Doctor(runner.DoctorOptions{
-		ScriptPath:      scriptPath,
-		ExtraDeps:       mergeInitDeps(packages, includeCRAN),
-		ExtraBiocDeps:   mergeInitDeps(biocPackages, includeBioc),
-		ExcludeDeps:     excludePackages,
-		IncludeDeps:     includeCRAN,
-		IncludeBiocDeps: includeBioc,
-		Repo:            *repo,
-		CacheDir:        *cacheDir,
-		RscriptPath:     *rscript,
-		JSON:            *jsonOutput,
-		Strict:          *strict,
-		Quiet:           *quiet,
-		SummaryOnly:     *summaryOnly,
-		Verbose:         *verbose,
-		Stdout:          os.Stdout,
-		Stderr:          os.Stderr,
+	return cliDoctor(runner.DoctorOptions{
+		ScriptPath:         scriptPath,
+		ProjectDir:         projectDir,
+		ExtraDeps:          mergeInitDeps(packages, includeCRAN),
+		ExtraBiocDeps:      mergeInitDeps(biocPackages, includeBioc),
+		ExcludeDeps:        excludePackages,
+		IncludeDeps:        includeCRAN,
+		IncludeBiocDeps:    includeBioc,
+		Repo:               *repo,
+		CacheDir:           *cacheDir,
+		RscriptPath:        *rscript,
+		JSON:               *jsonOutput,
+		Strict:             *strict,
+		Quiet:              *quiet,
+		SummaryOnly:        *summaryOnly,
+		ToolchainOnly:      *toolchainOnly,
+		Verbose:            *verbose,
+		BootstrapToolchain: *bootstrapToolchain,
+		Stdout:             os.Stdout,
+		Stderr:             os.Stderr,
 	})
 }
 
@@ -1252,6 +1640,10 @@ Usage:
   rs sync [flags] path/to/script.R
   rs check [flags] path/to/script.R
   rs doctor [flags] path/to/script.R
+  rs toolchain template <preset|auto> [--format toml|env] [--check]
+  rs toolchain detect [--json]
+  rs toolchain bootstrap <preset|auto> [--json]
+  rs doctor --toolchain-only [path/to/script.R|path/to/project]
 
 Commands:
   init   create a starter rs.toml for an R project, optionally seeded from a script
@@ -1269,6 +1661,7 @@ Commands:
   sync   alias for lock
   check  validate the current environment against the lock file
   doctor inspect local prerequisites, source configuration, and lockfile presence
+  toolchain print, discover, or bootstrap rootless toolchain templates without writing rs.toml
 
 Flags for "init":
   --repo <url>              default CRAN mirror to write into rs.toml
@@ -1276,6 +1669,9 @@ Flags for "init":
   --lockfile <path>         lockfile path to write into rs.toml
   --rscript <path|cmd>      default Rscript binary or path to write into rs.toml
   --r-version <version>     default R version selector to write into rs.toml
+  --toolchain-preset <id>   seed rootless toolchain config for auto, enva, micromamba, mamba, conda, homebrew, or spack
+  --toolchain-prefix <dir>  user-local prefix used for source-build toolchains and headers (repeatable)
+  --pkg-config-path <dir>   extra pkg-config search path used during source builds (repeatable)
   --from <path>             scan an existing R script and seed rs.toml (repeatable)
   --from-dir <dir>          scan all .R/.Rscript files under a directory (repeatable)
   --include <pkg>           add an extra project-level dependency (repeatable)
@@ -1284,6 +1680,16 @@ Flags for "init":
   --write-script-block      with one --from, write detected packages under [scripts."..."]
   --include-bundled         keep R bundled base/recommended packages in generated config
   --force                   overwrite an existing rs.toml
+
+Flags for "toolchain template":
+  --format <kind>           output format: toml or env
+  --check                   verify whether the preset paths exist on this machine
+
+Flags for "toolchain detect":
+  --json                    print detected toolchain candidates as JSON
+
+Flags for "toolchain bootstrap":
+  --json                    print the bootstrap plan as JSON
 
 Flags for "add":
   --bioc                    add packages to bioc_packages instead of packages
@@ -1311,11 +1717,12 @@ Flags for "lock":
   --exclude <pkg>           exclude a dependency from the resolved lock plan (repeatable)
   --cache-dir <dir>         override cache location (default OS user cache dir)
   --rscript <path|cmd>      override the Rscript interpreter used while locking
+  --bootstrap-toolchain     if no rootless toolchain is configured, try to create one automatically with a detected external manager
   --verbose                 print dependency and cache details before locking
 
 Flags for "r":
   list                      list managed and discovered external R installations
-  install <version>         install an R version with the selected manager backend
+  install <version>         install an R version with the selected manager backend; supports --method and --bootstrap-toolchain
   use <version|path>        write r_version or a resolved Rscript path to rs.toml
   which [dir|script]        print the currently selected Rscript path
 
@@ -1344,6 +1751,7 @@ Flags for "shell":
   --no-install              do not install missing packages
   --locked                  require a valid lockfile but allow installing missing packages without updating it
   --frozen                  require a valid lockfile and installed packages; do not modify dependencies
+  --bootstrap-toolchain     if no rootless toolchain is configured, try to create one automatically with a detected external manager
   --verbose                 print dependency and cache details before opening the shell
 
 Flags for "exec":
@@ -1358,6 +1766,7 @@ Flags for "exec":
   --no-install              do not install missing packages
   --locked                  require a valid lockfile but allow installing missing packages without updating it
   --frozen                  require a valid lockfile and installed packages; do not modify dependencies
+  --bootstrap-toolchain     if no rootless toolchain is configured, try to create one automatically with a detected external manager
   --verbose                 print dependency and cache details before executing the expression
 
 Flags for "cache dir":
@@ -1390,6 +1799,7 @@ Flags for "run":
   --no-install              do not install missing packages
   --locked                  require a valid lockfile but allow installing missing packages without updating it
   --frozen                  require a valid lockfile and installed packages; do not modify dependencies
+  --bootstrap-toolchain     if no rootless toolchain is configured, try to create one automatically with a detected external manager
   --verbose                 print dependency and cache details before execution
 
 Flags for "sync":
@@ -1404,6 +1814,7 @@ Flags for "check":
   --cache-dir <dir>         override cache location (default OS user cache dir)
   --rscript <path|cmd>      override the Rscript interpreter used during validation
   --json                    print the validation report as JSON
+  --bootstrap-toolchain     if no rootless toolchain is configured, try to create one automatically with a detected external manager
   --verbose                 print dependency and cache details before validation
 
 Flags for "doctor":
@@ -1415,6 +1826,7 @@ Flags for "doctor":
   --cache-dir <dir>         override cache location (default OS user cache dir)
   --rscript <path|cmd>      override the Rscript interpreter used during diagnosis
   --json                    print the diagnostic report as JSON
+  --bootstrap-toolchain     if no rootless toolchain is configured, try to create one automatically with a detected external manager before diagnosing
   --verbose                 print additional environment details
 `
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -18,6 +19,7 @@ import (
 	"gr/internal/lockfile"
 	"gr/internal/project"
 	"gr/internal/rmanager"
+	"gr/internal/toolchainenv"
 )
 
 func writeFakeRscript(t *testing.T, dir string) string {
@@ -64,6 +66,38 @@ exit 1
 `, version)
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatalf("WriteFile(fake Rscript) error = %v", err)
+	}
+	return path
+}
+
+func writeFakeMicromamba(t *testing.T, dir string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "micromamba")
+	script := `#!/bin/sh
+prefix=""
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	-p)
+		shift
+		prefix="$1"
+		;;
+	esac
+	shift
+done
+if [ -z "$prefix" ]; then
+	echo "missing -p prefix" >&2
+	exit 1
+fi
+mkdir -p "$prefix/bin" "$prefix/lib/pkgconfig" "$prefix/share/pkgconfig"
+cat >"$prefix/bin/pkg-config" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$prefix/bin/pkg-config"
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(fake micromamba) error = %v", err)
 	}
 	return path
 }
@@ -331,6 +365,177 @@ func TestResolveRunnableRscriptPathAutoInstallsVersionSpecWhenEnabled(t *testing
 	}
 }
 
+func TestSelectInterpreterTargetLeavesUnconfiguredProjectEmpty(t *testing.T) {
+	selected, requestedVersion := selectInterpreterTarget("", "", "")
+	if selected != "" {
+		t.Fatalf("selectInterpreterTarget() selected = %q, want empty", selected)
+	}
+	if requestedVersion != "" {
+		t.Fatalf("selectInterpreterTarget() requestedVersion = %q, want empty", requestedVersion)
+	}
+}
+
+func TestRuntimeEnvAppliesToolchainPrefixes(t *testing.T) {
+	env := runtimeEnv(ResolvedEnvironment{
+		BootstrapPath:     "/tmp/bootstrap.R",
+		LibraryPath:       "/tmp/lib",
+		Repo:              "https://cloud.r-project.org",
+		ToolchainPrefixes: []string{"/opt/demo"},
+		PkgConfigPath:     []string{"/opt/demo/custom-pkgconfig"},
+	}, true)
+
+	pathValue := ""
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "PATH=") {
+			pathValue = strings.TrimPrefix(entry, "PATH=")
+		}
+		if entry == "RS_TOOLCHAIN_PREFIXES=/opt/demo" {
+			goto sawPrefix
+		}
+	}
+	t.Fatal("runtimeEnv() missing RS_TOOLCHAIN_PREFIXES")
+
+sawPrefix:
+	if !strings.HasPrefix(pathValue, filepath.Join("/opt/demo", "bin")+string(os.PathListSeparator)) {
+		t.Fatalf("PATH = %q", pathValue)
+	}
+}
+
+func TestRuntimeEnvAutoDetectsToolchainWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	env := runtimeEnv(ResolvedEnvironment{
+		BootstrapPath: "/tmp/bootstrap.R",
+		LibraryPath:   "/tmp/lib",
+		Repo:          "https://cloud.r-project.org",
+	}, true)
+
+	pathValue := ""
+	sawPrefix := false
+	sawPkg := false
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "PATH=") {
+			pathValue = strings.TrimPrefix(entry, "PATH=")
+		}
+		if entry == "RS_TOOLCHAIN_PREFIXES="+homebrewPrefix {
+			sawPrefix = true
+		}
+		if entry == "RS_PKG_CONFIG_PATH="+filepath.Join(homebrewPrefix, "lib", "pkgconfig")+string(os.PathListSeparator)+filepath.Join(homebrewPrefix, "share", "pkgconfig") {
+			sawPkg = true
+		}
+	}
+	if !sawPrefix || !sawPkg {
+		t.Fatalf("runtimeEnv() = %v, want auto-detected toolchain markers", env)
+	}
+	if !strings.HasPrefix(pathValue, filepath.Join(homebrewPrefix, "bin")+string(os.PathListSeparator)) {
+		t.Fatalf("PATH = %q", pathValue)
+	}
+}
+
+func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
+	req, err := installerRequestFromEnvironment(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		Interpreter: "/tmp/Rscript",
+		LibraryPath: t.TempDir(),
+		Repo:        "https://cloud.r-project.org",
+		Runtime: RuntimeMetadata{
+			Interpreter: "/tmp/Rscript",
+			RVersion:    "4.4.3",
+		},
+		ToolchainPrefixes: []string{"/opt/demo"},
+		PkgConfigPath:     []string{"/opt/demo/custom-pkgconfig"},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("installerRequestFromEnvironment() error = %v", err)
+	}
+	var sawPrefix, sawPkg bool
+	for _, entry := range req.Environment {
+		if entry == "RS_TOOLCHAIN_PREFIXES=/opt/demo" {
+			sawPrefix = true
+		}
+		if entry == "RS_PKG_CONFIG_PATH=/opt/demo/custom-pkgconfig" {
+			sawPkg = true
+		}
+	}
+	if !sawPrefix || !sawPkg {
+		t.Fatalf("Environment = %v", req.Environment)
+	}
+}
+
+func TestInstallerRequestFromEnvironmentAutoDetectsToolchainWhenUnset(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	var stderr bytes.Buffer
+	req, err := installerRequestFromEnvironment(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		Interpreter: "/tmp/Rscript",
+		LibraryPath: t.TempDir(),
+		Repo:        "https://cloud.r-project.org",
+		Runtime: RuntimeMetadata{
+			Interpreter: "/tmp/Rscript",
+			RVersion:    "4.4.3",
+		},
+	}, io.Discard, &stderr)
+	if err != nil {
+		t.Fatalf("installerRequestFromEnvironment() error = %v", err)
+	}
+	foundPrefix := false
+	for _, entry := range req.Environment {
+		if entry == "RS_TOOLCHAIN_PREFIXES="+homebrewPrefix {
+			foundPrefix = true
+			break
+		}
+	}
+	if !foundPrefix {
+		t.Fatalf("Environment = %v, want auto-detected homebrew prefix", req.Environment)
+	}
+	if !strings.Contains(stderr.String(), "[rs] auto-detected rootless toolchain preset: homebrew") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestResolveRShellPathPrefersWindowsRterm(t *testing.T) {
+	dir := t.TempDir()
+	rscript := filepath.Join(dir, "Rscript.exe")
+	rterm := filepath.Join(dir, "Rterm.exe")
+	rexe := filepath.Join(dir, "R.exe")
+	for _, path := range []string{rscript, rterm, rexe} {
+		if err := os.WriteFile(path, []byte("binary"), 0o755); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", path, err)
+		}
+	}
+
+	got, err := resolveRShellPath(rscript)
+	if err != nil {
+		t.Fatalf("resolveRShellPath() error = %v", err)
+	}
+	if got != rterm {
+		t.Fatalf("resolveRShellPath() = %q, want %q", got, rterm)
+	}
+}
+
 func TestResolveRunnableRscriptPathDoesNotAutoInstallExplicitPath(t *testing.T) {
 	oldEnsure := ensureManagedRscript
 	oldResolve := resolveSelectedRscript
@@ -360,19 +565,22 @@ func TestResolveRunnableRscriptPathSuggestsExplicitAutoInstallWhenDisabled(t *te
 	oldEnsure := ensureManagedRscript
 	oldResolve := resolveSelectedRscript
 	oldAutoInstall := autoInstallR
-	oldAdvice := rManagerBootstrapAdvice
+	oldAdvice := rManagerBootstrapAdviceFor
 	t.Cleanup(func() {
 		ensureManagedRscript = oldEnsure
 		resolveSelectedRscript = oldResolve
 		autoInstallR = oldAutoInstall
-		rManagerBootstrapAdvice = oldAdvice
+		rManagerBootstrapAdviceFor = oldAdvice
 	})
 
 	resolveSelectedRscript = func(override, configValue string) (string, error) {
 		return "", errors.New("Rscript is not available on PATH: executable file not found")
 	}
 	autoInstallR = func() bool { return false }
-	rManagerBootstrapAdvice = func() rmanager.RBootstrapAdvice {
+	rManagerBootstrapAdviceFor = func(spec string) rmanager.RBootstrapAdvice {
+		if spec != "Rscript" {
+			t.Fatalf("spec = %q, want Rscript", spec)
+		}
 		return rmanager.RBootstrapAdvice{
 			ManualMessage: "install a managed R version with rs",
 			ManualCommand: "rs r install 4.4",
@@ -393,6 +601,25 @@ func TestResolveRunnableRscriptPathSuggestsExplicitAutoInstallWhenDisabled(t *te
 	}
 	if !strings.Contains(err.Error(), "explicit auto-install: set RS_AUTO_INSTALL_R=1 and retry") {
 		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
+	}
+}
+
+func TestResolveConfiguredInterpreterPathPrefersCurrentManagedInstallWhenUnset(t *testing.T) {
+	oldCurrent := resolveCurrentManagedRscript
+	t.Cleanup(func() {
+		resolveCurrentManagedRscript = oldCurrent
+	})
+
+	resolveCurrentManagedRscript = func() (string, error) {
+		return "/tmp/managed/current/Rscript", nil
+	}
+
+	got, err := resolveConfiguredInterpreterPath("", "")
+	if err != nil {
+		t.Fatalf("resolveConfiguredInterpreterPath() error = %v", err)
+	}
+	if got != "/tmp/managed/current/Rscript" {
+		t.Fatalf("resolveConfiguredInterpreterPath() = %q", got)
 	}
 }
 
@@ -1759,6 +1986,12 @@ func TestListFailsOnConfiguredRVersionMismatch(t *testing.T) {
 }
 
 func TestDoctorPrintsAppliedAdjustments(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error { return nil }
+
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
 	rscriptPath := writeFakeRscript(t, dir)
@@ -1783,6 +2016,12 @@ func TestDoctorPrintsAppliedAdjustments(t *testing.T) {
 	}
 
 	out := stdout.String()
+	if !strings.Contains(out, "[info] toolchain prefixes: <none>") {
+		t.Fatalf("Doctor() output missing toolchain prefixes:\n%s", out)
+	}
+	if !strings.Contains(out, "[info] pkg-config path: <none>") {
+		t.Fatalf("Doctor() output missing pkg-config path:\n%s", out)
+	}
 	if !strings.Contains(out, "[info] included packages: CRAN=cli | Bioconductor=Biostrings") {
 		t.Fatalf("Doctor() output missing included packages:\n%s", out)
 	}
@@ -1823,7 +2062,13 @@ func TestDoctorPrintsSystemHints(t *testing.T) {
 	if !strings.Contains(out, "[next] materialize the managed library for this script: rs run "+scriptPath) {
 		t.Fatalf("Doctor() output missing install next step:\n%s", out)
 	}
-	if !strings.Contains(out, "[summary] status=warning | errors=0 | warnings=2 | hints=2 | next=4 | blocking_next=0") {
+	if !strings.Contains(out, "[next] detect common rootless toolchain layouts on this machine before choosing prefixes to wire into rs: rs toolchain detect") {
+		t.Fatalf("Doctor() output missing toolchain detect next step:\n%s", out)
+	}
+	if !strings.Contains(out, "[next] re-run the toolchain-only doctor after updating toolchain_prefixes/pkg_config_path or exporting RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH: rs doctor --toolchain-only "+scriptPath) {
+		t.Fatalf("Doctor() output missing toolchain-only validation next step:\n%s", out)
+	}
+	if !strings.Contains(out, "[summary] status=warning | errors=0 | warnings=2 | hints=2 | next=6 | blocking_next=0") {
 		t.Fatalf("Doctor() output missing summary line:\n%s", out)
 	}
 }
@@ -1923,6 +2168,12 @@ func TestDoctorQuietHidesInfoLines(t *testing.T) {
 }
 
 func TestDoctorJSONOutput(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error { return nil }
+
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "report.R")
 	rscriptPath := writeFakeRscript(t, dir)
@@ -1965,6 +2216,24 @@ func TestDoctorJSONOutput(t *testing.T) {
 	}
 	if report.Status != "warning" {
 		t.Fatalf("report.Status = %q, want warning", report.Status)
+	}
+	if report.ToolchainPrefixes == nil || len(report.ToolchainPrefixes) != 0 {
+		t.Fatalf("report.ToolchainPrefixes = %v, want empty slice", report.ToolchainPrefixes)
+	}
+	if report.PkgConfigPath == nil || len(report.PkgConfigPath) != 0 {
+		t.Fatalf("report.PkgConfigPath = %v, want empty slice", report.PkgConfigPath)
+	}
+	if report.ToolchainPath == nil || len(report.ToolchainPath) != 0 {
+		t.Fatalf("report.ToolchainPath = %v, want empty slice", report.ToolchainPath)
+	}
+	if report.ToolchainCPPFLAGS == nil || len(report.ToolchainCPPFLAGS) != 0 {
+		t.Fatalf("report.ToolchainCPPFLAGS = %v, want empty slice", report.ToolchainCPPFLAGS)
+	}
+	if report.ToolchainLDFLAGS == nil || len(report.ToolchainLDFLAGS) != 0 {
+		t.Fatalf("report.ToolchainLDFLAGS = %v, want empty slice", report.ToolchainLDFLAGS)
+	}
+	if report.ToolchainPkgPath == nil || len(report.ToolchainPkgPath) != 0 {
+		t.Fatalf("report.ToolchainPkgPath = %v, want empty slice", report.ToolchainPkgPath)
 	}
 	if report.Summary.WarningCount != len(report.Warnings) || report.Summary.ErrorCount != 0 {
 		t.Fatalf("report.Summary = %#v, want warning summary", report.Summary)
@@ -2014,6 +2283,536 @@ func TestDoctorJSONOutput(t *testing.T) {
 		if !slices.Contains(kinds, want) {
 			t.Fatalf("report.WarningDetails missing kind %q in %v", want, report.WarningDetails)
 		}
+	}
+}
+
+func TestDoctorJSONOutputIncludesToolchainConfiguration(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error { return nil }
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	configPath := filepath.Join(dir, "rs.toml")
+	toolchainDir := filepath.Join(dir, ".toolchain")
+	externalPrefix := filepath.Join(dir, "external-prefix")
+	pkgConfigDir := filepath.Join(dir, "pkgconfig")
+	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	for _, path := range []string{toolchainDir, externalPrefix, pkgConfigDir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	config := "toolchain_prefixes = [\".toolchain\", \"external-prefix\"]\npkg_config_path = [\"pkgconfig\"]\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if !reflect.DeepEqual(report.ToolchainPrefixes, []string{toolchainDir, externalPrefix}) {
+		t.Fatalf("report.ToolchainPrefixes = %v", report.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(report.PkgConfigPath, []string{filepath.Join(dir, "pkgconfig")}) {
+		t.Fatalf("report.PkgConfigPath = %v", report.PkgConfigPath)
+	}
+	if !reflect.DeepEqual(report.ToolchainPath, []string{filepath.Join(dir, ".toolchain", "bin"), filepath.Join(dir, "external-prefix", "bin")}) {
+		t.Fatalf("report.ToolchainPath = %v", report.ToolchainPath)
+	}
+	if !reflect.DeepEqual(report.ToolchainCPPFLAGS, []string{"-I" + filepath.Join(dir, ".toolchain", "include"), "-I" + filepath.Join(dir, "external-prefix", "include")}) {
+		t.Fatalf("report.ToolchainCPPFLAGS = %v", report.ToolchainCPPFLAGS)
+	}
+	if !reflect.DeepEqual(report.ToolchainLDFLAGS, []string{"-L" + filepath.Join(dir, ".toolchain", "lib"), "-L" + filepath.Join(dir, "external-prefix", "lib")}) {
+		t.Fatalf("report.ToolchainLDFLAGS = %v", report.ToolchainLDFLAGS)
+	}
+	if !reflect.DeepEqual(report.ToolchainPkgPath, []string{
+		filepath.Join(dir, ".toolchain", "lib", "pkgconfig"),
+		filepath.Join(dir, ".toolchain", "share", "pkgconfig"),
+		filepath.Join(dir, "external-prefix", "lib", "pkgconfig"),
+		filepath.Join(dir, "external-prefix", "share", "pkgconfig"),
+		filepath.Join(dir, "pkgconfig"),
+	}) {
+		t.Fatalf("report.ToolchainPkgPath = %v", report.ToolchainPkgPath)
+	}
+}
+
+func TestDoctorToolchainValidationReportsBrokenConfiguredPaths(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error { return nil }
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	configPath := filepath.Join(dir, "rs.toml")
+	filePath := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("demo"), 0o644); err != nil {
+		t.Fatalf("WriteFile(filePath) error = %v", err)
+	}
+	config := "toolchain_prefixes = [\"missing-prefix\", \"not-a-dir\"]\npkg_config_path = [\"missing-pkgconfig\"]\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatalf("Doctor() error = nil, want toolchain config failure")
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if !slices.Contains(report.Errors, "toolchain prefix does not exist: "+filepath.Join(dir, "missing-prefix")) {
+		t.Fatalf("report.Errors = %v", report.Errors)
+	}
+	if !slices.Contains(report.Errors, "toolchain prefix is not a directory: "+filePath) {
+		t.Fatalf("report.Errors = %v", report.Errors)
+	}
+	if !slices.Contains(report.Errors, "pkg-config path does not exist: "+filepath.Join(dir, "missing-pkgconfig")) {
+		t.Fatalf("report.Errors = %v", report.Errors)
+	}
+	foundPrefix := false
+	foundPkgPath := false
+	for _, detail := range report.ErrorDetails {
+		if detail.Kind == "missing_toolchain_prefix" && detail.Path == filepath.Join(dir, "missing-prefix") {
+			foundPrefix = true
+		}
+		if detail.Kind == "missing_pkg_config_path" && detail.Path == filepath.Join(dir, "missing-pkgconfig") {
+			foundPkgPath = true
+		}
+	}
+	if !foundPrefix || !foundPkgPath {
+		t.Fatalf("report.ErrorDetails = %v", report.ErrorDetails)
+	}
+	foundNextStep := false
+	foundDetect := false
+	foundValidate := false
+	foundSetup := false
+	foundInit := false
+	for _, step := range report.NextSteps {
+		if step.Kind == "fix_toolchain_config" && step.Blocking {
+			foundNextStep = true
+		}
+		if step.Kind == "detect_toolchain" && step.Command == "rs toolchain detect" {
+			foundDetect = true
+		}
+		if step.Kind == "validate_toolchain_only" && step.Command == "rs doctor --toolchain-only "+scriptPath {
+			foundValidate = true
+		}
+		if step.Kind == "setup_detected_toolchain" && step.Blocking && strings.Contains(step.Command, filepath.Join(homebrewPrefix, "bin", "brew")) {
+			if step.Preset != "homebrew" {
+				t.Fatalf("setup_detected_toolchain preset = %q, want homebrew (%#v)", step.Preset, step)
+			}
+			if !strings.Contains(step.Note, "install or reuse Homebrew under") {
+				t.Fatalf("setup_detected_toolchain note = %q, want setup note (%#v)", step.Note, step)
+			}
+			foundSetup = true
+		}
+		if step.Kind == "init_detected_toolchain" && step.Blocking && step.Command == "rs init --toolchain-preset homebrew" {
+			if step.Preset != "homebrew" {
+				t.Fatalf("init_detected_toolchain preset = %q, want homebrew (%#v)", step.Preset, step)
+			}
+			if !strings.Contains(step.Note, "detected recommended preset on this machine: homebrew") {
+				t.Fatalf("init_detected_toolchain note = %q, want preset note (%#v)", step.Note, step)
+			}
+			foundInit = true
+		}
+	}
+	if !foundNextStep || !foundDetect || !foundValidate || !foundSetup || !foundInit {
+		t.Fatalf("report.NextSteps = %v", report.NextSteps)
+	}
+}
+
+func TestDoctorWarnsWhenPkgConfigIsMissingForConfiguredToolchain(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error { return nil }
+
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	emptyBin := filepath.Join(dir, "empty-bin")
+	prefix := filepath.Join(dir, ".toolchain")
+	pkgConfigDir := filepath.Join(dir, "pkgconfig")
+	if err := os.MkdirAll(emptyBin, 0o755); err != nil {
+		t.Fatalf("MkdirAll(emptyBin) error = %v", err)
+	}
+	if err := os.MkdirAll(prefix, 0o755); err != nil {
+		t.Fatalf("MkdirAll(prefix) error = %v", err)
+	}
+	if err := os.MkdirAll(pkgConfigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(pkgConfigDir) error = %v", err)
+	}
+	t.Setenv("PATH", emptyBin)
+
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	configPath := filepath.Join(dir, "rs.toml")
+	if err := os.WriteFile(scriptPath, []byte("jsonlite::fromJSON('{}')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+	config := "toolchain_prefixes = [\".toolchain\"]\npkg_config_path = [\"pkgconfig\"]\n"
+	if err := os.WriteFile(configPath, []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if !slices.Contains(report.Warnings, "pkg-config is not available on PATH; configured pkg_config_path entries may be ignored until pkg-config is installed or exposed via toolchain_prefixes") {
+		t.Fatalf("report.Warnings = %v", report.Warnings)
+	}
+	foundWarning := false
+	for _, detail := range report.WarningDetails {
+		if detail.Kind == "missing_pkg_config_binary" && detail.Category == "setup" {
+			foundWarning = true
+		}
+	}
+	if !foundWarning {
+		t.Fatalf("report.WarningDetails = %v", report.WarningDetails)
+	}
+	foundNextStep := false
+	foundDetect := false
+	foundSetup := false
+	for _, step := range report.NextSteps {
+		if step.Kind == "install_pkg_config" && !step.Blocking {
+			foundNextStep = true
+		}
+		if step.Kind == "detect_toolchain" && step.Command == "rs toolchain detect" {
+			foundDetect = true
+		}
+		if step.Kind == "setup_detected_toolchain" && !step.Blocking && strings.Contains(step.Command, filepath.Join(homebrewPrefix, "bin", "brew")) {
+			if step.Preset != "homebrew" {
+				t.Fatalf("setup_detected_toolchain preset = %q, want homebrew (%#v)", step.Preset, step)
+			}
+			if !strings.Contains(step.Note, "install or reuse Homebrew under") {
+				t.Fatalf("setup_detected_toolchain note = %q, want setup note (%#v)", step.Note, step)
+			}
+			foundSetup = true
+		}
+	}
+	if !foundNextStep || !foundDetect || !foundSetup {
+		t.Fatalf("report.NextSteps = %v", report.NextSteps)
+	}
+}
+
+func TestDoctorToolchainOnlyUsesProjectConfigWithoutScript(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, ".toolchain")
+	binDir := filepath.Join(prefix, "bin")
+	pkgConfigDir := filepath.Join(dir, "pkgconfig")
+	for _, path := range []string{binDir, pkgConfigDir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	name := "pkg-config"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(binDir, name), []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(pkg-config) error = %v", err)
+	}
+	config := "toolchain_prefixes = [\".toolchain\"]\npkg_config_path = [\"pkgconfig\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+	t.Setenv("PATH", filepath.Join(prefix, "bin"))
+
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ProjectDir:    dir,
+		ToolchainOnly: true,
+		JSON:          true,
+		Stdout:        &stdout,
+		Stderr:        &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if report.ProjectConfig != filepath.Join(dir, "rs.toml") {
+		t.Fatalf("report.ProjectConfig = %q", report.ProjectConfig)
+	}
+	if !reflect.DeepEqual(report.ToolchainPrefixes, []string{prefix}) {
+		t.Fatalf("report.ToolchainPrefixes = %v", report.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(report.PkgConfigPath, []string{pkgConfigDir}) {
+		t.Fatalf("report.PkgConfigPath = %v", report.PkgConfigPath)
+	}
+	if !reflect.DeepEqual(report.ToolchainPath, []string{filepath.Join(prefix, "bin")}) {
+		t.Fatalf("report.ToolchainPath = %v", report.ToolchainPath)
+	}
+	if !reflect.DeepEqual(report.ToolchainCPPFLAGS, []string{"-I" + filepath.Join(prefix, "include")}) {
+		t.Fatalf("report.ToolchainCPPFLAGS = %v", report.ToolchainCPPFLAGS)
+	}
+	if !reflect.DeepEqual(report.ToolchainLDFLAGS, []string{"-L" + filepath.Join(prefix, "lib")}) {
+		t.Fatalf("report.ToolchainLDFLAGS = %v", report.ToolchainLDFLAGS)
+	}
+	if !reflect.DeepEqual(report.ToolchainPkgPath, []string{
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+		pkgConfigDir,
+	}) {
+		t.Fatalf("report.ToolchainPkgPath = %v", report.ToolchainPkgPath)
+	}
+	if len(report.Warnings) != 0 || len(report.Errors) != 0 {
+		t.Fatalf("report.Warnings/report.Errors = %v / %v", report.Warnings, report.Errors)
+	}
+	if len(report.LockWarnings) != 0 || len(report.CacheWarnings) != 0 {
+		t.Fatalf("report lock/cache warnings = %v / %v", report.LockWarnings, report.CacheWarnings)
+	}
+}
+
+func TestDoctorToolchainOnlyFallsBackToEnvironmentVariables(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "env-prefix")
+	binDir := filepath.Join(prefix, "bin")
+	pkgConfigDir := filepath.Join(dir, "env-pkgconfig")
+	for _, path := range []string{binDir, pkgConfigDir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	name := "pkg-config"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(binDir, name), []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(pkg-config) error = %v", err)
+	}
+	t.Setenv("RS_TOOLCHAIN_PREFIXES", prefix)
+	t.Setenv("RS_PKG_CONFIG_PATH", pkgConfigDir)
+	t.Setenv("PATH", binDir)
+
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ProjectDir:    dir,
+		ToolchainOnly: true,
+		JSON:          true,
+		Stdout:        &stdout,
+		Stderr:        &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if !reflect.DeepEqual(report.ToolchainPrefixes, []string{prefix}) {
+		t.Fatalf("report.ToolchainPrefixes = %v", report.ToolchainPrefixes)
+	}
+	if !reflect.DeepEqual(report.PkgConfigPath, []string{pkgConfigDir}) {
+		t.Fatalf("report.PkgConfigPath = %v", report.PkgConfigPath)
+	}
+	if !reflect.DeepEqual(report.ToolchainPath, []string{filepath.Join(prefix, "bin")}) {
+		t.Fatalf("report.ToolchainPath = %v", report.ToolchainPath)
+	}
+	if report.Status != "ok" {
+		t.Fatalf("report.Status = %q, want ok", report.Status)
+	}
+}
+
+func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T) {
+	dir := t.TempDir()
+	homeDir := filepath.Join(dir, "home")
+	binDir := filepath.Join(dir, "bin")
+	for _, path := range []string{homeDir, binDir} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	if _, err := os.Stat(writeFakeMicromamba(t, binDir)); err != nil {
+		t.Fatalf("stat(fake micromamba) error = %v", err)
+	}
+	systemPath := os.Getenv("PATH")
+	if strings.TrimSpace(systemPath) == "" {
+		systemPath = "/bin:/usr/bin"
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+systemPath)
+	t.Setenv("RS_TOOLCHAIN_PREFIXES", "")
+	t.Setenv("RS_PKG_CONFIG_PATH", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ProjectDir:          dir,
+		ToolchainOnly:       true,
+		BootstrapToolchain:  true,
+		JSON:                true,
+		Stdout:              &stdout,
+		Stderr:              &stderr,
+	})
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	expectedPrefix := filepath.Join(homeDir, "micromamba", "envs", "rs-sysdeps")
+	if !reflect.DeepEqual(report.ToolchainPrefixes, []string{expectedPrefix}) {
+		t.Fatalf("report.ToolchainPrefixes = %v, want [%s]", report.ToolchainPrefixes, expectedPrefix)
+	}
+	if !reflect.DeepEqual(report.PkgConfigPath, []string{
+		filepath.Join(expectedPrefix, "lib", "pkgconfig"),
+		filepath.Join(expectedPrefix, "share", "pkgconfig"),
+	}) {
+		t.Fatalf("report.PkgConfigPath = %v", report.PkgConfigPath)
+	}
+	if report.Status != "ok" {
+		t.Fatalf("report.Status = %q, want ok", report.Status)
+	}
+	if !strings.Contains(stderr.String(), "[rs] bootstrapping rootless toolchain preset: micromamba") {
+		t.Fatalf("Doctor() stderr missing bootstrap message:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(expectedPrefix, "bin", "pkg-config")); err != nil {
+		t.Fatalf("bootstrapped pkg-config missing: %v", err)
+	}
+}
+
+func TestDoctorToolchainOnlyBootstrapToolchainDoesNotOverrideExplicitConfig(t *testing.T) {
+	dir := t.TempDir()
+	homeDir := filepath.Join(dir, "home")
+	binDir := filepath.Join(dir, "bin")
+	configuredPrefix := filepath.Join(dir, ".toolchain")
+	configuredPkgConfig := filepath.Join(dir, "pkgconfig")
+	for _, path := range []string{
+		homeDir,
+		binDir,
+		filepath.Join(configuredPrefix, "bin"),
+		configuredPkgConfig,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	name := "pkg-config"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(configuredPrefix, "bin", name), []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(pkg-config) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("toolchain_prefixes = [\".toolchain\"]\npkg_config_path = [\"pkgconfig\"]\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(config) error = %v", err)
+	}
+	if _, err := os.Stat(writeFakeMicromamba(t, binDir)); err != nil {
+		t.Fatalf("stat(fake micromamba) error = %v", err)
+	}
+	systemPath := os.Getenv("PATH")
+	if strings.TrimSpace(systemPath) == "" {
+		systemPath = "/bin:/usr/bin"
+	}
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", filepath.Join(configuredPrefix, "bin")+string(os.PathListSeparator)+binDir+string(os.PathListSeparator)+systemPath)
+	t.Setenv("RS_TOOLCHAIN_PREFIXES", "")
+	t.Setenv("RS_PKG_CONFIG_PATH", "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ProjectDir:          dir,
+		ToolchainOnly:       true,
+		BootstrapToolchain:  true,
+		JSON:                true,
+		Stdout:              &stdout,
+		Stderr:              &stderr,
+	})
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if !reflect.DeepEqual(report.ToolchainPrefixes, []string{configuredPrefix}) {
+		t.Fatalf("report.ToolchainPrefixes = %v, want [%s]", report.ToolchainPrefixes, configuredPrefix)
+	}
+	if !reflect.DeepEqual(report.PkgConfigPath, []string{configuredPkgConfig}) {
+		t.Fatalf("report.PkgConfigPath = %v, want [%s]", report.PkgConfigPath, configuredPkgConfig)
+	}
+	if strings.Contains(stderr.String(), "bootstrapping rootless toolchain preset") {
+		t.Fatalf("Doctor() should not bootstrap when explicit config exists:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(homeDir, "micromamba", "envs", "rs-sysdeps")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unexpected bootstrapped micromamba prefix state: %v", err)
 	}
 }
 
@@ -2248,22 +3047,25 @@ func TestBuildDoctorNextStepsHealthyEnvironment(t *testing.T) {
 }
 
 func TestBuildDoctorNextStepsSuggestsNativeBootstrapWhenMissing(t *testing.T) {
-	oldRManagerAdvice := rManagerBootstrapAdvice
+	oldRManagerAdvice := rManagerBootstrapAdviceFor
 	t.Cleanup(func() {
-		rManagerBootstrapAdvice = oldRManagerAdvice
+		rManagerBootstrapAdviceFor = oldRManagerAdvice
 	})
 
-	rManagerBootstrapAdvice = func() rmanager.RBootstrapAdvice {
+	rManagerBootstrapAdviceFor = func(spec string) rmanager.RBootstrapAdvice {
+		if spec != "5.3.2" {
+			t.Fatalf("spec = %q, want 5.3.2", spec)
+		}
 		return rmanager.RBootstrapAdvice{
 			ManualMessage: "install a managed R version with rs",
-			ManualCommand: "rs r install 4.4",
+			ManualCommand: "rs r install 5.3.2",
 			AutoEnableEnv: "RS_AUTO_INSTALL_R",
 		}
 	}
 
 	steps := buildDoctorNextSteps(dependencyPlan{
 		ScriptPath: "/tmp/project/report.R",
-		RequestedR: "Rscript",
+		RequestedR: "5.3.2",
 	}, errors.New("selected Rscript is not available"), false, nil, nil, nil)
 
 	if len(steps) < 3 {
@@ -2272,7 +3074,7 @@ func TestBuildDoctorNextStepsSuggestsNativeBootstrapWhenMissing(t *testing.T) {
 	foundManual := false
 	foundAuto := false
 	for _, step := range steps {
-		if step.Kind == "install_r" && strings.Contains(step.Message, "rs r install 4.4") && step.Blocking {
+		if step.Kind == "install_r" && strings.Contains(step.Message, "rs r install 5.3.2") && step.Blocking {
 			foundManual = true
 		}
 		if step.Kind == "auto_install_r" && step.Command == "RS_AUTO_INSTALL_R=1 rs run /tmp/project/report.R" && step.Blocking {
@@ -2281,6 +3083,143 @@ func TestBuildDoctorNextStepsSuggestsNativeBootstrapWhenMissing(t *testing.T) {
 	}
 	if !foundManual || !foundAuto {
 		t.Fatalf("steps = %#v, want both manual and auto native-R guidance", steps)
+	}
+}
+
+func TestClassifyInterpreterKindRecognizesCondaAndManaged(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("RS_R_ROOT", root)
+
+	managed := filepath.Join(root, "versions", "4.5.3-linux-amd64", "bin", "Rscript")
+	if got := classifyInterpreterKind(managed); got != "managed" {
+		t.Fatalf("classifyInterpreterKind(managed) = %q", got)
+	}
+	conda := "/opt/miniconda3/envs/demo/bin/Rscript"
+	if got := classifyInterpreterKind(conda); got != "external-conda" {
+		t.Fatalf("classifyInterpreterKind(conda) = %q", got)
+	}
+	plain := "/usr/local/bin/Rscript"
+	if got := classifyInterpreterKind(plain); got != "external-standard" {
+		t.Fatalf("classifyInterpreterKind(plain) = %q", got)
+	}
+}
+
+func TestBuildDoctorNextStepsSuggestsManagedRForExternalConda(t *testing.T) {
+	steps := buildDoctorNextSteps(dependencyPlan{
+		ScriptPath: "/tmp/project/report.R",
+		Runtime: RuntimeMetadata{
+			RVersion:        "4.4.3",
+			InterpreterKind: "external-conda",
+		},
+	}, nil, false, nil, nil, nil)
+
+	found := false
+	for _, step := range steps {
+		if step.Kind == "switch_to_managed_r" && strings.Contains(step.Command, "rs r install 4.4.3 && rs r use 4.4.3") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("steps = %#v, want managed-R follow-up", steps)
+	}
+}
+
+func TestBuildDoctorNextStepsSuggestsToolchainFollowupsForSystemHintsWithoutConfig(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	steps := buildDoctorNextSteps(dependencyPlan{
+		ScriptPath: "/tmp/project/report.R",
+	}, nil, false, nil, nil, []SystemHintDetail{
+		{
+			Category: "network",
+			Packages: []string{"curl"},
+			Message:  "commonly need libcurl and OpenSSL development headers",
+		},
+	})
+
+	foundDetect := false
+	foundValidate := false
+	foundSetup := false
+	foundInit := false
+	for _, step := range steps {
+		if step.Kind == "detect_toolchain" && step.Command == "rs toolchain detect" {
+			foundDetect = true
+		}
+		if step.Kind == "validate_toolchain_only" && step.Command == "rs doctor --toolchain-only /tmp/project/report.R" {
+			foundValidate = true
+		}
+		if step.Kind == "setup_detected_toolchain" && !step.Blocking && strings.Contains(step.Command, filepath.Join(homebrewPrefix, "bin", "brew")) {
+			if step.Preset != "homebrew" {
+				t.Fatalf("setup_detected_toolchain preset = %q, want homebrew (%#v)", step.Preset, step)
+			}
+			if !strings.Contains(step.Note, "install or reuse Homebrew under") {
+				t.Fatalf("setup_detected_toolchain note = %q, want setup note (%#v)", step.Note, step)
+			}
+			foundSetup = true
+		}
+		if step.Kind == "init_detected_toolchain" && !step.Blocking && step.Command == "rs init --toolchain-preset homebrew" {
+			if step.Preset != "homebrew" {
+				t.Fatalf("init_detected_toolchain preset = %q, want homebrew (%#v)", step.Preset, step)
+			}
+			if !strings.Contains(step.Note, "detected recommended preset on this machine: homebrew") {
+				t.Fatalf("init_detected_toolchain note = %q, want preset note (%#v)", step.Note, step)
+			}
+			foundInit = true
+		}
+	}
+	if !foundDetect || !foundValidate || !foundSetup || !foundInit {
+		t.Fatalf("steps = %#v, want toolchain discovery follow-ups", steps)
+	}
+}
+
+func TestWrapExternalInterpreterInstallErrorAddsCondaHint(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	homebrewPrefix := filepath.Join(dir, "homebrew")
+	for _, path := range []string{
+		homebrewPrefix,
+		filepath.Join(homebrewPrefix, "lib", "pkgconfig"),
+		filepath.Join(homebrewPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	err := wrapExternalInterpreterInstallError(
+		errors.New("install stringi from cran: package stringi requires Linux source build tools, but required compilers are missing: gcc, g++"),
+		RuntimeMetadata{
+			Interpreter:     "/opt/miniconda3/bin/Rscript",
+			RVersion:        "4.4.3",
+			InterpreterKind: "external-conda",
+		},
+	)
+	if !strings.Contains(err.Error(), "external Conda-style R") {
+		t.Fatalf("wrapExternalInterpreterInstallError() = %v", err)
+	}
+	if !strings.Contains(err.Error(), "rs toolchain detect") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing rootless toolchain hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "rs doctor --toolchain-only") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing toolchain-only hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "Detected recommended preset on this machine: homebrew") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing detected preset hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), filepath.Join(homebrewPrefix, "bin", "brew")) {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing setup command: %v", err)
 	}
 }
 
@@ -2297,6 +3236,7 @@ func TestDoctorStatusOKWhenClean(t *testing.T) {
 		nil,
 		nil,
 		buildDoctorNextSteps(dependencyPlan{ScriptPath: "/tmp/project/report.R"}, nil, false, nil, nil, nil),
+		toolchainenv.Preview{},
 	)
 	if report.Status != "ok" {
 		t.Fatalf("report.Status = %q, want ok", report.Status)

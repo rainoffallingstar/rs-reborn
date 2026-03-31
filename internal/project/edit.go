@@ -12,13 +12,15 @@ import (
 const DefaultRepo = "https://cloud.r-project.org"
 
 type InitOptions struct {
-	Repo         string
-	CacheDir     string
-	Lockfile     string
-	Rscript      string
-	RVersion     string
-	Packages     []string
-	BiocPackages []string
+	Repo              string
+	CacheDir          string
+	Lockfile          string
+	Rscript           string
+	RVersion          string
+	ToolchainPrefixes []string
+	PkgConfigPath     []string
+	Packages          []string
+	BiocPackages      []string
 }
 
 type AddPackageOptions struct {
@@ -37,13 +39,15 @@ type RemovePackageOptions struct {
 func NewDefaultConfig(opts InitOptions) Config {
 	return Config{
 		Defaults: ScriptConfig{
-			Repo:         firstNonEmpty(opts.Repo, DefaultRepo),
-			CacheDir:     firstNonEmpty(opts.CacheDir, ".rs-cache"),
-			Lockfile:     firstNonEmpty(opts.Lockfile, "rs.lock.json"),
-			Rscript:      opts.Rscript,
-			RVersion:     opts.RVersion,
-			Packages:     mergeStrings(nil, opts.Packages),
-			BiocPackages: mergeStrings(nil, opts.BiocPackages),
+			Repo:              firstNonEmpty(opts.Repo, DefaultRepo),
+			CacheDir:          firstNonEmpty(opts.CacheDir, ".rs-cache"),
+			Lockfile:          firstNonEmpty(opts.Lockfile, "rs.lock.json"),
+			Rscript:           opts.Rscript,
+			RVersion:          opts.RVersion,
+			ToolchainPrefixes: mergeStrings(nil, opts.ToolchainPrefixes),
+			PkgConfigPath:     mergeStrings(nil, opts.PkgConfigPath),
+			Packages:          mergeStrings(nil, opts.Packages),
+			BiocPackages:      mergeStrings(nil, opts.BiocPackages),
 		},
 		Scripts: map[string]ScriptConfig{},
 		Sources: map[string]SourceSpec{},
@@ -55,11 +59,13 @@ func NewConfigFromScript(opts InitOptions, rootDir string, scriptPath string, wr
 		return NewDefaultConfig(opts), nil
 	}
 	return NewConfigFromScripts(InitOptions{
-		Repo:     opts.Repo,
-		CacheDir: opts.CacheDir,
-		Lockfile: opts.Lockfile,
-		Rscript:  opts.Rscript,
-		RVersion: opts.RVersion,
+		Repo:              opts.Repo,
+		CacheDir:          opts.CacheDir,
+		Lockfile:          opts.Lockfile,
+		Rscript:           opts.Rscript,
+		RVersion:          opts.RVersion,
+		ToolchainPrefixes: opts.ToolchainPrefixes,
+		PkgConfigPath:     opts.PkgConfigPath,
 	}, rootDir, map[string]ScriptConfig{
 		scriptPath: {
 			Packages:     mergeStrings(nil, opts.Packages),
@@ -70,13 +76,15 @@ func NewConfigFromScript(opts InitOptions, rootDir string, scriptPath string, wr
 
 func NewConfigFromScripts(opts InitOptions, rootDir string, scriptConfigs map[string]ScriptConfig, writeScriptBlock bool) (Config, error) {
 	cfg := NewDefaultConfig(InitOptions{
-		Repo:         opts.Repo,
-		CacheDir:     opts.CacheDir,
-		Lockfile:     opts.Lockfile,
-		Rscript:      opts.Rscript,
-		RVersion:     opts.RVersion,
-		Packages:     opts.Packages,
-		BiocPackages: opts.BiocPackages,
+		Repo:              opts.Repo,
+		CacheDir:          opts.CacheDir,
+		Lockfile:          opts.Lockfile,
+		Rscript:           opts.Rscript,
+		RVersion:          opts.RVersion,
+		ToolchainPrefixes: opts.ToolchainPrefixes,
+		PkgConfigPath:     opts.PkgConfigPath,
+		Packages:          opts.Packages,
+		BiocPackages:      opts.BiocPackages,
 	})
 
 	if len(scriptConfigs) == 0 {
@@ -847,6 +855,8 @@ func scriptConfigEmpty(cfg ScriptConfig) bool {
 		cfg.Lockfile == "" &&
 		cfg.Rscript == "" &&
 		cfg.RVersion == "" &&
+		len(cfg.ToolchainPrefixes) == 0 &&
+		len(cfg.PkgConfigPath) == 0 &&
 		len(cfg.Packages) == 0 &&
 		len(cfg.BiocPackages) == 0 &&
 		len(cfg.Sources) == 0
@@ -887,6 +897,16 @@ func appendScriptConfigLinesWithOrder(lines *[]string, cfg ScriptConfig, order [
 				*lines = append(*lines, "r_version = "+quoteString(cfg.RVersion)+trailingComment)
 				seen[key] = struct{}{}
 			}
+		case "toolchain_prefixes":
+			if len(cfg.ToolchainPrefixes) > 0 {
+				*lines = append(*lines, "toolchain_prefixes = "+renderStringArray(cfg.ToolchainPrefixes)+trailingComment)
+				seen[key] = struct{}{}
+			}
+		case "pkg_config_path":
+			if len(cfg.PkgConfigPath) > 0 {
+				*lines = append(*lines, "pkg_config_path = "+renderStringArray(cfg.PkgConfigPath)+trailingComment)
+				seen[key] = struct{}{}
+			}
 		case "packages":
 			if len(cfg.Packages) > 0 {
 				*lines = append(*lines, "packages = "+renderStringArray(cfg.Packages)+trailingComment)
@@ -903,7 +923,7 @@ func appendScriptConfigLinesWithOrder(lines *[]string, cfg ScriptConfig, order [
 	for _, key := range order {
 		appendKnown(key)
 	}
-	for _, key := range []string{"repo", "cache_dir", "lockfile", "rscript", "r_version", "packages", "bioc_packages"} {
+	for _, key := range []string{"repo", "cache_dir", "lockfile", "rscript", "r_version", "toolchain_prefixes", "pkg_config_path", "packages", "bioc_packages"} {
 		if _, ok := seen[key]; ok {
 			continue
 		}
