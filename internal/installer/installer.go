@@ -529,18 +529,7 @@ func findReusablePackagesInLibrary(libraryPath string, remaining map[string]plan
 	if len(candidates) == 0 {
 		return map[string]installedPackage{}, nil
 	}
-
-	matches := make(map[string]installedPackage, len(candidates))
-	for _, name := range candidates {
-		pkg, ok, err := loadInstalledPackageFromLibrary(libraryPath, name)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			matches[name] = pkg
-		}
-	}
-	return matches, nil
+	return loadInstalledPackagesByNameFromLibrary(libraryPath, candidates)
 }
 
 func (i *nativeInstaller) syncPlannedPackageToStore(name string) error {
@@ -2548,6 +2537,33 @@ func loadInstalledPackageFromLibrary(libraryPath, pkg string) (installedPackage,
 		return installedPackage{}, false, err
 	}
 	return installedPackageFromDescription(pkg, data, meta), true, nil
+}
+
+func loadInstalledPackagesByNameFromLibrary(libraryPath string, names []string) (map[string]installedPackage, error) {
+	if strings.TrimSpace(libraryPath) == "" || len(names) == 0 {
+		return map[string]installedPackage{}, nil
+	}
+	metaByName, err := readInstalledSourceMetadata(filepath.Join(libraryPath, ".rs-source-meta"))
+	if err != nil {
+		return nil, err
+	}
+	installed := make(map[string]installedPackage, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		descPath := filepath.Join(libraryPath, name, "DESCRIPTION")
+		data, err := os.ReadFile(descPath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read installed DESCRIPTION for %s: %w", name, err)
+		}
+		installed[name] = installedPackageFromDescription(name, data, metaByName[name])
+	}
+	return installed, nil
 }
 
 func installedPackageFromDescription(name string, data []byte, meta installedPackage) installedPackage {
