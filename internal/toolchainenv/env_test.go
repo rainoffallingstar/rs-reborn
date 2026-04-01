@@ -39,12 +39,14 @@ func TestApplyPrependsPrefixesAndPkgConfigPaths(t *testing.T) {
 	existingPath := filepath.Join(string(filepath.Separator), "usr", "bin")
 	existingCPP := "-I" + filepath.Join(string(filepath.Separator), "existing", "include")
 	existingLD := "-L" + filepath.Join(string(filepath.Separator), "existing", "lib")
+	existingLibs := "-lz"
 	existingLibrary := filepath.Join(string(filepath.Separator), "existing", "runtime-lib")
 	existingPkg := filepath.Join(string(filepath.Separator), "existing", "pkgconfig")
 	base := []string{
 		"PATH=" + existingPath,
 		"CPPFLAGS=" + existingCPP,
 		"LDFLAGS=" + existingLD,
+		"LIBS=" + existingLibs,
 		"LIBRARY_PATH=" + existingLibrary,
 		"PKG_CONFIG_PATH=" + existingPkg,
 	}
@@ -67,6 +69,9 @@ func TestApplyPrependsPrefixesAndPkgConfigPaths(t *testing.T) {
 	if ld := envValue(env, "LDFLAGS"); !strings.Contains(ld, "-L"+filepath.Join(root, "lib")) {
 		t.Fatalf("LDFLAGS = %q", ld)
 	}
+	if libs := envValue(env, "LIBS"); libs != existingLibs {
+		t.Fatalf("LIBS = %q", libs)
+	}
 	if libraryPath := envValue(env, "LIBRARY_PATH"); !strings.HasPrefix(libraryPath, filepath.Join(root, "lib")+string(os.PathListSeparator)) {
 		t.Fatalf("LIBRARY_PATH = %q", libraryPath)
 	}
@@ -88,6 +93,46 @@ func TestApplyPrependsPrefixesAndPkgConfigPaths(t *testing.T) {
 	}
 	if got := envValue(env, PkgConfigEnv); got != customPkg {
 		t.Fatalf("%s = %q", PkgConfigEnv, got)
+	}
+}
+
+func TestApplyWithPlanAddsFixupLIBSWithoutDuplication(t *testing.T) {
+	env := ApplyWithPlan([]string{"LIBS=-lz"}, nil, nil, NativeFixupPlan{
+		LIBS: []string{"-liconv"},
+	})
+	if got := envValue(env, "LIBS"); got != "-liconv -lz" {
+		t.Fatalf("LIBS = %q, want %q", got, "-liconv -lz")
+	}
+
+	env = ApplyWithPlan([]string{"LIBS=-liconv -lz"}, nil, nil, NativeFixupPlan{
+		LIBS: []string{"-liconv"},
+	})
+	if got := envValue(env, "LIBS"); got != "-liconv -lz" {
+		t.Fatalf("LIBS = %q, want libiconv to be deduplicated", got)
+	}
+}
+
+func TestApplyWithPlanAddsLibrarySearchPathsFromLDFLAGS(t *testing.T) {
+	base := []string{"LDFLAGS=-L/existing/lib"}
+	env := ApplyWithPlan(base, nil, nil, NativeFixupPlan{
+		LDFLAGS: []string{"-L/tmp/xml-lib", "-Wl,-rpath,/tmp/xml-lib"},
+	})
+
+	if got := envValue(env, "LDFLAGS"); got != "-L/tmp/xml-lib -L/existing/lib -Wl,-rpath,/tmp/xml-lib" && got != "-L/tmp/xml-lib -Wl,-rpath,/tmp/xml-lib -L/existing/lib" {
+		t.Fatalf("LDFLAGS = %q", got)
+	}
+	if got := envValue(env, "LIBRARY_PATH"); !strings.HasPrefix(got, "/tmp/xml-lib") {
+		t.Fatalf("LIBRARY_PATH = %q", got)
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if got := envValue(env, "LD_LIBRARY_PATH"); !strings.HasPrefix(got, "/tmp/xml-lib") {
+			t.Fatalf("LD_LIBRARY_PATH = %q", got)
+		}
+	case "darwin":
+		if got := envValue(env, "DYLD_FALLBACK_LIBRARY_PATH"); !strings.HasPrefix(got, "/tmp/xml-lib") {
+			t.Fatalf("DYLD_FALLBACK_LIBRARY_PATH = %q", got)
+		}
 	}
 }
 
@@ -238,6 +283,7 @@ func TestRecommendedCandidateIncludesSetupGuidance(t *testing.T) {
 
 func TestResolvePresetAutoRejectsWhenNothingDetected(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("PATH", "")
 
 	_, _, err := ResolvePreset("auto", dir)
 	if err == nil {
@@ -327,7 +373,23 @@ func TestBuildPackagePlanAddsSystemPackagesForEnva(t *testing.T) {
 	}
 }
 
+func TestNativeCategoriesForPackagesMatchesSupportedNativePackages(t *testing.T) {
+	got := NativeCategoriesForPackages([]string{"haven", "xml2", "textshaping", "stringi", "haven", "unknown"})
+	want := []string{"icu", "xml", "fonts", "encoding"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("NativeCategoriesForPackages() = %#v, want %#v", got, want)
+	}
+}
+
 func TestBootstrapCandidateAutoPrefersEnvaBeforeMicromambaMambaAndConda(t *testing.T) {
+	oldOutput := detectOutput
+	t.Cleanup(func() {
+		detectOutput = oldOutput
+	})
+	detectOutput = func(name string, args []string, env []string) (string, error) {
+		return "", nil
+	}
+
 	dir := t.TempDir()
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -427,7 +489,7 @@ func TestBootstrapResolvesAdoptedEnvaPrefix(t *testing.T) {
 		detectOutput = oldOutput
 	})
 	detectRunCommand = func(command string, env []string, stdout, stderr io.Writer) error {
-		if !strings.Contains(command, "create --yaml") {
+		if !strings.Contains(command, `install --name "rs-sysdeps"`) {
 			t.Fatalf("command = %q", command)
 		}
 		return nil
@@ -435,7 +497,7 @@ func TestBootstrapResolvesAdoptedEnvaPrefix(t *testing.T) {
 
 	dir := t.TempDir()
 	binDir := filepath.Join(dir, "bin")
-	envaPath := writeToolExecutable(t, binDir, "enva")
+	writeToolExecutable(t, binDir, "enva")
 	actualPrefix := filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")
 	for _, path := range []string{
 		actualPrefix,
@@ -447,9 +509,6 @@ func TestBootstrapResolvesAdoptedEnvaPrefix(t *testing.T) {
 		}
 	}
 	detectOutput = func(name string, args []string, env []string) (string, error) {
-		if name != envaPath {
-			t.Fatalf("name = %q, want %q", name, envaPath)
-		}
 		if !reflect.DeepEqual(args, []string{"list"}) {
 			t.Fatalf("args = %v, want [list]", args)
 		}
@@ -629,6 +688,51 @@ func TestCandidateFromEnvironmentHeuristicallyMatchesAdoptedEnvaPrefix(t *testin
 	}
 	if !reflect.DeepEqual(candidate.ToolchainPrefixes, []string{actualPrefix}) {
 		t.Fatalf("candidate.ToolchainPrefixes = %v", candidate.ToolchainPrefixes)
+	}
+	if !strings.Contains(candidate.SuggestedSetupCommand, `install --name "rs-sysdeps"`) {
+		t.Fatalf("candidate.SuggestedSetupCommand = %q", candidate.SuggestedSetupCommand)
+	}
+}
+
+func TestBootstrapCandidateUsesEnvaInstallWhenEnvironmentAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(binDir) error = %v", err)
+	}
+	writeToolExecutable(t, binDir, "enva")
+
+	actualPrefix := filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")
+	for _, path := range []string{
+		actualPrefix,
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	oldOutput := detectOutput
+	t.Cleanup(func() {
+		detectOutput = oldOutput
+	})
+	detectOutput = func(name string, args []string, env []string) (string, error) {
+		return "Name | Owner | Prefixes\nrs-sysdeps | rattler | " + actualPrefix + "\n", nil
+	}
+
+	candidate, err := BootstrapCandidate("auto", dir, []string{"PATH=" + binDir})
+	if err != nil {
+		t.Fatalf("BootstrapCandidate() error = %v", err)
+	}
+	if candidate == nil || candidate.Preset != "enva" {
+		t.Fatalf("candidate = %#v, want enva", candidate)
+	}
+	if !strings.Contains(candidate.SuggestedSetupCommand, `install --name "rs-sysdeps"`) {
+		t.Fatalf("candidate.SuggestedSetupCommand = %q", candidate.SuggestedSetupCommand)
+	}
+	if strings.Contains(candidate.SuggestedSetupCommand, "create --yaml") {
+		t.Fatalf("candidate.SuggestedSetupCommand = %q, want incremental install command", candidate.SuggestedSetupCommand)
 	}
 }
 

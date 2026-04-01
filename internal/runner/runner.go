@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -152,11 +153,12 @@ type ListOptions struct {
 }
 
 type PruneOptions struct {
-	ScriptPath string
-	ProjectDir string
-	DryRun     bool
-	Stdout     io.Writer
-	Stderr     io.Writer
+	ScriptPath                string
+	ProjectDir                string
+	DryRun                    bool
+	PackageStoreRetentionDays int
+	Stdout                    io.Writer
+	Stderr                    io.Writer
 }
 
 type CacheDirOptions struct {
@@ -283,6 +285,14 @@ type ValidationMode string
 var nativeInstall = func(req installer.Request) error {
 	return installer.Install(req)
 }
+
+var (
+	nativeDiagLookPath       = exec.LookPath
+	nativeDiagCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		return exec.Command(name, args...).CombinedOutput()
+	}
+	sharedObjectPathPattern = regexp.MustCompile(`((?:/[^'" \t\r\n:]+)+\.(?:so(?:\.[^'" \t\r\n:]+)*|dylib|dll))`)
+)
 
 var nativeValidatePlan = func(req installer.Request) error {
 	return installer.Validate(req)
@@ -716,16 +726,21 @@ type ListSource struct {
 }
 
 type pruneSummary struct {
-	CacheRoot string
-	Kept      []string
-	Removed   []string
+	CacheRoot    string
+	Kept         []string
+	Removed      []string
+	KeptStore    []string
+	RemovedStore []string
 }
 
 type CacheListReport struct {
-	CacheRoot  string         `json:"cache_root"`
-	Libraries  []CacheLibrary `json:"libraries"`
-	Scope      string         `json:"scope,omitempty"`
-	ProjectDir string         `json:"project_dir,omitempty"`
+	CacheRoot            string            `json:"cache_root"`
+	Libraries            []CacheLibrary    `json:"libraries"`
+	PackageStore         []CacheStoreEntry `json:"package_store,omitempty"`
+	PackageStorePackages int               `json:"package_store_packages,omitempty"`
+	PackageStoreBytes    int64             `json:"package_store_bytes,omitempty"`
+	Scope                string            `json:"scope,omitempty"`
+	ProjectDir           string            `json:"project_dir,omitempty"`
 }
 
 type CacheLibrary struct {
@@ -733,6 +748,17 @@ type CacheLibrary struct {
 	Name   string `json:"name"`
 	Active bool   `json:"active"`
 }
+
+type CacheStoreEntry struct {
+	Path         string `json:"path"`
+	Name         string `json:"name"`
+	PackageCount int    `json:"package_count"`
+	SizeBytes    int64  `json:"size_bytes"`
+	LastUsedAt   string `json:"last_used_at,omitempty"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
+const defaultPackageStoreRetentionDays = 30
 
 type CheckReport struct {
 	Script                   string                 `json:"script"`
@@ -774,47 +800,48 @@ type InstalledIssueDetail struct {
 }
 
 type DoctorReport struct {
-	Script            string              `json:"script"`
-	ProjectConfig     string              `json:"project_config,omitempty"`
-	ScriptProfile     string              `json:"script_profile,omitempty"`
-	RscriptPath       string              `json:"rscript_path,omitempty"`
-	GitPath           string              `json:"git_path,omitempty"`
-	NeedsGit          bool                `json:"needs_git"`
-	Repo              string              `json:"repo"`
-	Lockfile          string              `json:"lockfile"`
-	ManagedLibrary    string              `json:"managed_library"`
-	CacheRoot         string              `json:"cache_root"`
-	DetectedDeps      []string            `json:"detected_packages"`
-	CRANDeps          []string            `json:"cran_packages"`
-	BiocDeps          []string            `json:"bioc_packages"`
-	IncludedCRAN      []string            `json:"included_cran_packages"`
-	IncludedBioc      []string            `json:"included_bioc_packages"`
-	ExcludedDeps      []string            `json:"excluded_packages"`
-	ToolchainPrefixes []string            `json:"toolchain_prefixes"`
-	PkgConfigPath     []string            `json:"pkg_config_path"`
-	ToolchainPath     []string            `json:"toolchain_path"`
-	ToolchainCPPFLAGS []string            `json:"toolchain_cppflags"`
-	ToolchainLDFLAGS  []string            `json:"toolchain_ldflags"`
-	ToolchainPkgPath  []string            `json:"toolchain_pkg_config_path"`
-	CustomSources     []string            `json:"custom_sources"`
-	Warnings          []string            `json:"warnings"`
-	Errors            []string            `json:"errors"`
-	SetupErrors       []string            `json:"setup_errors"`
-	SourceErrors      []string            `json:"source_errors"`
-	NetworkErrors     []string            `json:"network_errors"`
-	RuntimeErrors     []string            `json:"runtime_errors"`
-	OtherErrors       []string            `json:"other_errors"`
-	LockWarnings      []string            `json:"lock_warnings"`
-	CacheWarnings     []string            `json:"cache_warnings"`
-	OtherWarnings     []string            `json:"other_warnings"`
-	ErrorDetails      []DoctorIssueDetail `json:"error_details"`
-	WarningDetails    []DoctorIssueDetail `json:"warning_details"`
-	SystemHints       []string            `json:"system_hints"`
-	SystemHintDetails []SystemHintDetail  `json:"system_hint_details"`
-	NextSteps         []NextStepDetail    `json:"next_steps"`
-	Status            string              `json:"status"`
-	Summary           DoctorSummary       `json:"summary"`
-	OK                bool                `json:"ok"`
+	Script                    string                     `json:"script"`
+	ProjectConfig             string                     `json:"project_config,omitempty"`
+	ScriptProfile             string                     `json:"script_profile,omitempty"`
+	RscriptPath               string                     `json:"rscript_path,omitempty"`
+	GitPath                   string                     `json:"git_path,omitempty"`
+	NeedsGit                  bool                       `json:"needs_git"`
+	Repo                      string                     `json:"repo"`
+	Lockfile                  string                     `json:"lockfile"`
+	ManagedLibrary            string                     `json:"managed_library"`
+	CacheRoot                 string                     `json:"cache_root"`
+	DetectedDeps              []string                   `json:"detected_packages"`
+	CRANDeps                  []string                   `json:"cran_packages"`
+	BiocDeps                  []string                   `json:"bioc_packages"`
+	IncludedCRAN              []string                   `json:"included_cran_packages"`
+	IncludedBioc              []string                   `json:"included_bioc_packages"`
+	ExcludedDeps              []string                   `json:"excluded_packages"`
+	ToolchainPrefixes         []string                   `json:"toolchain_prefixes"`
+	PkgConfigPath             []string                   `json:"pkg_config_path"`
+	ToolchainPath             []string                   `json:"toolchain_path"`
+	ToolchainCPPFLAGS         []string                   `json:"toolchain_cppflags"`
+	ToolchainLDFLAGS          []string                   `json:"toolchain_ldflags"`
+	ToolchainPkgPath          []string                   `json:"toolchain_pkg_config_path"`
+	CustomSources             []string                   `json:"custom_sources"`
+	Warnings                  []string                   `json:"warnings"`
+	Errors                    []string                   `json:"errors"`
+	SetupErrors               []string                   `json:"setup_errors"`
+	SourceErrors              []string                   `json:"source_errors"`
+	NetworkErrors             []string                   `json:"network_errors"`
+	RuntimeErrors             []string                   `json:"runtime_errors"`
+	OtherErrors               []string                   `json:"other_errors"`
+	LockWarnings              []string                   `json:"lock_warnings"`
+	CacheWarnings             []string                   `json:"cache_warnings"`
+	OtherWarnings             []string                   `json:"other_warnings"`
+	ErrorDetails              []DoctorIssueDetail        `json:"error_details"`
+	WarningDetails            []DoctorIssueDetail        `json:"warning_details"`
+	InstallFailureDiagnostics []InstallFailureDiagnostic `json:"install_failure_diagnostics"`
+	SystemHints               []string                   `json:"system_hints"`
+	SystemHintDetails         []SystemHintDetail         `json:"system_hint_details"`
+	NextSteps                 []NextStepDetail           `json:"next_steps"`
+	Status                    string                     `json:"status"`
+	Summary                   DoctorSummary              `json:"summary"`
+	OK                        bool                       `json:"ok"`
 }
 
 type DoctorSummary struct {
@@ -888,6 +915,31 @@ type NextStepDetail struct {
 	Note     string `json:"note,omitempty"`
 	Preset   string `json:"preset,omitempty"`
 	Blocking bool   `json:"blocking"`
+}
+
+type InstallFailureDiagnostic struct {
+	InputMessage            string
+	Message                 string
+	SharedObjectPath        string
+	UndefinedSymbol         string
+	MissingSharedLibrary    string
+	MissingRuntimeLibraries []string
+	Runpath                 string
+	UnresolvedSymbols       []string
+	ABIMismatch             bool
+	Details                 []InstallFailureDetail
+}
+
+type InstallFailureDetail struct {
+	Kind         string
+	Message      string
+	Symbol       string
+	Library      string
+	SharedObject string
+	Command      string
+	Runpath      string
+	Libraries    []string
+	Symbols      []string
 }
 
 func Run(opts RunOptions) error {
@@ -1345,7 +1397,7 @@ func Prune(opts PruneOptions) error {
 
 	totalRemoved := 0
 	for _, cacheRoot := range cacheRoots {
-		summary, err := pruneCacheRoot(cacheRoot, keepByCacheRoot[cacheRoot], opts.DryRun)
+		summary, err := pruneCacheRoot(cacheRoot, keepByCacheRoot[cacheRoot], opts.DryRun, opts.PackageStoreRetentionDays)
 		if err != nil {
 			return err
 		}
@@ -1358,6 +1410,17 @@ func Prune(opts PruneOptions) error {
 				fmt.Fprintf(opts.Stdout, "[dry-run] would remove %s\n", removed)
 			} else {
 				fmt.Fprintf(opts.Stdout, "[remove] %s\n", removed)
+			}
+			totalRemoved++
+		}
+		for _, kept := range summary.KeptStore {
+			fmt.Fprintf(opts.Stdout, "[keep-store] %s\n", kept)
+		}
+		for _, removed := range summary.RemovedStore {
+			if opts.DryRun {
+				fmt.Fprintf(opts.Stdout, "[dry-run] would remove store entry %s\n", removed)
+			} else {
+				fmt.Fprintf(opts.Stdout, "[remove-store] %s\n", removed)
 			}
 			totalRemoved++
 		}
@@ -1445,9 +1508,16 @@ func CacheList(opts CacheListOptions) error {
 	if err != nil {
 		return err
 	}
+	storeEntries, err := listPackageStoreEntries(cacheRoot)
+	if err != nil {
+		return err
+	}
 	report := CacheListReport{
-		CacheRoot: cacheRoot,
-		Libraries: libs,
+		CacheRoot:            cacheRoot,
+		Libraries:            libs,
+		PackageStore:         storeEntries,
+		PackageStorePackages: cacheStorePackageCount(storeEntries),
+		PackageStoreBytes:    cacheStoreSizeBytes(storeEntries),
 	}
 	if scopeLabel != "" {
 		report.Scope = scopeLabel
@@ -1474,19 +1544,43 @@ func CacheList(opts CacheListOptions) error {
 	}
 	if len(report.Libraries) == 0 {
 		fmt.Fprintln(opts.Stdout, "libraries: <none>")
+	} else {
+		fmt.Fprintln(opts.Stdout, "libraries:")
+		for _, lib := range report.Libraries {
+			status := ""
+			if active != nil {
+				if lib.Active {
+					status = " [active]"
+				} else {
+					status = " [stale]"
+				}
+			}
+			fmt.Fprintf(opts.Stdout, "- %s%s\n", lib.Path, status)
+		}
+	}
+	if len(report.PackageStore) == 0 {
+		fmt.Fprintln(opts.Stdout, "package store: <none>")
 		return nil
 	}
-	fmt.Fprintln(opts.Stdout, "libraries:")
-	for _, lib := range report.Libraries {
-		status := ""
-		if active != nil {
-			if lib.Active {
-				status = " [active]"
-			} else {
-				status = " [stale]"
-			}
+	fmt.Fprintln(opts.Stdout, "package store:")
+	fmt.Fprintf(
+		opts.Stdout,
+		"package store summary: entries=%d packages=%d size=%s\n",
+		len(report.PackageStore),
+		report.PackageStorePackages,
+		formatSizeBytes(report.PackageStoreBytes),
+	)
+	for _, entry := range report.PackageStore {
+		details := []string{
+			fmt.Sprintf("packages=%d", entry.PackageCount),
+			fmt.Sprintf("size=%s", formatSizeBytes(entry.SizeBytes)),
 		}
-		fmt.Fprintf(opts.Stdout, "- %s%s\n", lib.Path, status)
+		if entry.LastUsedAt != "" {
+			details = append(details, fmt.Sprintf("last_used=%s", entry.LastUsedAt))
+		} else if entry.UpdatedAt != "" {
+			details = append(details, fmt.Sprintf("updated=%s", entry.UpdatedAt))
+		}
+		fmt.Fprintf(opts.Stdout, "- %s [%s]\n", entry.Path, strings.Join(details, " "))
 	}
 	return nil
 }
@@ -1502,27 +1596,27 @@ func CacheRemove(opts CacheRemoveOptions) error {
 		return fmt.Errorf("cache remove target is required")
 	}
 
-	targetPath, cacheRoot, err := resolveManagedLibraryTarget(opts)
+	targetPath, cacheRoot, targetLabel, err := resolveCacheTarget(opts)
 	if err != nil {
 		return err
 	}
 	if _, err := os.Stat(targetPath); errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("managed library not found: %s", targetPath)
+		return fmt.Errorf("%s not found: %s", targetLabel, targetPath)
 	} else if err != nil {
-		return fmt.Errorf("stat managed library: %w", err)
+		return fmt.Errorf("stat %s: %w", targetLabel, err)
 	}
 
 	fmt.Fprintf(opts.Stdout, "[info] cache root: %s\n", cacheRoot)
 	if opts.DryRun {
 		fmt.Fprintf(opts.Stdout, "[dry-run] would remove %s\n", targetPath)
-		fmt.Fprintln(opts.Stdout, "[ok] cache rm would remove 1 managed library")
+		fmt.Fprintf(opts.Stdout, "[ok] cache rm would remove 1 %s\n", targetLabel)
 		return nil
 	}
 	if err := os.RemoveAll(targetPath); err != nil {
-		return fmt.Errorf("remove managed library %s: %w", targetPath, err)
+		return fmt.Errorf("remove %s %s: %w", targetLabel, targetPath, err)
 	}
 	fmt.Fprintf(opts.Stdout, "[remove] %s\n", targetPath)
-	fmt.Fprintln(opts.Stdout, "[ok] cache rm removed 1 managed library")
+	fmt.Fprintf(opts.Stdout, "[ok] cache rm removed 1 %s\n", targetLabel)
 	return nil
 }
 
@@ -1611,6 +1705,7 @@ func Doctor(opts DoctorOptions) error {
 
 	var errorsList []string
 	var warnings []string
+	var installFailureDiagnostics []InstallFailureDiagnostic
 	toolchainPreview := toolchainenv.BuildPreview(plan.ToolchainPrefixes, plan.PkgConfigPath)
 	systemHintDetails := collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps)
 	if opts.ToolchainOnly {
@@ -1666,6 +1761,7 @@ func Doctor(opts DoctorOptions) error {
 			if err != nil {
 				errorsList = append(errorsList, errorLines(err)...)
 			} else if err := nativeValidatePlan(req); err != nil {
+				installFailureDiagnostics = append(installFailureDiagnostics, diagnoseDoctorInstallFailures(err)...)
 				errorsList = append(errorsList, errorLines(err)...)
 			}
 		}
@@ -1685,8 +1781,8 @@ func Doctor(opts DoctorOptions) error {
 		warnings = append(warnings, fmt.Sprintf("selected interpreter %s is an external Conda-style R installation; source package compilation may be less reliable than a managed rs R", plan.RscriptPath))
 	}
 
-	nextSteps := buildDoctorNextSteps(plan, rscriptErr, needsGit, warnings, errorsList, systemHintDetails)
-	report := buildDoctorReport(plan, opts, rscriptPath, rscriptErr, gitPath, needsGit, warnings, errorsList, systemHints, systemHintDetails, nextSteps, toolchainPreview)
+	nextSteps := buildDoctorNextSteps(plan, rscriptErr, needsGit, warnings, errorsList, installFailureDiagnostics, systemHintDetails)
+	report := buildDoctorReport(plan, opts, rscriptPath, rscriptErr, gitPath, needsGit, warnings, errorsList, installFailureDiagnostics, systemHints, systemHintDetails, nextSteps, toolchainPreview)
 
 	if opts.JSON {
 		data, err := json.MarshalIndent(report, "", "  ")
@@ -1825,6 +1921,9 @@ func Doctor(opts DoctorOptions) error {
 	}
 	for _, issue := range errorsList {
 		fmt.Fprintf(opts.Stdout, "[error] %s\n", issue)
+	}
+	for _, diag := range report.InstallFailureDiagnostics {
+		printDoctorInstallFailureDiagnostic(opts.Stdout, diag)
 	}
 	for _, hint := range systemHints {
 		fmt.Fprintf(opts.Stdout, "[hint] %s\n", hint)
@@ -2224,7 +2323,7 @@ func normalizeCheckReport(report *CheckReport) {
 	}
 }
 
-func buildDoctorReport(plan dependencyPlan, opts DoctorOptions, rscriptPath string, rscriptErr error, gitPath string, needsGit bool, warnings, errorsList, systemHints []string, systemHintDetails []SystemHintDetail, nextSteps []NextStepDetail, toolchainPreview toolchainenv.Preview) DoctorReport {
+func buildDoctorReport(plan dependencyPlan, opts DoctorOptions, rscriptPath string, rscriptErr error, gitPath string, needsGit bool, warnings, errorsList []string, installFailureDiagnostics []InstallFailureDiagnostic, systemHints []string, systemHintDetails []SystemHintDetail, nextSteps []NextStepDetail, toolchainPreview toolchainenv.Preview) DoctorReport {
 	setupErrors, sourceErrors, networkErrors, runtimeErrors, otherErrors := categorizeDoctorErrors(errorsList)
 	lockWarnings, cacheWarnings, otherWarnings := categorizeDoctorWarnings(warnings)
 	errorDetails := buildDoctorIssueDetails(errorsList, false)
@@ -2233,45 +2332,46 @@ func buildDoctorReport(plan dependencyPlan, opts DoctorOptions, rscriptPath stri
 	summary := buildDoctorSummary(errorsList, warnings, systemHintDetails, nextSteps, setupErrors, sourceErrors, networkErrors, runtimeErrors, otherErrors, lockWarnings, cacheWarnings, otherWarnings)
 
 	report := DoctorReport{
-		Script:            plan.ScriptPath,
-		ProjectConfig:     plan.ProjectPath,
-		ScriptProfile:     plan.ScriptKey,
-		NeedsGit:          needsGit,
-		Repo:              plan.Repo,
-		Lockfile:          plan.LockfilePath,
-		ManagedLibrary:    plan.LibraryPath,
-		CacheRoot:         plan.CacheRoot,
-		DetectedDeps:      copyStrings(plan.DetectedDeps),
-		CRANDeps:          copyStrings(plan.CRANDeps),
-		BiocDeps:          copyStrings(plan.BiocDeps),
-		IncludedCRAN:      copyStrings(opts.IncludeDeps),
-		IncludedBioc:      copyStrings(opts.IncludeBiocDeps),
-		ExcludedDeps:      copyStrings(opts.ExcludeDeps),
-		ToolchainPrefixes: copyStrings(plan.ToolchainPrefixes),
-		PkgConfigPath:     copyStrings(plan.PkgConfigPath),
-		ToolchainPath:     copyStrings(toolchainPreview.Path),
-		ToolchainCPPFLAGS: copyStrings(toolchainPreview.CPPFLAGS),
-		ToolchainLDFLAGS:  copyStrings(toolchainPreview.LDFLAGS),
-		ToolchainPkgPath:  copyStrings(toolchainPreview.PkgConfigPath),
-		CustomSources:     sourceSummary(plan.SourceDeps),
-		Warnings:          copyStrings(warnings),
-		Errors:            copyStrings(errorsList),
-		SetupErrors:       setupErrors,
-		SourceErrors:      sourceErrors,
-		NetworkErrors:     networkErrors,
-		RuntimeErrors:     runtimeErrors,
-		OtherErrors:       otherErrors,
-		LockWarnings:      lockWarnings,
-		CacheWarnings:     cacheWarnings,
-		OtherWarnings:     otherWarnings,
-		ErrorDetails:      errorDetails,
-		WarningDetails:    warningDetails,
-		SystemHints:       copyStrings(systemHints),
-		SystemHintDetails: copySystemHintDetails(systemHintDetails),
-		NextSteps:         copyNextStepDetails(nextSteps),
-		Status:            status,
-		Summary:           summary,
-		OK:                len(warnings) == 0 && len(errorsList) == 0,
+		Script:                    plan.ScriptPath,
+		ProjectConfig:             plan.ProjectPath,
+		ScriptProfile:             plan.ScriptKey,
+		NeedsGit:                  needsGit,
+		Repo:                      plan.Repo,
+		Lockfile:                  plan.LockfilePath,
+		ManagedLibrary:            plan.LibraryPath,
+		CacheRoot:                 plan.CacheRoot,
+		DetectedDeps:              copyStrings(plan.DetectedDeps),
+		CRANDeps:                  copyStrings(plan.CRANDeps),
+		BiocDeps:                  copyStrings(plan.BiocDeps),
+		IncludedCRAN:              copyStrings(opts.IncludeDeps),
+		IncludedBioc:              copyStrings(opts.IncludeBiocDeps),
+		ExcludedDeps:              copyStrings(opts.ExcludeDeps),
+		ToolchainPrefixes:         copyStrings(plan.ToolchainPrefixes),
+		PkgConfigPath:             copyStrings(plan.PkgConfigPath),
+		ToolchainPath:             copyStrings(toolchainPreview.Path),
+		ToolchainCPPFLAGS:         copyStrings(toolchainPreview.CPPFLAGS),
+		ToolchainLDFLAGS:          copyStrings(toolchainPreview.LDFLAGS),
+		ToolchainPkgPath:          copyStrings(toolchainPreview.PkgConfigPath),
+		CustomSources:             sourceSummary(plan.SourceDeps),
+		Warnings:                  copyStrings(warnings),
+		Errors:                    copyStrings(errorsList),
+		SetupErrors:               setupErrors,
+		SourceErrors:              sourceErrors,
+		NetworkErrors:             networkErrors,
+		RuntimeErrors:             runtimeErrors,
+		OtherErrors:               otherErrors,
+		LockWarnings:              lockWarnings,
+		CacheWarnings:             cacheWarnings,
+		OtherWarnings:             otherWarnings,
+		ErrorDetails:              errorDetails,
+		WarningDetails:            warningDetails,
+		InstallFailureDiagnostics: copyInstallFailureDiagnostics(installFailureDiagnostics),
+		SystemHints:               copyStrings(systemHints),
+		SystemHintDetails:         copySystemHintDetails(systemHintDetails),
+		NextSteps:                 copyNextStepDetails(nextSteps),
+		Status:                    status,
+		Summary:                   summary,
+		OK:                        len(warnings) == 0 && len(errorsList) == 0,
 	}
 	if rscriptErr == nil {
 		report.RscriptPath = rscriptPath
@@ -2362,6 +2462,9 @@ func normalizeDoctorReport(report *DoctorReport) {
 	if report.WarningDetails == nil {
 		report.WarningDetails = []DoctorIssueDetail{}
 	}
+	if report.InstallFailureDiagnostics == nil {
+		report.InstallFailureDiagnostics = []InstallFailureDiagnostic{}
+	}
 	if report.SystemHints == nil {
 		report.SystemHints = []string{}
 	}
@@ -2373,6 +2476,93 @@ func normalizeDoctorReport(report *DoctorReport) {
 	}
 	if report.Status == "" {
 		report.Status = "ok"
+	}
+}
+
+func copyInstallFailureDiagnostics(diags []InstallFailureDiagnostic) []InstallFailureDiagnostic {
+	if len(diags) == 0 {
+		return []InstallFailureDiagnostic{}
+	}
+
+	out := make([]InstallFailureDiagnostic, 0, len(diags))
+	for _, diag := range diags {
+		copyDiag := InstallFailureDiagnostic{
+			InputMessage:            diag.InputMessage,
+			Message:                 diag.Message,
+			SharedObjectPath:        diag.SharedObjectPath,
+			UndefinedSymbol:         diag.UndefinedSymbol,
+			MissingSharedLibrary:    diag.MissingSharedLibrary,
+			MissingRuntimeLibraries: append([]string(nil), diag.MissingRuntimeLibraries...),
+			Runpath:                 diag.Runpath,
+			UnresolvedSymbols:       append([]string(nil), diag.UnresolvedSymbols...),
+			ABIMismatch:             diag.ABIMismatch,
+		}
+		if len(diag.Details) == 0 {
+			copyDiag.Details = []InstallFailureDetail{}
+		} else {
+			copyDiag.Details = make([]InstallFailureDetail, 0, len(diag.Details))
+			for _, detail := range diag.Details {
+				copyDiag.Details = append(copyDiag.Details, InstallFailureDetail{
+					Kind:         detail.Kind,
+					Message:      detail.Message,
+					Symbol:       detail.Symbol,
+					Library:      detail.Library,
+					SharedObject: detail.SharedObject,
+					Command:      detail.Command,
+					Runpath:      detail.Runpath,
+					Libraries:    append([]string(nil), detail.Libraries...),
+					Symbols:      append([]string(nil), detail.Symbols...),
+				})
+			}
+		}
+		out = append(out, copyDiag)
+	}
+	return out
+}
+
+func diagnoseDoctorInstallFailures(err error) []InstallFailureDiagnostic {
+	if err == nil {
+		return []InstallFailureDiagnostic{}
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" || !containsInstallFailureAnchor(message) {
+		return []InstallFailureDiagnostic{}
+	}
+	diag, diagErr := DiagnoseInstallError(message)
+	if diagErr != nil || !hasInstallFailureSignals(diag) {
+		return []InstallFailureDiagnostic{}
+	}
+	return []InstallFailureDiagnostic{diag}
+}
+
+func containsInstallFailureAnchor(message string) bool {
+	for _, line := range strings.Split(strings.TrimSpace(message), "\n") {
+		if isInstallFailureAnchorLine(line) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasInstallFailureSignals(diag InstallFailureDiagnostic) bool {
+	return diag.SharedObjectPath != "" ||
+		diag.UndefinedSymbol != "" ||
+		diag.MissingSharedLibrary != "" ||
+		diag.ABIMismatch ||
+		len(diag.MissingRuntimeLibraries) > 0 ||
+		len(diag.UnresolvedSymbols) > 0 ||
+		len(diag.Details) > 0
+}
+
+func printDoctorInstallFailureDiagnostic(w io.Writer, diag InstallFailureDiagnostic) {
+	if strings.TrimSpace(diag.Message) != "" {
+		fmt.Fprintf(w, "[diagnose] message: %s\n", strings.TrimSpace(diag.Message))
+	}
+	if diag.SharedObjectPath != "" {
+		fmt.Fprintf(w, "[diagnose] shared object: %s\n", diag.SharedObjectPath)
+	}
+	for _, detail := range diag.Details {
+		fmt.Fprintf(w, "[diagnose] %s: %s\n", detail.Kind, detail.Message)
 	}
 }
 
@@ -2805,17 +2995,17 @@ func collectSystemDependencyHintDetails(cranDeps, biocDeps []string, sourceDeps 
 	rules := []rule{
 		{
 			category: "network",
-			packages: []string{"curl", "openssl", "gert", "git2r", "httr", "httr2", "gitcreds", "gh"},
+			packages: []string{"curl", "openssl", "gert", "git2r", "httr", "httr2", "gitcreds", "gh", "crul"},
 			message:  "commonly need libcurl and OpenSSL development headers, especially when source installs are required",
 		},
 		{
 			category: "icu",
-			packages: []string{"stringi"},
+			packages: []string{"stringi", "stringr"},
 			message:  "commonly needs ICU development libraries when binaries are unavailable",
 		},
 		{
 			category: "xml",
-			packages: []string{"xml2", "XML"},
+			packages: []string{"xml2", "XML", "xslt", "rvest"},
 			message:  "commonly need libxml2 development headers",
 		},
 		{
@@ -2845,7 +3035,7 @@ func collectSystemDependencyHintDetails(cranDeps, biocDeps []string, sourceDeps 
 		},
 		{
 			category: "fonts",
-			packages: []string{"textshaping", "ragg", "systemfonts", "gdtools", "svglite"},
+			packages: []string{"textshaping", "ragg", "systemfonts", "gdtools", "svglite", "showtext"},
 			message:  "commonly need font and text rendering libraries such as freetype, harfbuzz, fribidi, and cairo",
 		},
 		{
@@ -3013,7 +3203,7 @@ func doctorStrictError(report DoctorReport) DoctorError {
 	return DoctorError{Issues: issues, Code: 2}
 }
 
-func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, warnings, errorsList []string, systemHintDetails []SystemHintDetail) []NextStepDetail {
+func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, warnings, errorsList []string, installFailureDiagnostics []InstallFailureDiagnostic, systemHintDetails []SystemHintDetail) []NextStepDetail {
 	steps := []NextStepDetail{}
 	seen := map[string]struct{}{}
 	add := func(step NextStepDetail) {
@@ -3156,6 +3346,28 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 		}
 	}
 
+	if len(installFailureDiagnostics) > 0 {
+		add(NextStepDetail{
+			Category: "setup",
+			Kind:     "recheck_toolchain_only",
+			Message:  "re-run the toolchain-only doctor to verify the active prefixes, pkg-config path, and linker environment before retrying the failing native package install",
+			Command:  doctorToolchainOnlyCommand(plan),
+			Blocking: false,
+		})
+		if len(plan.ToolchainPrefixes) == 0 && len(plan.PkgConfigPath) == 0 {
+			add(NextStepDetail{
+				Category: "setup",
+				Kind:     "configure_rootless_toolchain",
+				Message:  "configure a user-local toolchain prefix and pkg-config path before retrying native package installs that are already failing at shared-library load time",
+				Blocking: true,
+			})
+			addToolchainFollowups(false)
+		}
+		for _, diag := range installFailureDiagnostics {
+			addInstallFailureNextSteps(plan, diag, add)
+		}
+	}
+
 	if len(systemHintDetails) > 0 && len(plan.ToolchainPrefixes) == 0 && len(plan.PkgConfigPath) == 0 {
 		addToolchainFollowups(false)
 	}
@@ -3191,6 +3403,60 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 	}
 
 	return steps
+}
+
+func addInstallFailureNextSteps(plan dependencyPlan, diag InstallFailureDiagnostic, add func(NextStepDetail)) {
+	if add == nil {
+		return
+	}
+	sharedObjectLabel := "the failing package shared object"
+	if diag.SharedObjectPath != "" {
+		sharedObjectLabel = diag.SharedObjectPath
+	}
+	if diag.UndefinedSymbol != "" {
+		add(NextStepDetail{
+			Category: "runtime",
+			Kind:     "inspect_native_link_flags",
+			Message:  fmt.Sprintf("inspect the native link flags for %s and make sure the final shared-library link step includes the library providing `%s`, for example via `pkg-config --cflags --libs` and the package `LIBS`/`PKG_LIBS` settings", sharedObjectLabel, diag.UndefinedSymbol),
+			Blocking: true,
+		})
+	}
+	runtimeLibraries := append([]string(nil), diag.MissingRuntimeLibraries...)
+	if diag.MissingSharedLibrary != "" && !slices.Contains(runtimeLibraries, diag.MissingSharedLibrary) {
+		runtimeLibraries = append([]string{diag.MissingSharedLibrary}, runtimeLibraries...)
+	}
+	if len(runtimeLibraries) > 0 {
+		add(NextStepDetail{
+			Category: "runtime",
+			Kind:     "fix_runtime_library_path",
+			Message:  fmt.Sprintf("make sure the rootless prefix providing %s is visible on the runtime library path or embedded into the package shared object RUNPATH/RPATH before retrying the package load test", strings.Join(runtimeLibraries, ", ")),
+			Blocking: true,
+		})
+	}
+	if diag.SharedObjectPath != "" && diag.Runpath == "" && len(diag.MissingRuntimeLibraries) > 0 {
+		add(NextStepDetail{
+			Category: "runtime",
+			Kind:     "embed_runtime_search_path",
+			Message:  fmt.Sprintf("rebuild %s with an explicit RUNPATH/RPATH pointing at the same rootless library prefix, or keep that prefix on LD_LIBRARY_PATH during package load checks", diag.SharedObjectPath),
+			Blocking: true,
+		})
+	}
+	if diag.ABIMismatch {
+		add(NextStepDetail{
+			Category: "runtime",
+			Kind:     "rebuild_consistent_cpp_runtime",
+			Message:  "rebuild the failing package with one consistent compiler and C++ runtime stack, and avoid mixing system `libstdc++` with Conda/Homebrew/Spack user-local libraries",
+			Blocking: true,
+		})
+	}
+	if len(diag.UnresolvedSymbols) > 0 && diag.UndefinedSymbol == "" {
+		add(NextStepDetail{
+			Category: "runtime",
+			Kind:     "inspect_unresolved_symbols",
+			Message:  fmt.Sprintf("inspect unresolved dynamic symbols in %s and make sure the matching libraries are present in both the link flags and runtime search path", sharedObjectLabel),
+			Blocking: true,
+		})
+	}
 }
 
 func doctorToolchainOnlyCommand(plan dependencyPlan) string {
@@ -3318,33 +3584,81 @@ func collectKeepByCacheRoot(scriptPath, projectDir string) (map[string]map[strin
 	return keepByCacheRoot, "project " + projectCfg.RootDir, projectCfg.RootDir, projectCfg.Path, len(scriptPaths), nil
 }
 
-func pruneCacheRoot(cacheRoot string, keep map[string]struct{}, dryRun bool) (pruneSummary, error) {
+func pruneCacheRoot(cacheRoot string, keep map[string]struct{}, dryRun bool, retentionDays int) (pruneSummary, error) {
+	summary := pruneSummary{
+		CacheRoot:    cacheRoot,
+		Kept:         []string{},
+		Removed:      []string{},
+		KeptStore:    []string{},
+		RemovedStore: []string{},
+	}
+	libRoot := filepath.Join(cacheRoot, "lib")
+	entries, err := os.ReadDir(libRoot)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return summary, fmt.Errorf("read cache libraries: %w", err)
+	}
+	if err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() || !isManagedLibraryDir(entry.Name()) {
+				continue
+			}
+			path := filepath.Join(libRoot, entry.Name())
+			if _, ok := keep[path]; ok {
+				summary.Kept = append(summary.Kept, path)
+				continue
+			}
+			if !dryRun {
+				if err := os.RemoveAll(path); err != nil {
+					return summary, fmt.Errorf("remove managed library %s: %w", path, err)
+				}
+			}
+			summary.Removed = append(summary.Removed, path)
+		}
+	}
+
+	slices.Sort(summary.Kept)
+	slices.Sort(summary.Removed)
+	storeSummary, err := prunePackageStoreRoot(cacheRoot, dryRun, retentionDays)
+	if err != nil {
+		return summary, err
+	}
+	summary.KeptStore = storeSummary.Kept
+	summary.RemovedStore = storeSummary.Removed
+	return summary, nil
+}
+
+func prunePackageStoreRoot(cacheRoot string, dryRun bool, retentionDays int) (pruneSummary, error) {
 	summary := pruneSummary{
 		CacheRoot: cacheRoot,
 		Kept:      []string{},
 		Removed:   []string{},
 	}
-	libRoot := filepath.Join(cacheRoot, "lib")
-	entries, err := os.ReadDir(libRoot)
+	cutoff := time.Now().UTC().Add(-packageStoreRetentionDuration(retentionDays))
+	storeRoot := filepath.Join(cacheRoot, "pkgstore")
+	entries, err := os.ReadDir(storeRoot)
 	if errors.Is(err, os.ErrNotExist) {
 		return summary, nil
 	}
 	if err != nil {
-		return summary, fmt.Errorf("read cache libraries: %w", err)
+		return summary, fmt.Errorf("read package store: %w", err)
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() || !isManagedLibraryDir(entry.Name()) {
+		if !entry.IsDir() || !isPackageStoreDir(entry.Name()) {
 			continue
 		}
-		path := filepath.Join(libRoot, entry.Name())
-		if _, ok := keep[path]; ok {
+		path := filepath.Join(storeRoot, entry.Name())
+		info, err := inspectPackageStoreEntry(path)
+		if err != nil {
+			return summary, fmt.Errorf("inspect package store entry %s: %w", path, err)
+		}
+		if info.PackageCount > 0 && (info.LastUsedAt.IsZero() || !info.LastUsedAt.Before(cutoff)) {
 			summary.Kept = append(summary.Kept, path)
 			continue
 		}
 		if !dryRun {
 			if err := os.RemoveAll(path); err != nil {
-				return summary, fmt.Errorf("remove managed library %s: %w", path, err)
+				return summary, fmt.Errorf("remove package store entry %s: %w", path, err)
 			}
 		}
 		summary.Removed = append(summary.Removed, path)
@@ -3384,6 +3698,60 @@ func listManagedLibraries(cacheRoot string, active map[string]struct{}) ([]Cache
 	return out, nil
 }
 
+func listPackageStoreEntries(cacheRoot string) ([]CacheStoreEntry, error) {
+	storeRoot := filepath.Join(cacheRoot, "pkgstore")
+	entries, err := os.ReadDir(storeRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return []CacheStoreEntry{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read package store: %w", err)
+	}
+
+	type sortableStoreEntry struct {
+		entry    CacheStoreEntry
+		lastUsed time.Time
+		updated  time.Time
+	}
+	out := make([]sortableStoreEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !isPackageStoreDir(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(storeRoot, entry.Name())
+		info, err := inspectPackageStoreEntry(path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect package store entry %s: %w", path, err)
+		}
+		out = append(out, sortableStoreEntry{
+			entry: CacheStoreEntry{
+				Path:         path,
+				Name:         entry.Name(),
+				PackageCount: info.PackageCount,
+				SizeBytes:    info.SizeBytes,
+				LastUsedAt:   formatStoreEntryTime(info.LastUsedAt),
+				UpdatedAt:    formatStoreEntryTime(info.UpdatedAt),
+			},
+			lastUsed: info.LastUsedAt,
+			updated:  info.UpdatedAt,
+		})
+	}
+	slices.SortFunc(out, func(a, b sortableStoreEntry) int {
+		if cmp := compareCacheStoreRecencyDesc(a.lastUsed, b.lastUsed); cmp != 0 {
+			return cmp
+		}
+		if cmp := compareCacheStoreRecencyDesc(a.updated, b.updated); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.entry.Path, b.entry.Path)
+	})
+	entriesOut := make([]CacheStoreEntry, 0, len(out))
+	for _, entry := range out {
+		entriesOut = append(entriesOut, entry.entry)
+	}
+	return entriesOut, nil
+}
+
 func isManagedLibraryDir(name string) bool {
 	if len(name) != 16 {
 		return false
@@ -3396,24 +3764,218 @@ func isManagedLibraryDir(name string) bool {
 	return true
 }
 
-func resolveManagedLibraryTarget(opts CacheRemoveOptions) (string, string, error) {
+func isPackageStoreDir(name string) bool {
+	if len(name) != 64 {
+		return false
+	}
+	for _, ch := range name {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func packageStoreEntryPackageCount(path string) (int, error) {
+	entries, err := os.ReadDir(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(path, entry.Name(), "DESCRIPTION")); err == nil {
+			count++
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return 0, err
+		}
+	}
+	return count, nil
+}
+
+type packageStoreEntryInfo struct {
+	PackageCount int
+	SizeBytes    int64
+	LastUsedAt   time.Time
+	UpdatedAt    time.Time
+}
+
+func inspectPackageStoreEntry(path string) (packageStoreEntryInfo, error) {
+	count, err := packageStoreEntryPackageCount(path)
+	if err != nil {
+		return packageStoreEntryInfo{}, err
+	}
+	sizeBytes, err := packageStoreEntrySizeBytes(path)
+	if err != nil {
+		return packageStoreEntryInfo{}, err
+	}
+	info := packageStoreEntryInfo{
+		PackageCount: count,
+		SizeBytes:    sizeBytes,
+	}
+	state, err := readPackageStoreStateFile(path)
+	if err == nil {
+		info.LastUsedAt = parseStoreStateTime(state.LastUsedAt)
+		info.UpdatedAt = parseStoreStateTime(state.UpdatedAt)
+		if info.LastUsedAt.IsZero() {
+			info.LastUsedAt = info.UpdatedAt
+		}
+		return info, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return packageStoreEntryInfo{}, err
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		return packageStoreEntryInfo{}, err
+	}
+	info.LastUsedAt = stat.ModTime().UTC()
+	info.UpdatedAt = stat.ModTime().UTC()
+	return info, nil
+}
+
+func packageStoreEntrySizeBytes(path string) (int64, error) {
+	var total int64
+	err := filepath.WalkDir(path, func(current string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", current, err)
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func readPackageStoreStateFile(path string) (installer.PackageStoreState, error) {
+	data, err := os.ReadFile(filepath.Join(path, installer.PackageStoreStateFile))
+	if err != nil {
+		return installer.PackageStoreState{}, err
+	}
+	var state installer.PackageStoreState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return installer.PackageStoreState{}, fmt.Errorf("decode package store state: %w", err)
+	}
+	return state, nil
+}
+
+func parseStoreStateTime(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return ts.UTC()
+}
+
+func formatStoreEntryTime(ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	return ts.UTC().Format(time.RFC3339)
+}
+
+func compareCacheStoreRecencyDesc(a, b time.Time) int {
+	switch {
+	case a.IsZero() && b.IsZero():
+		return 0
+	case a.IsZero():
+		return 1
+	case b.IsZero():
+		return -1
+	case a.After(b):
+		return -1
+	case a.Before(b):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func cacheStorePackageCount(entries []CacheStoreEntry) int {
+	total := 0
+	for _, entry := range entries {
+		total += entry.PackageCount
+	}
+	return total
+}
+
+func cacheStoreSizeBytes(entries []CacheStoreEntry) int64 {
+	var total int64
+	for _, entry := range entries {
+		total += entry.SizeBytes
+	}
+	return total
+}
+
+func formatSizeBytes(size int64) string {
+	if size < 1024 {
+		return fmt.Sprintf("%d B", size)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	value := float64(size)
+	for _, unit := range units {
+		value /= 1024
+		if value < 1024 || unit == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", value, unit)
+		}
+	}
+	return fmt.Sprintf("%d B", size)
+}
+
+func packageStoreRetentionDuration(overrideDays int) time.Duration {
+	if overrideDays >= 0 {
+		return time.Duration(overrideDays) * 24 * time.Hour
+	}
+	if raw := strings.TrimSpace(os.Getenv("RS_PKGSTORE_RETENTION_DAYS")); raw != "" {
+		if days, err := strconv.Atoi(raw); err == nil && days >= 0 {
+			return time.Duration(days) * 24 * time.Hour
+		}
+	}
+	return defaultPackageStoreRetentionDays * 24 * time.Hour
+}
+
+func resolveCacheTarget(opts CacheRemoveOptions) (string, string, string, error) {
 	target := strings.TrimSpace(opts.Target)
 	if looksLikePath(target) {
-		path, cacheRoot, err := validateManagedLibraryPath(target)
+		path, cacheRoot, label, err := validateCacheTargetPath(target)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
-		return path, cacheRoot, nil
+		return path, cacheRoot, label, nil
 	}
 	if !isManagedLibraryDir(target) {
-		return "", "", fmt.Errorf("cache target %q is not a managed library hash", target)
+		if !isPackageStoreDir(target) {
+			return "", "", "", fmt.Errorf("cache target %q is not a managed library hash or package store entry hash", target)
+		}
 	}
 
 	cacheRoot, err := resolveCacheRootForLookup(opts.CacheDir, opts.ScriptPath, opts.ProjectDir)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
-	return filepath.Join(cacheRoot, "lib", target), cacheRoot, nil
+	if isManagedLibraryDir(target) {
+		return filepath.Join(cacheRoot, "lib", target), cacheRoot, "managed library", nil
+	}
+	return filepath.Join(cacheRoot, "pkgstore", target), cacheRoot, "package store entry", nil
 }
 
 func resolveCacheRootForLookup(cacheDirOverride, scriptPath, projectDir string) (string, error) {
@@ -3450,20 +4012,28 @@ func resolveCacheRootForLookup(cacheDirOverride, scriptPath, projectDir string) 
 	return predictedCacheRoot(""), nil
 }
 
-func validateManagedLibraryPath(target string) (string, string, error) {
+func validateCacheTargetPath(target string) (string, string, string, error) {
 	path, err := filepath.Abs(target)
 	if err != nil {
-		return "", "", fmt.Errorf("resolve target path: %w", err)
+		return "", "", "", fmt.Errorf("resolve target path: %w", err)
 	}
 	path = filepath.Clean(path)
-	if !isManagedLibraryDir(filepath.Base(path)) {
-		return "", "", fmt.Errorf("cache target %q is not a managed library path", target)
+	switch {
+	case isManagedLibraryDir(filepath.Base(path)):
+		parent := filepath.Dir(path)
+		if filepath.Base(parent) != "lib" {
+			return "", "", "", fmt.Errorf("cache target %q is not inside a managed lib directory", target)
+		}
+		return path, filepath.Dir(parent), "managed library", nil
+	case isPackageStoreDir(filepath.Base(path)):
+		parent := filepath.Dir(path)
+		if filepath.Base(parent) != "pkgstore" {
+			return "", "", "", fmt.Errorf("cache target %q is not inside a package store directory", target)
+		}
+		return path, filepath.Dir(parent), "package store entry", nil
+	default:
+		return "", "", "", fmt.Errorf("cache target %q is not a managed library path or package store entry path", target)
 	}
-	libRoot := filepath.Dir(path)
-	if filepath.Base(libRoot) != "lib" {
-		return "", "", fmt.Errorf("cache target %q is not inside a managed lib directory", target)
-	}
-	return path, filepath.Dir(libRoot), nil
 }
 
 func looksLikePath(target string) bool {
@@ -3795,7 +4365,7 @@ func predictedLibraryPath(cacheRoot, scriptPath string, cranDeps, biocDeps []str
 		"cran=" + strings.Join(cranDeps, ","),
 		"bioc=" + strings.Join(biocDeps, ","),
 		"sources=" + fingerprintSourceDeps(sourceDeps),
-		"interpreter=" + runtime.Interpreter,
+		"interpreter_identity=" + normalizedInterpreterIdentity(runtime.Interpreter, runtime.InterpreterKind),
 		"r_version=" + runtime.RVersion,
 		"platform=" + runtime.Platform,
 		"arch=" + runtime.Arch,
@@ -3804,6 +4374,79 @@ func predictedLibraryPath(cacheRoot, scriptPath string, cranDeps, biocDeps []str
 	}, "\n")))
 	scope := hex.EncodeToString(scriptHash[:])[:16]
 	return filepath.Join(cacheRoot, "lib", scope)
+}
+
+func normalizedInterpreterIdentity(interpreter, kind string) string {
+	cleaned := strings.TrimSpace(filepath.Clean(interpreter))
+	kind = strings.TrimSpace(kind)
+	switch kind {
+	case "managed":
+		if version := managedInterpreterVersion(cleaned); version != "" {
+			return "managed:" + version
+		}
+	case "external-conda":
+		if envName := condaInterpreterEnvironmentName(cleaned); envName != "" {
+			return "external-conda:" + envName
+		}
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+	location := interpreterLocationToken(cleaned)
+	if location == "" {
+		return kind
+	}
+	return kind + ":" + location
+}
+
+func managedInterpreterVersion(path string) string {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for idx := 0; idx < len(parts)-1; idx++ {
+		if parts[idx] != "versions" {
+			continue
+		}
+		version := strings.TrimSpace(parts[idx+1])
+		if version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+func condaInterpreterEnvironmentName(path string) string {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for idx := 0; idx < len(parts)-1; idx++ {
+		if parts[idx] != "envs" {
+			continue
+		}
+		name := strings.TrimSpace(parts[idx+1])
+		if name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func interpreterLocationToken(path string) string {
+	if path == "" || path == "." {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	base := strings.TrimSpace(filepath.Base(dir))
+	switch {
+	case base == "", base == ".", base == string(filepath.Separator), strings.EqualFold(base, "bin"), strings.EqualFold(base, "x64"):
+		parent := strings.TrimSpace(filepath.Base(filepath.Dir(dir)))
+		if parent != "" && parent != "." && parent != string(filepath.Separator) {
+			return parent
+		}
+	default:
+		return base
+	}
+	base = strings.TrimSpace(filepath.Base(path))
+	if base == "" || base == "." {
+		return ""
+	}
+	return base
 }
 
 func mergeDeps(groups ...[]string) []string {
@@ -3953,9 +4596,21 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 		CacheRoot:   env.CacheRoot,
 		LibraryPath: env.LibraryPath,
 		Repo:        env.Repo,
-		Environment: toolchainenv.Apply(os.Environ(), effectivePrefixes, effectivePkgConfig),
+		Environment: toolchainenv.ApplyWithPlan(
+			os.Environ(),
+			effectivePrefixes,
+			effectivePkgConfig,
+			nativeFixupPlanForDependencies(effectivePrefixes, effectivePkgConfig, env.CRANDeps, env.BiocDeps, sourceDeps),
+		),
 		Runtime: installer.Runtime{
-			RVersion: runtime.RVersion,
+			Interpreter:         runtime.Interpreter,
+			InterpreterIdentity: normalizedInterpreterIdentity(runtime.Interpreter, runtime.InterpreterKind),
+			RVersion:            runtime.RVersion,
+			Platform:            runtime.Platform,
+			Arch:                runtime.Arch,
+			OS:                  runtime.OS,
+			PackageType:         runtime.PackageType,
+			InterpreterKind:     runtime.InterpreterKind,
 		},
 		CRANDeps:   copyStrings(env.CRANDeps),
 		BiocDeps:   copyStrings(env.BiocDeps),
@@ -4453,7 +5108,12 @@ func runtimeEnv(env ResolvedEnvironment, installEnabled bool) []string {
 		effectivePrefixes = env.ToolchainPrefixes
 		effectivePkgConfig = env.PkgConfigPath
 	}
-	base := toolchainenv.Apply(os.Environ(), effectivePrefixes, effectivePkgConfig)
+	base := toolchainenv.ApplyWithPlan(
+		os.Environ(),
+		effectivePrefixes,
+		effectivePkgConfig,
+		nativeFixupPlanForDependencies(effectivePrefixes, effectivePkgConfig, env.CRANDeps, env.BiocDeps, env.SourceDeps),
+	)
 	return append(base,
 		"R_PROFILE_USER="+env.BootstrapPath,
 		"R_LIBS_USER="+env.LibraryPath,
@@ -4470,6 +5130,11 @@ func runtimeEnv(env ResolvedEnvironment, installEnabled bool) []string {
 
 func effectiveToolchainConfig(prefixes, pkgConfig []string) ([]string, []string, *toolchainenv.Candidate, error) {
 	return toolchainenv.MergeWithDetected(prefixes, pkgConfig, "")
+}
+
+func nativeFixupPlanForDependencies(prefixes, pkgConfig, cranDeps, biocDeps []string, sourceDeps map[string]project.SourceSpec) toolchainenv.NativeFixupPlan {
+	categories := systemHintCategories(collectSystemDependencyHintDetails(cranDeps, biocDeps, sourceDeps))
+	return toolchainenv.BuildNativeFixupPlanWithEnv(os.Environ(), prefixes, pkgConfig, categories)
 }
 
 func maybeBootstrapResolvedEnvironment(env *ResolvedEnvironment) error {
@@ -5218,13 +5883,15 @@ func managedRRoot() (string, error) {
 }
 
 func wrapExternalInterpreterInstallError(err error, runtime RuntimeMetadata) error {
-	if err == nil || runtime.InterpreterKind != "external-conda" || !looksLikePackageInstallFailure(err) {
+	if err == nil || !looksLikePackageInstallFailure(err) {
 		return err
 	}
-	target := firstNonEmpty(runtime.RVersion, "4.4")
-	hints := []string{
-		fmt.Sprintf("hint: the selected interpreter %s looks like an external Conda-style R; source package installs can be less reliable there. Consider switching to a managed rs R with `rs r install %s && rs r use %s`", runtime.Interpreter, target, target),
+	hints := []string{}
+	if runtime.InterpreterKind == "external-conda" {
+		target := firstNonEmpty(runtime.RVersion, "4.4")
+		hints = append(hints, fmt.Sprintf("hint: the selected interpreter %s looks like an external Conda-style R; source package installs can be less reliable there. Consider switching to a managed rs R with `rs r install %s && rs r use %s`", runtime.Interpreter, target, target))
 	}
+	hints = append(hints, diagnoseNativeLibraryInstallHints(err)...)
 	if looksLikeToolchainFailure(err) {
 		toolchainHint := "hint: if you must stay on the current interpreter, provide a user-local toolchain prefix and validate it with `rs toolchain detect`, `rs toolchain template auto`, and `rs doctor --toolchain-only`"
 		if candidate, detectErr := toolchainenv.RecommendedCandidate(""); detectErr == nil && candidate != nil {
@@ -5232,7 +5899,381 @@ func wrapExternalInterpreterInstallError(err error, runtime RuntimeMetadata) err
 		}
 		hints = append(hints, toolchainHint)
 	}
+	hints = dedupeInstallHints(hints)
+	if len(hints) == 0 {
+		return err
+	}
 	return fmt.Errorf("%w\n%s", err, strings.Join(hints, "\n"))
+}
+
+func diagnoseNativeLibraryInstallHints(err error) []string {
+	diag := buildInstallFailureDiagnostic(err)
+	if diag.Message == "" {
+		return nil
+	}
+	return renderInstallFailureHints(diag)
+}
+
+func buildInstallFailureDiagnostic(err error) InstallFailureDiagnostic {
+	if err == nil {
+		return InstallFailureDiagnostic{}
+	}
+	message := err.Error()
+	diag := InstallFailureDiagnostic{
+		Message:              message,
+		UndefinedSymbol:      extractInstallDiagnosticValue(message, "undefined symbol:"),
+		MissingSharedLibrary: extractMissingSharedLibraryName(message),
+		SharedObjectPath:     extractSharedObjectPath(message),
+	}
+	lower := strings.ToLower(message)
+	diag.ABIMismatch = strings.Contains(lower, "glibcxx_") || strings.Contains(lower, "cxxabi_") || strings.Contains(lower, "libstdc++")
+	if diag.SharedObjectPath == "" {
+		diag.Details = buildInstallFailureDetails(diag)
+		return diag
+	}
+	if info, statErr := os.Stat(diag.SharedObjectPath); statErr != nil || info.IsDir() {
+		diag.Details = buildInstallFailureDetails(diag)
+		return diag
+	}
+	if lddPath, pathErr := nativeDiagLookPath("ldd"); pathErr == nil {
+		if output, runErr := nativeDiagCombinedOutput(lddPath, diag.SharedObjectPath); runErr == nil || len(output) > 0 {
+			diag.MissingRuntimeLibraries = parseLddMissingLibraries(string(output))
+		}
+	}
+	if readelfPath, pathErr := nativeDiagLookPath("readelf"); pathErr == nil {
+		if output, runErr := nativeDiagCombinedOutput(readelfPath, "-d", diag.SharedObjectPath); runErr == nil || len(output) > 0 {
+			diag.Runpath = parseReadelfRunpath(string(output))
+		}
+	}
+	if nmPath, pathErr := nativeDiagLookPath("nm"); pathErr == nil {
+		if output, runErr := nativeDiagCombinedOutput(nmPath, "-D", diag.SharedObjectPath); runErr == nil || len(output) > 0 {
+			diag.UnresolvedSymbols = parseUndefinedDynamicSymbols(string(output))
+		}
+	}
+	diag.Details = buildInstallFailureDetails(diag)
+	return diag
+}
+
+func DiagnoseInstallError(message string) (InstallFailureDiagnostic, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return InstallFailureDiagnostic{}, fmt.Errorf("install error text is empty")
+	}
+	extracted := extractInstallFailureExcerpt(message)
+	diag := buildInstallFailureDiagnostic(errors.New(extracted))
+	diag.InputMessage = message
+	normalizeInstallFailureDiagnostic(&diag)
+	return diag, nil
+}
+
+func normalizeInstallFailureDiagnostic(diag *InstallFailureDiagnostic) {
+	if diag == nil {
+		return
+	}
+	if diag.MissingRuntimeLibraries == nil {
+		diag.MissingRuntimeLibraries = []string{}
+	}
+	if diag.UnresolvedSymbols == nil {
+		diag.UnresolvedSymbols = []string{}
+	}
+	if diag.Details == nil {
+		diag.Details = []InstallFailureDetail{}
+	}
+}
+
+func extractInstallFailureExcerpt(message string) string {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return ""
+	}
+
+	lines := strings.Split(message, "\n")
+	anchor := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if isInstallFailureAnchorLine(lines[i]) {
+			anchor = i
+			break
+		}
+	}
+	if anchor < 0 {
+		return message
+	}
+
+	start := anchor
+	for start > 0 {
+		prev := strings.TrimSpace(lines[start-1])
+		current := strings.TrimSpace(lines[start])
+		if prev == "" {
+			break
+		}
+		if strings.Contains(strings.ToLower(prev), "install ") &&
+			(strings.HasPrefix(current, "Error:") ||
+				strings.HasPrefix(current, "ERROR:") ||
+				strings.HasPrefix(strings.ToLower(current), "unable to load shared object") ||
+				strings.HasPrefix(strings.ToLower(current), "package or namespace load failed")) {
+			break
+		}
+		if strings.HasPrefix(prev, "Error:") || strings.HasPrefix(prev, "ERROR:") || strings.Contains(strings.ToLower(prev), "install ") {
+			start--
+			continue
+		}
+		if strings.HasPrefix(prev, "unable to load shared object") || strings.HasPrefix(prev, "package or namespace load failed") {
+			start--
+			continue
+		}
+		break
+	}
+
+	end := anchor + 1
+	for end < len(lines) {
+		line := strings.TrimSpace(lines[end])
+		if line == "" {
+			break
+		}
+		if isInstallFailureContinuationLine(line) {
+			end++
+			continue
+		}
+		break
+	}
+
+	return strings.TrimSpace(strings.Join(lines[start:end], "\n"))
+}
+
+func isInstallFailureAnchorLine(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	lower := strings.ToLower(line)
+	return strings.Contains(lower, "undefined symbol:") ||
+		strings.Contains(lower, "cannot open shared object file:") ||
+		strings.Contains(lower, "unable to load shared object") ||
+		strings.Contains(lower, "error while loading shared libraries:") ||
+		strings.Contains(lower, "glibcxx_") ||
+		strings.Contains(lower, "cxxabi_") ||
+		strings.Contains(lower, "package or namespace load failed") ||
+		looksLikePackageInstallFailure(errors.New(line))
+}
+
+func isInstallFailureContinuationLine(line string) bool {
+	lower := strings.ToLower(strings.TrimSpace(line))
+	if lower == "" {
+		return false
+	}
+	return strings.HasPrefix(lower, "error:") ||
+		strings.HasPrefix(lower, "error ") ||
+		strings.HasPrefix(lower, "unable to load shared object") ||
+		strings.HasPrefix(lower, "execution halted") ||
+		strings.HasPrefix(lower, "loading failed") ||
+		strings.HasPrefix(lower, "* removing ") ||
+		strings.Contains(lower, "undefined symbol:") ||
+		strings.Contains(lower, "cannot open shared object file:") ||
+		strings.Contains(lower, "error while loading shared libraries:")
+}
+
+func dedupeInstallHints(hints []string) []string {
+	out := make([]string, 0, len(hints))
+	seen := map[string]struct{}{}
+	for _, hint := range hints {
+		hint = strings.TrimSpace(hint)
+		if hint == "" {
+			continue
+		}
+		if _, ok := seen[hint]; ok {
+			continue
+		}
+		seen[hint] = struct{}{}
+		out = append(out, hint)
+	}
+	return out
+}
+
+func extractInstallDiagnosticValue(message, marker string) string {
+	idx := strings.LastIndex(strings.ToLower(message), strings.ToLower(marker))
+	if idx < 0 {
+		return ""
+	}
+	value := strings.TrimSpace(message[idx+len(marker):])
+	if value == "" {
+		return ""
+	}
+	if line, _, ok := strings.Cut(value, "\n"); ok {
+		value = line
+	}
+	if line, _, ok := strings.Cut(value, "\r"); ok {
+		value = line
+	}
+	return strings.TrimSpace(value)
+}
+
+func extractMissingSharedLibraryName(message string) string {
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "cannot open shared object file:") {
+			before, _, _ := strings.Cut(line, "cannot open shared object file:")
+			before = strings.TrimSuffix(strings.TrimSpace(before), ":")
+			if idx := strings.LastIndex(before, ":"); idx >= 0 {
+				before = strings.TrimSpace(before[idx+1:])
+			}
+			return strings.TrimSpace(strings.Trim(before, `"'`))
+		}
+		if idx := strings.Index(line, "error while loading shared libraries:"); idx >= 0 {
+			value := strings.TrimSpace(line[idx+len("error while loading shared libraries:"):])
+			name, _, _ := strings.Cut(value, ":")
+			return strings.TrimSpace(strings.Trim(name, `"'`))
+		}
+	}
+	return ""
+}
+
+func extractSharedObjectPath(message string) string {
+	match := sharedObjectPathPattern.FindStringSubmatch(message)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
+}
+
+func parseLddMissingLibraries(output string) []string {
+	missing := []string{}
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "=> not found") {
+			continue
+		}
+		name, _, _ := strings.Cut(line, "=>")
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		missing = append(missing, name)
+	}
+	return missing
+}
+
+func parseReadelfRunpath(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "Library runpath: [") && !strings.Contains(line, "Library rpath: [") {
+			continue
+		}
+		start := strings.Index(line, "[")
+		end := strings.LastIndex(line, "]")
+		if start < 0 || end <= start {
+			continue
+		}
+		return strings.TrimSpace(line[start+1 : end])
+	}
+	return ""
+}
+
+func parseUndefinedDynamicSymbols(output string) []string {
+	out := []string{}
+	seen := map[string]struct{}{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[0] != "U" {
+			continue
+		}
+		symbol := strings.TrimSpace(fields[len(fields)-1])
+		if symbol == "" {
+			continue
+		}
+		if _, ok := seen[symbol]; ok {
+			continue
+		}
+		seen[symbol] = struct{}{}
+		out = append(out, symbol)
+	}
+	return out
+}
+
+func buildInstallFailureDetails(diag InstallFailureDiagnostic) []InstallFailureDetail {
+	details := []InstallFailureDetail{}
+	if diag.UndefinedSymbol != "" {
+		details = append(details, InstallFailureDetail{
+			Kind:    "undefined_symbol",
+			Message: fmt.Sprintf("detected unresolved runtime symbol `%s`; this usually means the package compiled against a user-local header or library but the final shared-library link step did not receive the matching `-l...` flags", diag.UndefinedSymbol),
+			Symbol:  diag.UndefinedSymbol,
+		})
+	}
+	if diag.MissingSharedLibrary != "" {
+		details = append(details, InstallFailureDetail{
+			Kind:    "missing_shared_library",
+			Message: fmt.Sprintf("detected missing shared library `%s`; runtime lookup is failing before the package can load", diag.MissingSharedLibrary),
+			Library: diag.MissingSharedLibrary,
+		})
+	}
+	if diag.ABIMismatch {
+		details = append(details, InstallFailureDetail{
+			Kind:    "abi_mismatch",
+			Message: "detected a C++ runtime ABI mismatch; the package was likely built with one toolchain but is loading `libstdc++` from another",
+		})
+	}
+	if len(diag.MissingRuntimeLibraries) > 0 {
+		details = append(details, InstallFailureDetail{
+			Kind:         "postmortem_missing_runtime_libraries",
+			Message:      fmt.Sprintf("postmortem `ldd %s` reports missing runtime libraries", diag.SharedObjectPath),
+			SharedObject: diag.SharedObjectPath,
+			Command:      fmt.Sprintf("ldd %s", diag.SharedObjectPath),
+			Libraries:    append([]string(nil), diag.MissingRuntimeLibraries...),
+		})
+	}
+	if diag.SharedObjectPath != "" && diag.Runpath == "" && len(diag.MissingRuntimeLibraries) > 0 {
+		details = append(details, InstallFailureDetail{
+			Kind:         "postmortem_missing_runpath",
+			Message:      fmt.Sprintf("postmortem `readelf -d %s` shows no RPATH/RUNPATH entry", diag.SharedObjectPath),
+			SharedObject: diag.SharedObjectPath,
+			Command:      fmt.Sprintf("readelf -d %s", diag.SharedObjectPath),
+		})
+	}
+	if len(diag.UnresolvedSymbols) > 0 {
+		limit := append([]string(nil), diag.UnresolvedSymbols...)
+		if len(limit) > 5 {
+			limit = limit[:5]
+		}
+		details = append(details, InstallFailureDetail{
+			Kind:         "postmortem_unresolved_symbols",
+			Message:      fmt.Sprintf("postmortem `nm -D %s` still shows unresolved dynamic symbols", diag.SharedObjectPath),
+			SharedObject: diag.SharedObjectPath,
+			Command:      fmt.Sprintf("nm -D %s", diag.SharedObjectPath),
+			Symbols:      limit,
+		})
+	}
+	return details
+}
+
+func renderInstallFailureHints(diag InstallFailureDiagnostic) []string {
+	hints := make([]string, 0, len(diag.Details))
+	for _, detail := range diag.Details {
+		switch detail.Kind {
+		case "undefined_symbol":
+			hints = append(hints, fmt.Sprintf("hint: %s. Check `pkg-config --cflags --libs` for the dependency and, if needed, add the missing flags via `LIBS` or package-specific `PKG_LIBS`.", detail.Message))
+		case "missing_shared_library":
+			hints = append(hints, fmt.Sprintf("hint: %s; make sure the same rootless prefix that provided the build headers is also present on the runtime library path (`LD_LIBRARY_PATH` on Linux) or embedded via RPATH/RUNPATH.", detail.Message))
+		case "abi_mismatch":
+			hints = append(hints, "hint: detected a C++ runtime ABI mismatch; this usually means the package was built with one toolchain but is loading `libstdc++` from another. Rebuild with one consistent compiler/prefix stack and avoid mixing system C++ runtimes with Conda/Homebrew/Spack user-local libraries.")
+		case "postmortem_missing_runtime_libraries":
+			hints = append(hints, fmt.Sprintf("hint: %s: %s", detail.Message, strings.Join(detail.Libraries, ", ")))
+		case "postmortem_missing_runpath":
+			hints = append(hints, fmt.Sprintf("hint: %s, so runtime lookup depends entirely on the active library-path environment.", detail.Message))
+		case "postmortem_unresolved_symbols":
+			hints = append(hints, fmt.Sprintf("hint: %s including: %s", detail.Message, strings.Join(detail.Symbols, ", ")))
+		}
+	}
+	return hints
 }
 
 func looksLikePackageInstallFailure(err error) bool {

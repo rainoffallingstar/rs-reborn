@@ -33,6 +33,39 @@ function Get-LatestTag {
     return [string]$release.tag_name
 }
 
+function Copy-OrDownload {
+    param(
+        [Parameter(Mandatory = $true)][string]$Source,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    if ($Source.StartsWith("file://")) {
+        Copy-Item -LiteralPath ([System.Uri]$Source).LocalPath -Destination $Destination -Force
+        return
+    }
+    if (Test-Path -LiteralPath $Source) {
+        Copy-Item -LiteralPath $Source -Destination $Destination -Force
+        return
+    }
+    Invoke-WebRequest -Uri $Source -Headers (Get-GitHubHeaders) -OutFile $Destination
+}
+
+function Get-ExpectedHash {
+    param(
+        [Parameter(Mandatory = $true)][string]$ChecksumFile,
+        [Parameter(Mandatory = $true)][string]$Asset
+    )
+
+    foreach ($line in Get-Content -LiteralPath $ChecksumFile) {
+        if ($line -match '^(?<hash>[0-9A-Fa-f]{64})[ *]+(?<name>.+)$') {
+            if ($Matches["name"] -eq $Asset) {
+                return $Matches["hash"].ToLowerInvariant()
+            }
+        }
+    }
+    throw "could not find checksum for $Asset in SHA256SUMS"
+}
+
 function Get-Arch {
     $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
     switch ($arch) {
@@ -59,6 +92,7 @@ if (-not [string]::IsNullOrWhiteSpace($BaseUrl)) {
 
 $TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-install-" + [System.Guid]::NewGuid().ToString("N"))
 $ArchivePath = Join-Path $TempDir $Asset
+$ChecksumPath = Join-Path $TempDir "SHA256SUMS"
 $ExtractDir = Join-Path $TempDir "extract"
 
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
@@ -66,16 +100,20 @@ New-Item -ItemType Directory -Force -Path $ExtractDir | Out-Null
 
 try {
     Write-Host "==> downloading $Url"
-    if (-not [string]::IsNullOrWhiteSpace($BaseUrl) -and ($BaseUrl.StartsWith("file://") -or (Test-Path -LiteralPath $BaseUrl))) {
-        $sourceDir = if ($BaseUrl.StartsWith("file://")) {
-            ([System.Uri]$BaseUrl).LocalPath
-        } else {
-            $BaseUrl
-        }
-        Copy-Item -LiteralPath (Join-Path $sourceDir $Asset) -Destination $ArchivePath -Force
+    if (-not [string]::IsNullOrWhiteSpace($BaseUrl)) {
+        Copy-OrDownload -Source (($BaseUrl.TrimEnd('/')) + "/" + $Asset) -Destination $ArchivePath
+        Copy-OrDownload -Source (($BaseUrl.TrimEnd('/')) + "/SHA256SUMS") -Destination $ChecksumPath
     } else {
-        Invoke-WebRequest -Uri $Url -Headers (Get-GitHubHeaders) -OutFile $ArchivePath
+        Copy-OrDownload -Source $Url -Destination $ArchivePath
+        Copy-OrDownload -Source "https://github.com/$RepoOwner/$RepoName/releases/download/$Tag/SHA256SUMS" -Destination $ChecksumPath
     }
+
+    $expectedHash = Get-ExpectedHash -ChecksumFile $ChecksumPath -Asset $Asset
+    $actualHash = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expectedHash -ne $actualHash) {
+        throw "checksum mismatch for $Asset`nexpected: $expectedHash`nactual:   $actualHash"
+    }
+    Write-Host "==> verified sha256 for $Asset"
 
     Write-Host "==> extracting $Asset"
     Expand-Archive -Path $ArchivePath -DestinationPath $ExtractDir -Force

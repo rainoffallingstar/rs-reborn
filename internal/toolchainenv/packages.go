@@ -19,6 +19,36 @@ type PackagePlan struct {
 	Groups         []PackageGroup `json:"groups"`
 }
 
+func NativeCategoriesForPackages(packages []string) []string {
+	if len(packages) == 0 {
+		return nil
+	}
+
+	packageSet := map[string]struct{}{}
+	for _, pkg := range packages {
+		normalized := strings.ToLower(strings.TrimSpace(pkg))
+		if normalized == "" {
+			continue
+		}
+		packageSet[normalized] = struct{}{}
+	}
+	if len(packageSet) == 0 {
+		return nil
+	}
+
+	categories := make([]string, 0, len(nativeCategoryPackageGroups()))
+	for _, group := range nativeCategoryPackageGroups() {
+		for _, pkg := range group.Packages {
+			if _, ok := packageSet[strings.ToLower(pkg)]; !ok {
+				continue
+			}
+			categories = appendUniqueStrings(categories, group.Category)
+			break
+		}
+	}
+	return categories
+}
+
 func BuildPackagePlan(preset string, categories []string) (PackagePlan, error) {
 	normalized := strings.TrimSpace(strings.ToLower(preset))
 	if normalized == "" {
@@ -93,6 +123,31 @@ func basePackagesForPreset(preset string) ([]string, bool) {
 		return []string{"pkgconf", "gcc", "cmake", "libiconv"}, true
 	default:
 		return nil, false
+	}
+}
+
+func nativeCategoryPackageGroups() []PackageGroup {
+	return []PackageGroup{
+		{
+			Category: "network",
+			Packages: []string{"curl", "openssl", "gert", "git2r", "httr", "httr2", "gitcreds", "gh", "crul"},
+		},
+		{
+			Category: "icu",
+			Packages: []string{"stringi", "stringr"},
+		},
+		{
+			Category: "xml",
+			Packages: []string{"xml2", "XML", "xslt", "rvest"},
+		},
+		{
+			Category: "fonts",
+			Packages: []string{"textshaping", "ragg", "systemfonts", "gdtools", "svglite", "showtext"},
+		},
+		{
+			Category: "encoding",
+			Packages: []string{"haven", "readr", "vroom"},
+		},
 	}
 }
 

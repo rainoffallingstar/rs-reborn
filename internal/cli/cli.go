@@ -59,6 +59,8 @@ type toolchainPlanReport struct {
 	DoctorCommand   string                     `json:"doctor_command"`
 }
 
+type installFailureDiagnostic = runner.InstallFailureDiagnostic
+
 var (
 	cliValidateVersionSelector = rmanager.ValidateVersionSelector
 	cliResolveVersionOrPath    = rmanager.ResolveVersionOrPath
@@ -75,6 +77,11 @@ var (
 	cliBootstrapCandidate      = toolchainenv.BootstrapCandidate
 	cliBuildToolchainPackages  = toolchainenv.BuildPackagePlan
 	cliToolchainSetupCommand   = toolchainenv.SetupCommandForCandidate
+	cliDiagnoseInstallError    = runner.DiagnoseInstallError
+	cliReadFile                = os.ReadFile
+	cliVersion                 = "dev"
+	cliCommit                  = "unknown"
+	cliBuildDate               = "unknown"
 )
 
 func (s *stringList) String() string {
@@ -122,14 +129,28 @@ func Run(args []string) error {
 		return checkCommand(args[1:])
 	case "doctor":
 		return doctorCommand(args[1:])
+	case "diagnose-install-error":
+		return diagnoseInstallErrorCommand(args[1:])
 	case "toolchain":
 		return toolchainCommand(args[1:])
+	case "version", "--version":
+		return versionCommand(args[1:])
 	case "-h", "--help", "help":
 		printUsage(os.Stdout)
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", args[0], usageText())
 	}
+}
+
+func versionCommand(args []string) error {
+	if len(args) != 0 {
+		return errors.New("usage: rs version")
+	}
+	fmt.Fprintf(os.Stdout, "rs %s\n", cliVersion)
+	fmt.Fprintf(os.Stdout, "commit: %s\n", cliCommit)
+	fmt.Fprintf(os.Stdout, "build_date: %s\n", cliBuildDate)
+	return nil
 }
 
 func runCommand(args []string) error {
@@ -210,6 +231,56 @@ func toolchainCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown toolchain subcommand %q\n\n%s", args[0], usageText())
 	}
+}
+
+func diagnoseInstallErrorCommand(args []string) error {
+	fs := flag.NewFlagSet("diagnose-install-error", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	jsonOutput := fs.Bool("json", false, "print the install failure diagnostic as JSON")
+	filePath := fs.String("file", "", "path to a file containing install error output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *filePath != "" && fs.NArg() > 0 {
+		return errors.New("usage: rs diagnose-install-error [--json] [--file path/to/error.log] [error text]")
+	}
+	if *filePath == "" && fs.NArg() == 0 {
+		return errors.New("usage: rs diagnose-install-error [--json] [--file path/to/error.log] [error text]")
+	}
+
+	var raw string
+	if *filePath != "" {
+		data, err := cliReadFile(*filePath)
+		if err != nil {
+			return fmt.Errorf("read install error file: %w", err)
+		}
+		raw = string(data)
+	} else {
+		raw = strings.Join(fs.Args(), " ")
+	}
+
+	diag, err := cliDiagnoseInstallError(raw)
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		data, err := json.MarshalIndent(diag, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal install failure diagnostic: %w", err)
+		}
+		fmt.Fprintln(os.Stdout, string(data))
+		return nil
+	}
+
+	fmt.Fprintf(os.Stdout, "[diagnose] message: %s\n", strings.TrimSpace(diag.Message))
+	if diag.SharedObjectPath != "" {
+		fmt.Fprintf(os.Stdout, "[diagnose] shared object: %s\n", diag.SharedObjectPath)
+	}
+	for _, detail := range diag.Details {
+		fmt.Fprintf(os.Stdout, "[diagnose] %s: %s\n", detail.Kind, detail.Message)
+	}
+	return nil
 }
 
 func toolchainTemplateCommand(args []string) error {
@@ -1164,6 +1235,7 @@ func pruneCommand(args []string) error {
 
 	projectDir := fs.String("project-dir", "", "project directory to prune when no script path is provided")
 	dryRun := fs.Bool("dry-run", false, "show which managed libraries would be removed without deleting them")
+	pkgstoreRetentionDays := fs.Int("pkgstore-retention-days", -1, "remove package-store entries unused for more than this many days; defaults to RS_PKGSTORE_RETENTION_DAYS or 30")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1182,11 +1254,12 @@ func pruneCommand(args []string) error {
 	}
 
 	return runner.Prune(runner.PruneOptions{
-		ScriptPath: scriptPath,
-		ProjectDir: *projectDir,
-		DryRun:     *dryRun,
-		Stdout:     os.Stdout,
-		Stderr:     os.Stderr,
+		ScriptPath:                scriptPath,
+		ProjectDir:                *projectDir,
+		DryRun:                    *dryRun,
+		PackageStoreRetentionDays: *pkgstoreRetentionDays,
+		Stdout:                    os.Stdout,
+		Stderr:                    os.Stderr,
 	})
 }
 
@@ -1822,6 +1895,7 @@ func usageText() string {
 	return `rs manages a lightweight per-script R library and runs R scripts with automatic dependency installation.
 
 Usage:
+  rs version
   rs init [flags] [dir]
   rs add [flags] <package> [package...]
   rs remove [flags] <package> [package...]
@@ -1837,6 +1911,7 @@ Usage:
   rs sync [flags] path/to/script.R
   rs check [flags] path/to/script.R
   rs doctor [flags] path/to/script.R
+  rs diagnose-install-error [--json] [--file path/to/error.log] [error text]
   rs toolchain template <preset|auto> [--format toml|env] [--check]
   rs toolchain detect [--json]
   rs toolchain bootstrap <preset|auto> [--json]
@@ -1845,6 +1920,7 @@ Usage:
   rs doctor --toolchain-only [path/to/script.R|path/to/project]
 
 Commands:
+  version print version, commit, and build metadata
   init   create a starter rs.toml for an R project, optionally seeded from a script
   add    add CRAN, Bioconductor, or custom source packages to rs.toml
   remove remove packages from rs.toml
@@ -1860,6 +1936,7 @@ Commands:
   sync   alias for lock
   check  validate the current environment against the lock file
   doctor inspect local prerequisites, source configuration, and lockfile presence
+  diagnose-install-error  classify native-library install failures and emit structured details
   toolchain print, discover, plan, or bootstrap rootless toolchain environments without writing rs.toml
 
 Flags for "init":
@@ -1947,6 +2024,7 @@ Flags for "list":
 Flags for "prune":
   --project-dir <dir>       prune a project by scanning script files under this directory
   --dry-run                 show which managed libraries would be removed without deleting them
+  --pkgstore-retention-days remove package-store entries unused for more than this many days
 
 Flags for "shell":
   --repo <url>              CRAN mirror to use (defaults to rs.toml or cloud.r-project.org)
@@ -1990,11 +2068,15 @@ Flags for "cache rm":
   --project-dir <dir>       project directory used to resolve the cache root when removing by hash
   --cache-dir <dir>         explicit cache root used when removing by hash
   --dry-run                 show which managed library would be removed without deleting it
-  accepts one managed library hash or path under <cache>/lib/
+  accepts one managed library hash, package-store hash, or matching path under <cache>/
 
 Flags for "scan":
   --json                    print detected package dependencies as JSON
   --installable             filter out R bundled base/recommended packages
+
+Flags for "diagnose-install-error":
+  --json                    print the install failure diagnostic as JSON
+  --file <path>             read install error text from a file instead of a positional argument
 
 Flags for "run":
   --repo <url>              CRAN mirror to use (defaults to rs.toml or cloud.r-project.org)

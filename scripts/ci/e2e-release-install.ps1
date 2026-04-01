@@ -18,8 +18,18 @@ try {
     Set-Location $RootDir
 
     Write-Host "==> building host release artifact"
-    go build -trimpath -ldflags="-s -w" -o (Join-Path $StagingDir "rs.exe") ./cmd/rs
+    $commit = (& git rev-parse HEAD 2>$null)
+    if ([string]::IsNullOrWhiteSpace($commit)) {
+        $commit = "unknown"
+    } else {
+        $commit = $commit.Trim()
+    }
+    $buildDate = "2099-01-01T00:00:00Z"
+    $ldflags = "-s -w -X github.com/rainoffallingstar/rs-reborn/internal/cli.cliVersion=$Tag -X github.com/rainoffallingstar/rs-reborn/internal/cli.cliCommit=$commit -X github.com/rainoffallingstar/rs-reborn/internal/cli.cliBuildDate=$buildDate"
+    go build -trimpath -ldflags=$ldflags -o (Join-Path $StagingDir "rs.exe") ./cmd/rs
     Compress-Archive -Path (Join-Path $StagingDir "rs.exe") -DestinationPath (Join-Path $DistDir $Asset) -Force
+    $hash = (Get-FileHash -LiteralPath (Join-Path $DistDir $Asset) -Algorithm SHA256).Hash.ToLowerInvariant()
+    Set-Content -LiteralPath (Join-Path $DistDir "SHA256SUMS") -Value "$hash  $Asset"
 
     Write-Host "==> installing rs from the locally built release artifact"
     $env:RS_INSTALL_TAG = $Tag
@@ -27,6 +37,9 @@ try {
     $env:RS_INSTALL_DIR = $InstallDir
     $installText = (& (Join-Path $RootDir "install.ps1") *>&1) | Out-String
     $installText | Tee-Object -FilePath (Join-Path $TmpDir "install.txt") | Out-Null
+    if ($installText -notmatch "verified sha256") {
+        throw "expected checksum verification output"
+    }
     if (-not (Test-Path -LiteralPath (Join-Path $InstallDir "rs.exe"))) {
         throw "expected installed rs.exe"
     }
@@ -36,6 +49,10 @@ try {
     $helpText | Tee-Object -FilePath (Join-Path $TmpDir "help.txt") | Out-Null
     if ($helpText -notmatch "Usage:") {
         throw "expected help output"
+    }
+    $versionText = (& (Join-Path $InstallDir "rs.exe") version) | Out-String
+    if ($versionText -notmatch "rs $Tag") {
+        throw "expected version output to include release tag"
     }
 
     Write-Host "release install smoke E2E passed"

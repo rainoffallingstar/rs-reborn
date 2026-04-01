@@ -19,6 +19,77 @@ import (
 	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
 
+func TestRunVersionCommand(t *testing.T) {
+	originalVersion := cliVersion
+	originalCommit := cliCommit
+	originalBuildDate := cliBuildDate
+	cliVersion = "2026-04-01"
+	cliCommit = "abc123def456"
+	cliBuildDate = "2026-04-01T10:20:30Z"
+	t.Cleanup(func() {
+		cliVersion = originalVersion
+		cliCommit = originalCommit
+		cliBuildDate = originalBuildDate
+	})
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return Run([]string{"version"})
+	})
+	if err != nil {
+		t.Fatalf("Run(version) error = %v", err)
+	}
+	if !strings.Contains(output, "rs 2026-04-01") {
+		t.Fatalf("Run(version) output = %q, want version line", output)
+	}
+	if !strings.Contains(output, "commit: abc123def456") {
+		t.Fatalf("Run(version) output = %q, want commit line", output)
+	}
+	if !strings.Contains(output, "build_date: 2026-04-01T10:20:30Z") {
+		t.Fatalf("Run(version) output = %q, want build date line", output)
+	}
+}
+
+func TestRunVersionFlag(t *testing.T) {
+	originalVersion := cliVersion
+	originalCommit := cliCommit
+	originalBuildDate := cliBuildDate
+	cliVersion = "2026-04-01"
+	cliCommit = "abc123def456"
+	cliBuildDate = "2026-04-01T10:20:30Z"
+	t.Cleanup(func() {
+		cliVersion = originalVersion
+		cliCommit = originalCommit
+		cliBuildDate = originalBuildDate
+	})
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return Run([]string{"--version"})
+	})
+	if err != nil {
+		t.Fatalf("Run(--version) error = %v", err)
+	}
+	if !strings.Contains(output, "rs 2026-04-01") {
+		t.Fatalf("Run(--version) output = %q, want version line", output)
+	}
+}
+
+func TestRunVersionCommandRejectsArgs(t *testing.T) {
+	err := Run([]string{"version", "extra"})
+	if err == nil || !strings.Contains(err.Error(), "usage: rs version") {
+		t.Fatalf("Run(version extra) error = %v, want usage error", err)
+	}
+}
+
+func TestUsageTextIncludesVersionCommand(t *testing.T) {
+	usage := usageText()
+	if !strings.Contains(usage, "rs version") {
+		t.Fatalf("usageText() missing version usage: %q", usage)
+	}
+	if !strings.Contains(usage, "version print version, commit, and build metadata") {
+		t.Fatalf("usageText() missing version command description: %q", usage)
+	}
+}
+
 func TestInitCommandFromScriptWritesRootPackages(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "scripts", "report.R")
@@ -446,6 +517,7 @@ func TestInitCommandMergesToolchainPresetWithExplicitFlags(t *testing.T) {
 
 func TestInitCommandRejectsAutoToolchainPresetWhenNothingDetected(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("PATH", "")
 	oldHome := cliUserHomeDir
 	t.Cleanup(func() {
 		cliUserHomeDir = oldHome
@@ -672,6 +744,7 @@ func TestToolchainDetectCommandPrintsDetectedCandidates(t *testing.T) {
 
 func TestToolchainDetectCommandJSONOutput(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("PATH", "")
 	prefix := filepath.Join(dir, "micromamba", "envs", "rs-sysdeps")
 	if err := os.MkdirAll(prefix, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q) error = %v", prefix, err)
@@ -722,6 +795,7 @@ func TestToolchainDetectCommandJSONOutput(t *testing.T) {
 
 func TestToolchainDetectCommandPrefersEnvaOverMicromambaWhenBothExist(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("PATH", "")
 	envaPrefix := filepath.Join(dir, ".local", "share", "rattler", "envs", "rs-sysdeps")
 	micromambaPrefix := filepath.Join(dir, "micromamba", "envs", "rs-sysdeps")
 	for _, path := range []string{
@@ -770,6 +844,7 @@ func TestToolchainDetectCommandPrefersEnvaOverMicromambaWhenBothExist(t *testing
 
 func TestToolchainDetectCommandReportsNoCandidates(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("PATH", "")
 	oldHome := cliUserHomeDir
 	t.Cleanup(func() {
 		cliUserHomeDir = oldHome
@@ -908,6 +983,16 @@ func TestToolchainBootstrapCommandJSONOutput(t *testing.T) {
 }
 
 func TestToolchainBootstrapCommandPrintsEnvaPlan(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", "")
+	oldHome := cliUserHomeDir
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+	})
+	cliUserHomeDir = func() (string, error) {
+		return dir, nil
+	}
+
 	output, err := runWithCapturedStdout(t, func() error {
 		return toolchainBootstrapCommand([]string{"enva"})
 	})
@@ -1092,6 +1177,7 @@ func TestRInstallCommandPassesBootstrapToolchainFlag(t *testing.T) {
 
 func TestToolchainDetectCommandSortsAndMarksRecommendedCandidate(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("PATH", "")
 	homebrewPrefix := filepath.Join(dir, "homebrew")
 	micromambaPrefix := filepath.Join(dir, "micromamba", "envs", "rs-sysdeps")
 	for _, path := range []string{
@@ -1472,6 +1558,58 @@ func TestScanCommandInstallableText(t *testing.T) {
 
 	if strings.TrimSpace(output) != "jsonlite" {
 		t.Fatalf("scan output = %q, want only jsonlite", output)
+	}
+}
+
+func TestDiagnoseInstallErrorCommandJSON(t *testing.T) {
+	output, err := runWithCapturedStdout(t, func() error {
+		return diagnoseInstallErrorCommand([]string{"--json", "install haven from cran: unable to load shared object '/tmp/haven.so': /tmp/haven.so: undefined symbol: libiconv"})
+	})
+	if err != nil {
+		t.Fatalf("diagnoseInstallErrorCommand() error = %v", err)
+	}
+
+	var report installFailureDiagnostic
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, output)
+	}
+	if report.UndefinedSymbol != "libiconv" {
+		t.Fatalf("report.UndefinedSymbol = %q", report.UndefinedSymbol)
+	}
+	found := false
+	for _, detail := range report.Details {
+		if detail.Kind == "undefined_symbol" && detail.Symbol == "libiconv" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("report.Details = %#v, want undefined_symbol detail", report.Details)
+	}
+}
+
+func TestDiagnoseInstallErrorCommandReadsFile(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "install.log")
+	raw := strings.Join([]string{
+		"*** installing help indices",
+		"** testing if installed package can be loaded from temporary location",
+		"install xml2 from cran: temporary wrapper",
+		"Error: package or namespace load failed for 'xml2':",
+		" libxml2.so.2: cannot open shared object file: No such file or directory",
+		"Execution halted",
+	}, "\n")
+	if err := os.WriteFile(logPath, []byte(raw), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", logPath, err)
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return diagnoseInstallErrorCommand([]string{"--file", logPath})
+	})
+	if err != nil {
+		t.Fatalf("diagnoseInstallErrorCommand() error = %v", err)
+	}
+	if !strings.Contains(output, "[diagnose] missing_shared_library: detected missing shared library `libxml2.so.2`") {
+		t.Fatalf("diagnoseInstallErrorCommand() output = %q", output)
 	}
 }
 

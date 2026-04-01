@@ -471,7 +471,7 @@ func bootstrapCommandForCandidatePackages(candidate Candidate, env, packages []s
 		if err != nil {
 			return "", false
 		}
-		return envaBootstrapCommandWithPackages(path, packages), true
+		return envaBootstrapCommandForCandidate(path, candidate, packages), true
 	case "micromamba":
 		path, err := FindInPath("micromamba", env)
 		if err != nil {
@@ -704,6 +704,13 @@ func envaBootstrapCommand(path string) string {
 	return envaBootstrapCommandWithPackages(path, nil)
 }
 
+func envaBootstrapCommandForCandidate(path string, candidate Candidate, packages []string) string {
+	if envaEnvironmentExists(candidate) {
+		return envaInstallCommandWithPackages(path, candidateEnvironmentName(candidate), packages)
+	}
+	return envaBootstrapCommandWithPackages(path, packages)
+}
+
 func envaBootstrapCommandWithPackages(path string, packages []string) string {
 	if strings.TrimSpace(path) == "" {
 		path = "enva"
@@ -722,6 +729,34 @@ dependencies:
 %s
 EOF
 "%s" create --yaml "$tmp" --name rs-sysdeps --force --clean-cache`, strings.Join(lines, "\n"), path)
+}
+
+func envaInstallCommandWithPackages(path, envName string, packages []string) string {
+	if strings.TrimSpace(path) == "" {
+		path = "enva"
+	}
+	if strings.TrimSpace(envName) == "" {
+		envName = "rs-sysdeps"
+	}
+	if len(packages) == 0 {
+		packages, _ = basePackagesForPreset("enva")
+	}
+	return fmt.Sprintf(`"%s" install --name "%s" %s`, path, envName, strings.Join(packages, " "))
+}
+
+func envaEnvironmentExists(candidate Candidate) bool {
+	return len(candidate.ExistingPrefixes) > 0
+}
+
+func candidateEnvironmentName(candidate Candidate) string {
+	if len(candidate.ToolchainPrefixes) == 0 {
+		return "rs-sysdeps"
+	}
+	name := strings.TrimSpace(filepath.Base(candidate.ToolchainPrefixes[0]))
+	if name == "" {
+		return "rs-sysdeps"
+	}
+	return name
 }
 
 func condaBootstrapCommand(executable, prefix string, packages []string) string {

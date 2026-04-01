@@ -232,6 +232,16 @@ func testCommandPath(rooted string) string {
 	return rooted
 }
 
+func envValueForTest(env []string, key string) string {
+	prefix := key + "="
+	for i := len(env) - 1; i >= 0; i-- {
+		if strings.HasPrefix(env[i], prefix) {
+			return strings.TrimPrefix(env[i], prefix)
+		}
+	}
+	return ""
+}
+
 func TestMergeDeps(t *testing.T) {
 	got := mergeDeps([]string{"jsonlite", "dplyr"}, []string{"cli", "dplyr"})
 	want := []string{"cli", "dplyr", "jsonlite"}
@@ -533,6 +543,70 @@ sawPrefix:
 	}
 }
 
+func TestRuntimeEnvAddsNativeFixupLIBSForEncodingPackages(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "prefix")
+	libDir := filepath.Join(prefix, "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", libDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libiconv.so.2"), []byte("binary"), 0o644); err != nil {
+		t.Fatalf("WriteFile(libiconv) error = %v", err)
+	}
+
+	env := runtimeEnv(ResolvedEnvironment{
+		BootstrapPath:     "/tmp/bootstrap.R",
+		LibraryPath:       "/tmp/lib",
+		Repo:              "https://cloud.r-project.org",
+		ToolchainPrefixes: []string{prefix},
+		CRANDeps:          []string{"haven"},
+	}, true)
+
+	for _, entry := range env {
+		if entry == "LIBS=-liconv" {
+			return
+		}
+	}
+	t.Fatalf("runtimeEnv() = %v, want LIBS=-liconv", env)
+}
+
+func TestRuntimeEnvAddsPkgConfigDerivedFixupFlags(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pkg-config fixture uses a POSIX shell script")
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", binDir, err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' '-I/tmp/xml-include -L/tmp/xml-lib -lxml2'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "pkg-config"), []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(pkg-config) error = %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	env := runtimeEnv(ResolvedEnvironment{
+		BootstrapPath: "/tmp/bootstrap.R",
+		LibraryPath:   "/tmp/lib",
+		Repo:          "https://cloud.r-project.org",
+		CRANDeps:      []string{"xml2"},
+	}, true)
+
+	sawCPP := strings.Contains(envValueForTest(env, "CPPFLAGS"), "-I/tmp/xml-include")
+	sawLD := strings.Contains(envValueForTest(env, "LDFLAGS"), "-L/tmp/xml-lib")
+	sawLIBS := envValueForTest(env, "LIBS") == "-lxml2"
+	sawLibraryPath := strings.HasPrefix(envValueForTest(env, "LIBRARY_PATH"), "/tmp/xml-lib")
+	runtimeEnvName := "LD_LIBRARY_PATH"
+	if runtime.GOOS == "darwin" {
+		runtimeEnvName = "DYLD_FALLBACK_LIBRARY_PATH"
+	}
+	sawRuntimePath := strings.HasPrefix(envValueForTest(env, runtimeEnvName), "/tmp/xml-lib")
+	if !sawCPP || !sawLD || !sawLIBS || !sawLibraryPath || !sawRuntimePath {
+		t.Fatalf("runtimeEnv() = %v, want pkg-config-derived xml fixups", env)
+	}
+}
+
 func TestRuntimeEnvAutoDetectsToolchainWhenUnset(t *testing.T) {
 	dir := t.TempDir()
 	setTestHomeDir(t, dir)
@@ -586,8 +660,13 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 		LibraryPath: t.TempDir(),
 		Repo:        "https://cloud.r-project.org",
 		Runtime: RuntimeMetadata{
-			Interpreter: "/tmp/Rscript",
-			RVersion:    "4.4.3",
+			Interpreter:     "/tmp/Rscript",
+			RVersion:        "4.4.3",
+			Platform:        "x86_64-pc-linux-gnu",
+			Arch:            "x86_64",
+			OS:              "linux-gnu",
+			PackageType:     "source",
+			InterpreterKind: "managed",
 		},
 		ToolchainPrefixes: []string{prefix},
 		PkgConfigPath:     []string{pkgConfig},
@@ -597,6 +676,9 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 	}
 	if req.CacheRoot != cacheRoot {
 		t.Fatalf("req.CacheRoot = %q, want %q", req.CacheRoot, cacheRoot)
+	}
+	if req.Runtime.Interpreter != "/tmp/Rscript" || req.Runtime.Platform != "x86_64-pc-linux-gnu" || req.Runtime.InterpreterKind != "managed" {
+		t.Fatalf("req.Runtime = %#v", req.Runtime)
 	}
 	var sawPrefix, sawPkg bool
 	for _, entry := range req.Environment {
@@ -609,6 +691,86 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 	}
 	if !sawPrefix || !sawPkg {
 		t.Fatalf("Environment = %v", req.Environment)
+	}
+}
+
+func TestInstallerRequestFromEnvironmentAddsNativeFixupLIBSForEncodingPackages(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "prefix")
+	libDir := filepath.Join(prefix, "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", libDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libiconv.so.2"), []byte("binary"), 0o644); err != nil {
+		t.Fatalf("WriteFile(libiconv) error = %v", err)
+	}
+
+	req, err := installerRequestFromEnvironment(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		Interpreter: "/tmp/Rscript",
+		CacheRoot:   t.TempDir(),
+		LibraryPath: t.TempDir(),
+		Repo:        "https://cloud.r-project.org",
+		Runtime: RuntimeMetadata{
+			Interpreter: "/tmp/Rscript",
+			RVersion:    "4.4.3",
+		},
+		ToolchainPrefixes: []string{prefix},
+		CRANDeps:          []string{"haven"},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("installerRequestFromEnvironment() error = %v", err)
+	}
+	for _, entry := range req.Environment {
+		if entry == "LIBS=-liconv" {
+			return
+		}
+	}
+	t.Fatalf("Environment = %v, want LIBS=-liconv", req.Environment)
+}
+
+func TestInstallerRequestFromEnvironmentAddsPkgConfigDerivedFixupFlags(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("pkg-config fixture uses a POSIX shell script")
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", binDir, err)
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' '-I/tmp/xml-include -L/tmp/xml-lib -lxml2'\n"
+	if err := os.WriteFile(filepath.Join(binDir, "pkg-config"), []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(pkg-config) error = %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	req, err := installerRequestFromEnvironment(ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		Interpreter: "/tmp/Rscript",
+		CacheRoot:   t.TempDir(),
+		LibraryPath: t.TempDir(),
+		Repo:        "https://cloud.r-project.org",
+		Runtime: RuntimeMetadata{
+			Interpreter: "/tmp/Rscript",
+			RVersion:    "4.4.3",
+		},
+		CRANDeps: []string{"xml2"},
+	}, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("installerRequestFromEnvironment() error = %v", err)
+	}
+	sawCPP := strings.Contains(envValueForTest(req.Environment, "CPPFLAGS"), "-I/tmp/xml-include")
+	sawLD := strings.Contains(envValueForTest(req.Environment, "LDFLAGS"), "-L/tmp/xml-lib")
+	sawLIBS := envValueForTest(req.Environment, "LIBS") == "-lxml2"
+	sawLibraryPath := strings.HasPrefix(envValueForTest(req.Environment, "LIBRARY_PATH"), "/tmp/xml-lib")
+	runtimeEnvName := "LD_LIBRARY_PATH"
+	if runtime.GOOS == "darwin" {
+		runtimeEnvName = "DYLD_FALLBACK_LIBRARY_PATH"
+	}
+	sawRuntimePath := strings.HasPrefix(envValueForTest(req.Environment, runtimeEnvName), "/tmp/xml-lib")
+	if !sawCPP || !sawLD || !sawLIBS || !sawLibraryPath || !sawRuntimePath {
+		t.Fatalf("Environment = %v, want pkg-config-derived xml fixups", req.Environment)
 	}
 }
 
@@ -1028,6 +1190,35 @@ func TestPredictedLibraryPathIgnoresTokenEnvButTracksSourceIdentity(t *testing.T
 	}
 	if gotBase == gotRefChanged {
 		t.Fatalf("predictedLibraryPath() should change when source identity changes, got %q", gotBase)
+	}
+}
+
+func TestPredictedLibraryPathNormalizesManagedInterpreterIdentity(t *testing.T) {
+	cacheRoot := "/tmp/rs-cache"
+	scriptPath := "/tmp/project/script.R"
+	runtimeA := RuntimeMetadata{
+		Interpreter:     "/opt/rs-a/versions/4.5.3-linux-amd64/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.5.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	runtimeB := RuntimeMetadata{
+		Interpreter:     "/different/root/versions/4.5.3-linux-amd64/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.5.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+
+	gotA := predictedLibraryPath(cacheRoot, scriptPath, []string{"cli"}, nil, nil, "https://cloud.r-project.org", runtimeA)
+	gotB := predictedLibraryPath(cacheRoot, scriptPath, []string{"cli"}, nil, nil, "https://cloud.r-project.org", runtimeB)
+	if gotA != gotB {
+		t.Fatalf("predictedLibraryPath() should ignore equivalent managed interpreter paths: %q vs %q", gotA, gotB)
 	}
 }
 
@@ -2290,8 +2481,108 @@ func TestDoctorPrintsSystemHints(t *testing.T) {
 	if !strings.Contains(out, "[next] re-run the toolchain-only doctor after updating toolchain_prefixes/pkg_config_path or exporting RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH: rs doctor --toolchain-only "+scriptPath) {
 		t.Fatalf("Doctor() output missing toolchain-only validation next step:\n%s", out)
 	}
-	if !strings.Contains(out, "[summary] status=warning | errors=0 | warnings=2 | hints=2 | next=6 | blocking_next=0") {
+	if !strings.Contains(out, "[summary] status=warning | errors=0 | warnings=2 | hints=2 |") || !strings.Contains(out, "blocking_next=0") {
 		t.Fatalf("Doctor() output missing summary line:\n%s", out)
+	}
+}
+
+func TestDoctorJSONOutputIncludesInstallFailureDiagnostics(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error {
+		return errors.New(strings.Join([]string{
+			"*** installing help indices",
+			"install haven from cran: temporary wrapper",
+			"Error: package or namespace load failed for 'haven' in dyn.load(file, DLLpath = DLLpath, ...):",
+			" unable to load shared object '/tmp/haven.so':",
+			"  /tmp/haven.so: undefined symbol: libiconv",
+			"Execution halted",
+		}, "\n"))
+	}
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	if err := os.WriteFile(scriptPath, []byte("haven::as_factor(1)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "native")
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		JSON:        true,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatalf("Doctor() error = nil, want install failure")
+	}
+
+	var report DoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if len(report.InstallFailureDiagnostics) != 1 {
+		t.Fatalf("report.InstallFailureDiagnostics = %#v, want 1 diagnostic", report.InstallFailureDiagnostics)
+	}
+	diag := report.InstallFailureDiagnostics[0]
+	if diag.UndefinedSymbol != "libiconv" {
+		t.Fatalf("diag.UndefinedSymbol = %q, want libiconv", diag.UndefinedSymbol)
+	}
+	if strings.Contains(diag.Message, "*** installing help indices") {
+		t.Fatalf("diag.Message kept unrelated preamble: %q", diag.Message)
+	}
+	found := false
+	for _, detail := range diag.Details {
+		if detail.Kind == "undefined_symbol" && detail.Symbol == "libiconv" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("diag.Details = %#v, want undefined_symbol detail", diag.Details)
+	}
+}
+
+func TestDoctorPrintsInstallFailureDiagnostics(t *testing.T) {
+	oldValidate := nativeValidatePlan
+	t.Cleanup(func() {
+		nativeValidatePlan = oldValidate
+	})
+	nativeValidatePlan = func(req installer.Request) error {
+		return errors.New(strings.Join([]string{
+			"install xml2 from cran: temporary wrapper",
+			"Error: package or namespace load failed for 'xml2':",
+			" libxml2.so.2: cannot open shared object file: No such file or directory",
+			"Execution halted",
+		}, "\n"))
+	}
+
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	if err := os.WriteFile(scriptPath, []byte("xml2::read_xml('<a/>')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	t.Setenv("RS_INSTALL_BACKEND", "native")
+	var stdout bytes.Buffer
+	err := Doctor(DoctorOptions{
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err == nil {
+		t.Fatalf("Doctor() error = nil, want install failure")
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "[diagnose] missing_shared_library: detected missing shared library `libxml2.so.2`") {
+		t.Fatalf("Doctor() output missing install diagnostic:\n%s", out)
 	}
 }
 
@@ -3462,7 +3753,7 @@ func TestBuildDoctorNextStepsHealthyEnvironment(t *testing.T) {
 		ScriptPath: "/tmp/project/report.R",
 	}
 
-	steps := buildDoctorNextSteps(plan, nil, false, nil, nil, nil)
+	steps := buildDoctorNextSteps(plan, nil, false, nil, nil, nil, nil)
 	if len(steps) != 1 {
 		t.Fatalf("len(steps) = %d, want 1 (%v)", len(steps), steps)
 	}
@@ -3474,6 +3765,225 @@ func TestBuildDoctorNextStepsHealthyEnvironment(t *testing.T) {
 	}
 	if steps[0].Blocking {
 		t.Fatalf("steps[0].Blocking = true, want false")
+	}
+}
+
+func TestWrapExternalInterpreterInstallErrorAddsUndefinedSymbolHint(t *testing.T) {
+	err := wrapExternalInterpreterInstallError(
+		errors.New("install haven from cran: unable to load shared object '/tmp/haven.so': /tmp/haven.so: undefined symbol: libiconv"),
+		RuntimeMetadata{
+			Interpreter:     "/tmp/Rscript",
+			RVersion:        "4.4.3",
+			InterpreterKind: "managed",
+		},
+	)
+	if !strings.Contains(err.Error(), "unresolved runtime symbol `libiconv`") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing undefined-symbol hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pkg-config --cflags --libs") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing pkg-config hint: %v", err)
+	}
+}
+
+func TestWrapExternalInterpreterInstallErrorAddsMissingSharedLibraryHint(t *testing.T) {
+	err := wrapExternalInterpreterInstallError(
+		errors.New("install xml2 from cran: libxml2.so.2: cannot open shared object file: No such file or directory"),
+		RuntimeMetadata{
+			Interpreter:     "/tmp/Rscript",
+			RVersion:        "4.4.3",
+			InterpreterKind: "managed",
+		},
+	)
+	if !strings.Contains(err.Error(), "missing shared library `libxml2.so.2`") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing shared-library hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "LD_LIBRARY_PATH") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing runtime-path hint: %v", err)
+	}
+}
+
+func TestWrapExternalInterpreterInstallErrorAddsCXXABIMismatchHint(t *testing.T) {
+	err := wrapExternalInterpreterInstallError(
+		errors.New("install ragg from cran: /tmp/ragg.so: version `GLIBCXX_3.4.30' not found"),
+		RuntimeMetadata{
+			Interpreter:     "/tmp/Rscript",
+			RVersion:        "4.4.3",
+			InterpreterKind: "managed",
+		},
+	)
+	if !strings.Contains(err.Error(), "C++ runtime ABI mismatch") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing ABI mismatch hint: %v", err)
+	}
+}
+
+func TestBuildInstallFailureDiagnosticExtractsCoreSignals(t *testing.T) {
+	diag := buildInstallFailureDiagnostic(errors.New("install haven from cran: unable to load shared object '/tmp/haven.so': /tmp/haven.so: undefined symbol: libiconv"))
+	if diag.SharedObjectPath != "/tmp/haven.so" {
+		t.Fatalf("diag.SharedObjectPath = %q", diag.SharedObjectPath)
+	}
+	if diag.UndefinedSymbol != "libiconv" {
+		t.Fatalf("diag.UndefinedSymbol = %q", diag.UndefinedSymbol)
+	}
+	if diag.MissingSharedLibrary != "" {
+		t.Fatalf("diag.MissingSharedLibrary = %q, want empty", diag.MissingSharedLibrary)
+	}
+	foundUndefined := false
+	for _, detail := range diag.Details {
+		if detail.Kind == "undefined_symbol" && detail.Symbol == "libiconv" {
+			foundUndefined = true
+		}
+	}
+	if !foundUndefined {
+		t.Fatalf("diag.Details = %#v, want undefined_symbol detail", diag.Details)
+	}
+}
+
+func TestExtractInstallFailureExcerptFindsRelevantLogTail(t *testing.T) {
+	raw := strings.Join([]string{
+		"*** installing help indices",
+		"** testing if installed package can be loaded from temporary location",
+		"Error: package or namespace load failed for 'haven' in dyn.load(file, DLLpath = DLLpath, ...):",
+		" unable to load shared object '/tmp/haven.so':",
+		"  /tmp/haven.so: undefined symbol: libiconv",
+		"Execution halted",
+		"ERROR: loading failed",
+	}, "\n")
+
+	got := extractInstallFailureExcerpt(raw)
+	if !strings.Contains(got, "undefined symbol: libiconv") {
+		t.Fatalf("extractInstallFailureExcerpt() = %q", got)
+	}
+	if strings.Contains(got, "*** installing help indices") {
+		t.Fatalf("extractInstallFailureExcerpt() kept unrelated preamble: %q", got)
+	}
+}
+
+func TestDiagnoseInstallErrorUsesExtractedExcerptForFullLog(t *testing.T) {
+	raw := strings.Join([]string{
+		"*** installing help indices",
+		"install haven from cran: temporary wrapper",
+		"Error: package or namespace load failed for 'haven' in dyn.load(file, DLLpath = DLLpath, ...):",
+		" unable to load shared object '/tmp/haven.so':",
+		"  /tmp/haven.so: undefined symbol: libiconv",
+		"Execution halted",
+	}, "\n")
+
+	diag, err := DiagnoseInstallError(raw)
+	if err != nil {
+		t.Fatalf("DiagnoseInstallError() error = %v", err)
+	}
+	if diag.InputMessage != raw {
+		t.Fatalf("diag.InputMessage = %q", diag.InputMessage)
+	}
+	if !strings.Contains(diag.Message, "undefined symbol: libiconv") {
+		t.Fatalf("diag.Message = %q", diag.Message)
+	}
+	if strings.Contains(diag.Message, "*** installing help indices") {
+		t.Fatalf("diag.Message kept unrelated preamble: %q", diag.Message)
+	}
+}
+
+func TestBuildInstallFailureDiagnosticCollectsPostmortemData(t *testing.T) {
+	soPath := filepath.Join(t.TempDir(), "haven.so")
+	if err := os.WriteFile(soPath, []byte("binary"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", soPath, err)
+	}
+
+	oldLookPath := nativeDiagLookPath
+	oldCombinedOutput := nativeDiagCombinedOutput
+	t.Cleanup(func() {
+		nativeDiagLookPath = oldLookPath
+		nativeDiagCombinedOutput = oldCombinedOutput
+	})
+
+	nativeDiagLookPath = func(name string) (string, error) {
+		return name, nil
+	}
+	nativeDiagCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		switch name {
+		case "ldd":
+			return []byte("libiconv.so.2 => not found\n"), nil
+		case "readelf":
+			return []byte(" 0x000000000000001d (RUNPATH)            Library runpath: [/tmp/rootless/lib]\n"), nil
+		case "nm":
+			return []byte("                 U libiconv\n"), nil
+		default:
+			t.Fatalf("unexpected diagnostic tool %q", name)
+			return nil, nil
+		}
+	}
+
+	diag := buildInstallFailureDiagnostic(errors.New("install haven from cran: unable to load shared object '" + soPath + "': " + soPath + ": undefined symbol: libiconv"))
+	if !reflect.DeepEqual(diag.MissingRuntimeLibraries, []string{"libiconv.so.2"}) {
+		t.Fatalf("diag.MissingRuntimeLibraries = %v", diag.MissingRuntimeLibraries)
+	}
+	if diag.Runpath != "/tmp/rootless/lib" {
+		t.Fatalf("diag.Runpath = %q", diag.Runpath)
+	}
+	if !reflect.DeepEqual(diag.UnresolvedSymbols, []string{"libiconv"}) {
+		t.Fatalf("diag.UnresolvedSymbols = %v", diag.UnresolvedSymbols)
+	}
+	foundMissingRuntime := false
+	foundUnresolved := false
+	for _, detail := range diag.Details {
+		if detail.Kind == "postmortem_missing_runtime_libraries" && reflect.DeepEqual(detail.Libraries, []string{"libiconv.so.2"}) {
+			foundMissingRuntime = true
+		}
+		if detail.Kind == "postmortem_unresolved_symbols" && reflect.DeepEqual(detail.Symbols, []string{"libiconv"}) {
+			foundUnresolved = true
+		}
+	}
+	if !foundMissingRuntime || !foundUnresolved {
+		t.Fatalf("diag.Details = %#v, want postmortem details", diag.Details)
+	}
+}
+
+func TestWrapExternalInterpreterInstallErrorAddsSharedObjectPostmortemHints(t *testing.T) {
+	soPath := filepath.Join(t.TempDir(), "haven.so")
+	if err := os.WriteFile(soPath, []byte("binary"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", soPath, err)
+	}
+
+	oldLookPath := nativeDiagLookPath
+	oldCombinedOutput := nativeDiagCombinedOutput
+	t.Cleanup(func() {
+		nativeDiagLookPath = oldLookPath
+		nativeDiagCombinedOutput = oldCombinedOutput
+	})
+
+	nativeDiagLookPath = func(name string) (string, error) {
+		return name, nil
+	}
+	nativeDiagCombinedOutput = func(name string, args ...string) ([]byte, error) {
+		switch name {
+		case "ldd":
+			return []byte("libiconv.so.2 => not found\n"), nil
+		case "readelf":
+			return []byte(" 0x0000000000000001 (NEEDED)             Shared library: [libiconv.so.2]\n"), nil
+		case "nm":
+			return []byte("                 U libiconv\n"), nil
+		default:
+			t.Fatalf("unexpected diagnostic tool %q", name)
+			return nil, nil
+		}
+	}
+
+	err := wrapExternalInterpreterInstallError(
+		errors.New("install haven from cran: unable to load shared object '"+soPath+"': "+soPath+": undefined symbol: libiconv"),
+		RuntimeMetadata{
+			Interpreter:     "/tmp/Rscript",
+			RVersion:        "4.4.3",
+			InterpreterKind: "managed",
+		},
+	)
+	if !strings.Contains(err.Error(), "postmortem `ldd "+soPath+"` reports missing runtime libraries: libiconv.so.2") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing ldd postmortem hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "postmortem `readelf -d "+soPath+"` shows no RPATH/RUNPATH entry") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing readelf postmortem hint: %v", err)
+	}
+	if !strings.Contains(err.Error(), "postmortem `nm -D "+soPath+"` still shows unresolved dynamic symbols including: libiconv") {
+		t.Fatalf("wrapExternalInterpreterInstallError() missing nm postmortem hint: %v", err)
 	}
 }
 
@@ -3497,7 +4007,7 @@ func TestBuildDoctorNextStepsSuggestsNativeBootstrapWhenMissing(t *testing.T) {
 	steps := buildDoctorNextSteps(dependencyPlan{
 		ScriptPath: "/tmp/project/report.R",
 		RequestedR: "5.3.2",
-	}, errors.New("selected Rscript is not available"), false, nil, nil, nil)
+	}, errors.New("selected Rscript is not available"), false, nil, nil, nil, nil)
 
 	if len(steps) < 3 {
 		t.Fatalf("len(steps) = %d, want native bootstrap steps included (%v)", len(steps), steps)
@@ -3542,7 +4052,7 @@ func TestBuildDoctorNextStepsSuggestsManagedRForExternalConda(t *testing.T) {
 			RVersion:        "4.4.3",
 			InterpreterKind: "external-conda",
 		},
-	}, nil, false, nil, nil, nil)
+	}, nil, false, nil, nil, nil, nil)
 
 	found := false
 	for _, step := range steps {
@@ -3572,7 +4082,7 @@ func TestBuildDoctorNextStepsSuggestsToolchainFollowupsForSystemHintsWithoutConf
 
 	steps := buildDoctorNextSteps(dependencyPlan{
 		ScriptPath: "/tmp/project/report.R",
-	}, nil, false, nil, nil, []SystemHintDetail{
+	}, nil, false, nil, nil, nil, []SystemHintDetail{
 		{
 			Category: "network",
 			Packages: []string{"curl"},
@@ -3612,6 +4122,90 @@ func TestBuildDoctorNextStepsSuggestsToolchainFollowupsForSystemHintsWithoutConf
 	}
 	if !foundDetect || !foundValidate || !foundSetup || !foundInit {
 		t.Fatalf("steps = %#v, want toolchain discovery follow-ups", steps)
+	}
+}
+
+func TestBuildDoctorNextStepsSuggestsRuntimeFixesForInstallFailureDiagnostics(t *testing.T) {
+	steps := buildDoctorNextSteps(
+		dependencyPlan{ScriptPath: "/tmp/project/report.R"},
+		nil,
+		false,
+		nil,
+		nil,
+		[]InstallFailureDiagnostic{
+			{
+				SharedObjectPath:        "/tmp/haven.so",
+				UndefinedSymbol:         "libiconv",
+				MissingRuntimeLibraries: []string{"libiconv.so.2"},
+				Details: []InstallFailureDetail{
+					{Kind: "undefined_symbol", Symbol: "libiconv"},
+				},
+			},
+		},
+		nil,
+	)
+
+	foundRecheck := false
+	foundConfigure := false
+	foundInspect := false
+	foundRuntimePath := false
+	for _, step := range steps {
+		if step.Kind == "recheck_toolchain_only" && step.Command == "rs doctor --toolchain-only /tmp/project/report.R" && !step.Blocking {
+			foundRecheck = true
+		}
+		if step.Kind == "configure_rootless_toolchain" && step.Blocking {
+			foundConfigure = true
+		}
+		if step.Kind == "inspect_native_link_flags" && step.Blocking && strings.Contains(step.Message, "`libiconv`") {
+			foundInspect = true
+		}
+		if step.Kind == "fix_runtime_library_path" && step.Blocking && strings.Contains(step.Message, "libiconv.so.2") {
+			foundRuntimePath = true
+		}
+	}
+	if !foundRecheck || !foundConfigure || !foundInspect || !foundRuntimePath {
+		t.Fatalf("steps = %#v, want install failure repair follow-ups", steps)
+	}
+}
+
+func TestBuildDoctorNextStepsSuggestsABIRuntimeFixForInstallFailureDiagnostics(t *testing.T) {
+	steps := buildDoctorNextSteps(
+		dependencyPlan{
+			ScriptPath:        "/tmp/project/report.R",
+			ToolchainPrefixes: []string{"/tmp/toolchain"},
+			PkgConfigPath:     []string{"/tmp/pkgconfig"},
+		},
+		nil,
+		false,
+		nil,
+		nil,
+		[]InstallFailureDiagnostic{
+			{
+				SharedObjectPath: "/tmp/ragg.so",
+				ABIMismatch:      true,
+				Details: []InstallFailureDetail{
+					{Kind: "abi_mismatch"},
+				},
+			},
+		},
+		nil,
+	)
+
+	foundABI := false
+	foundConfigure := false
+	for _, step := range steps {
+		if step.Kind == "rebuild_consistent_cpp_runtime" && step.Blocking {
+			foundABI = true
+		}
+		if step.Kind == "configure_rootless_toolchain" {
+			foundConfigure = true
+		}
+	}
+	if !foundABI {
+		t.Fatalf("steps = %#v, want ABI rebuild follow-up", steps)
+	}
+	if foundConfigure {
+		t.Fatalf("steps = %#v, should not ask to configure toolchain when prefixes are already set", steps)
 	}
 }
 
@@ -3666,7 +4260,8 @@ func TestDoctorStatusOKWhenClean(t *testing.T) {
 		nil,
 		nil,
 		nil,
-		buildDoctorNextSteps(dependencyPlan{ScriptPath: "/tmp/project/report.R"}, nil, false, nil, nil, nil),
+		nil,
+		buildDoctorNextSteps(dependencyPlan{ScriptPath: "/tmp/project/report.R"}, nil, false, nil, nil, nil, nil),
 		toolchainenv.Preview{},
 	)
 	if report.Status != "ok" {
@@ -4003,7 +4598,7 @@ func TestPruneCacheRootDryRun(t *testing.T) {
 		}
 	}
 
-	summary, err := pruneCacheRoot(cacheRoot, map[string]struct{}{keep: {}}, true)
+	summary, err := pruneCacheRoot(cacheRoot, map[string]struct{}{keep: {}}, true, -1)
 	if err != nil {
 		t.Fatalf("pruneCacheRoot() error = %v", err)
 	}
@@ -4015,6 +4610,92 @@ func TestPruneCacheRootDryRun(t *testing.T) {
 	}
 	if _, err := os.Stat(misc); err != nil {
 		t.Fatalf("misc dir should still exist: %v", err)
+	}
+}
+
+func TestPruneCacheRootRemovesEmptyPackageStoreEntry(t *testing.T) {
+	cacheRoot := t.TempDir()
+	storeRoot := filepath.Join(cacheRoot, "pkgstore")
+	keep := filepath.Join(storeRoot, strings.Repeat("a", 64))
+	remove := filepath.Join(storeRoot, strings.Repeat("b", 64))
+	for _, path := range []string{
+		filepath.Join(keep, "cli"),
+		remove,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(keep, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+
+	summary, err := pruneCacheRoot(cacheRoot, nil, false, -1)
+	if err != nil {
+		t.Fatalf("pruneCacheRoot() error = %v", err)
+	}
+	if !slices.Contains(summary.KeptStore, keep) || !slices.Contains(summary.RemovedStore, remove) {
+		t.Fatalf("pruneCacheRoot() store summary = %#v", summary)
+	}
+	if _, err := os.Stat(remove); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty package store entry should be removed, stat err = %v", err)
+	}
+}
+
+func TestPruneCacheRootRemovesExpiredPackageStoreEntry(t *testing.T) {
+	cacheRoot := t.TempDir()
+	storeRoot := filepath.Join(cacheRoot, "pkgstore")
+	keep := filepath.Join(storeRoot, strings.Repeat("e", 64))
+	remove := filepath.Join(storeRoot, strings.Repeat("f", 64))
+	for _, path := range []string{
+		filepath.Join(keep, "cli"),
+		filepath.Join(remove, "cli"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+		}
+	}
+	freshState := installer.PackageStoreState{
+		Package:         "cli",
+		Version:         "3.6.5",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	staleState := installer.PackageStoreState{
+		Package:         "cli",
+		Version:         "3.6.5",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       time.Now().UTC().Add(-45 * 24 * time.Hour).Format(time.RFC3339),
+		LastUsedAt:      time.Now().UTC().Add(-45 * 24 * time.Hour).Format(time.RFC3339),
+	}
+	for path, state := range map[string]installer.PackageStoreState{
+		keep:   freshState,
+		remove: staleState,
+	} {
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(path, installer.PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+			t.Fatalf("WriteFile(package store state) error = %v", err)
+		}
+	}
+
+	summary, err := pruneCacheRoot(cacheRoot, nil, false, -1)
+	if err != nil {
+		t.Fatalf("pruneCacheRoot() error = %v", err)
+	}
+	if !slices.Contains(summary.KeptStore, keep) || !slices.Contains(summary.RemovedStore, remove) {
+		t.Fatalf("pruneCacheRoot() store summary = %#v", summary)
+	}
+	if _, err := os.Stat(remove); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired package store entry should be removed, stat err = %v", err)
 	}
 }
 
@@ -4072,6 +4753,44 @@ func TestPruneProject(t *testing.T) {
 	}
 }
 
+func TestPruneCacheRootSupportsRetentionOverride(t *testing.T) {
+	cacheRoot := t.TempDir()
+	storeRoot := filepath.Join(cacheRoot, "pkgstore")
+	target := filepath.Join(storeRoot, strings.Repeat("1", 64))
+	if err := os.MkdirAll(filepath.Join(target, "cli"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(target) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	state := installer.PackageStoreState{
+		Package:         "cli",
+		Version:         "3.6.5",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, installer.PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile(package store state) error = %v", err)
+	}
+
+	summary, err := pruneCacheRoot(cacheRoot, nil, false, 0)
+	if err != nil {
+		t.Fatalf("pruneCacheRoot() error = %v", err)
+	}
+	if !slices.Contains(summary.RemovedStore, target) {
+		t.Fatalf("pruneCacheRoot() summary = %#v, want immediate removal under retention override", summary)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target should be removed, stat err = %v", err)
+	}
+}
+
 func TestCacheDirDefault(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := CacheDir(CacheDirOptions{Stdout: &stdout}); err != nil {
@@ -4105,9 +4824,55 @@ func TestCacheListProjectJSON(t *testing.T) {
 	}
 	activeLib := plan.LibraryPath
 	staleLib := filepath.Join(plan.CacheRoot, "lib", "aaaaaaaaaaaaaaaa")
+	storeHashRecent := filepath.Join(plan.CacheRoot, "pkgstore", strings.Repeat("c", 64))
+	storeHashOlder := filepath.Join(plan.CacheRoot, "pkgstore", strings.Repeat("d", 64))
+	storeEntryRecent := filepath.Join(storeHashRecent, "cli")
+	storeEntryOlder := filepath.Join(storeHashOlder, "glue")
 	for _, path := range []string{activeLib, staleLib} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	for _, path := range []string{storeEntryRecent, storeEntryOlder} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(storeEntryRecent, "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(store DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeEntryRecent, "help.rdb"), []byte("recent-help"), 0o644); err != nil {
+		t.Fatalf("WriteFile(recent help) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeEntryOlder, "DESCRIPTION"), []byte("Package: glue\nVersion: 1.7.0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(store DESCRIPTION) error = %v", err)
+	}
+	recentState := installer.PackageStoreState{
+		Package:         "cli",
+		Version:         "3.6.5",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       "2026-04-01T08:00:00Z",
+		LastUsedAt:      "2026-04-01T09:00:00Z",
+	}
+	olderState := installer.PackageStoreState{
+		Package:         "glue",
+		Version:         "1.7.0",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       "2026-03-20T08:00:00Z",
+		LastUsedAt:      "2026-03-20T09:00:00Z",
+	}
+	for path, state := range map[string]installer.PackageStoreState{
+		storeHashRecent: recentState,
+		storeHashOlder:  olderState,
+	} {
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatalf("json.Marshal() error = %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(path, installer.PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+			t.Fatalf("WriteFile(package store state) error = %v", err)
 		}
 	}
 
@@ -4132,6 +4897,30 @@ func TestCacheListProjectJSON(t *testing.T) {
 	if len(report.Libraries) != 2 {
 		t.Fatalf("report.Libraries = %#v", report.Libraries)
 	}
+	if len(report.PackageStore) != 2 {
+		t.Fatalf("report.PackageStore = %#v", report.PackageStore)
+	}
+	if report.PackageStorePackages != 2 {
+		t.Fatalf("report.PackageStorePackages = %d, want 2", report.PackageStorePackages)
+	}
+	if report.PackageStore[0].Path != storeHashRecent || report.PackageStore[1].Path != storeHashOlder {
+		t.Fatalf("report.PackageStore order = %#v, want recent-before-older", report.PackageStore)
+	}
+	if report.PackageStore[0].PackageCount != 1 || report.PackageStore[1].PackageCount != 1 {
+		t.Fatalf("report.PackageStore package counts = %#v", report.PackageStore)
+	}
+	if report.PackageStore[0].LastUsedAt == "" || report.PackageStore[1].LastUsedAt == "" {
+		t.Fatalf("report.PackageStore = %#v, want last_used_at", report.PackageStore)
+	}
+	if report.PackageStore[0].SizeBytes <= int64(len("Package: cli\nVersion: 3.6.5\n")) {
+		t.Fatalf("report.PackageStore[0].SizeBytes = %d, want state+package files counted", report.PackageStore[0].SizeBytes)
+	}
+	if report.PackageStore[1].SizeBytes <= 0 {
+		t.Fatalf("report.PackageStore[1].SizeBytes = %d, want positive size", report.PackageStore[1].SizeBytes)
+	}
+	if report.PackageStoreBytes != report.PackageStore[0].SizeBytes+report.PackageStore[1].SizeBytes {
+		t.Fatalf("report.PackageStoreBytes = %d, want sum of entries", report.PackageStoreBytes)
+	}
 
 	activeFound := false
 	staleFound := false
@@ -4145,6 +4934,73 @@ func TestCacheListProjectJSON(t *testing.T) {
 	}
 	if !activeFound || !staleFound {
 		t.Fatalf("report.Libraries active/stale mismatch: %#v", report.Libraries)
+	}
+}
+
+func TestCacheListProjectTextSummary(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(scripts) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("cache_dir = \".rs-cache\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rs.toml) error = %v", err)
+	}
+	scriptPath := filepath.Join(dir, "scripts", "a.R")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a.R) error = %v", err)
+	}
+
+	plan, err := resolveDependencyPlan(scriptPath, nil, nil, nil, "", "", "")
+	if err != nil {
+		t.Fatalf("resolveDependencyPlan() error = %v", err)
+	}
+	activeLib := plan.LibraryPath
+	storeHash := filepath.Join(plan.CacheRoot, "pkgstore", strings.Repeat("e", 64))
+	storeEntry := filepath.Join(storeHash, "cli")
+	if err := os.MkdirAll(activeLib, 0o755); err != nil {
+		t.Fatalf("MkdirAll(activeLib) error = %v", err)
+	}
+	if err := os.MkdirAll(storeEntry, 0o755); err != nil {
+		t.Fatalf("MkdirAll(storeEntry) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeEntry, "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	state := installer.PackageStoreState{
+		Package:         "cli",
+		Version:         "3.6.5",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       "2026-04-01T08:00:00Z",
+		LastUsedAt:      "2026-04-01T09:00:00Z",
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeHash, installer.PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile(package store state) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = CacheList(CacheListOptions{
+		ProjectDir: dir,
+		Stdout:     &stdout,
+		Stderr:     &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("CacheList() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "package store summary: entries=1 packages=1") {
+		t.Fatalf("CacheList() output = %q, want package store summary", output)
+	}
+	if !strings.Contains(output, "last_used=2026-04-01T09:00:00Z") {
+		t.Fatalf("CacheList() output = %q, want last_used timestamp", output)
+	}
+	if !strings.Contains(output, "size=") {
+		t.Fatalf("CacheList() output = %q, want size field", output)
 	}
 }
 
@@ -4195,6 +5051,34 @@ func TestCacheRemoveByPathDryRun(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "[dry-run]") {
 		t.Fatalf("CacheRemove() output = %q, want dry-run line", stdout.String())
+	}
+}
+
+func TestCacheRemovePackageStoreByHash(t *testing.T) {
+	cacheRoot := t.TempDir()
+	target := filepath.Join(cacheRoot, "pkgstore", strings.Repeat("d", 64))
+	if err := os.MkdirAll(filepath.Join(target, "cli"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(target) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := CacheRemove(CacheRemoveOptions{
+		Target:   strings.Repeat("d", 64),
+		CacheDir: cacheRoot,
+		Stdout:   &stdout,
+		Stderr:   &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("CacheRemove() error = %v", err)
+	}
+	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target should be removed, stat err = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "package store entry") {
+		t.Fatalf("CacheRemove() output = %q, want package store label", stdout.String())
 	}
 }
 

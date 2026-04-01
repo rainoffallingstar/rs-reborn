@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,17 +34,18 @@ import (
 )
 
 const (
-	sourceCRAN          = "cran"
-	sourceBioconductor  = "bioconductor"
-	sourceLocal         = "local"
-	sourceGit           = "git"
-	sourceGitHub        = "github"
-	localKindFileSHA256 = "file_sha256"
-	localKindDirSHA256  = "dir_tree_sha256"
-	localKindMissing    = "missing"
-	localKindError      = "unavailable"
-	defaultHTTPTimeout  = 90 * time.Second
-	httpRetryAttempts   = 3
+	sourceCRAN            = "cran"
+	sourceBioconductor    = "bioconductor"
+	sourceLocal           = "local"
+	sourceGit             = "git"
+	sourceGitHub          = "github"
+	localKindFileSHA256   = "file_sha256"
+	localKindDirSHA256    = "dir_tree_sha256"
+	localKindMissing      = "missing"
+	localKindError        = "unavailable"
+	defaultHTTPTimeout    = 90 * time.Second
+	httpRetryAttempts     = 3
+	PackageStoreStateFile = ".rs-store-state.json"
 )
 
 var (
@@ -54,7 +56,14 @@ var (
 )
 
 type Runtime struct {
-	RVersion string
+	Interpreter         string
+	InterpreterIdentity string
+	RVersion            string
+	Platform            string
+	Arch                string
+	OS                  string
+	PackageType         string
+	InterpreterKind     string
 }
 
 type Request struct {
@@ -153,6 +162,15 @@ type installedPackage struct {
 	FingerprintKind string
 }
 
+type PackageStoreState struct {
+	Package         string `json:"package"`
+	Version         string `json:"version"`
+	Source          string `json:"source"`
+	RuntimeIdentity string `json:"runtime_identity"`
+	UpdatedAt       string `json:"updated_at,omitempty"`
+	LastUsedAt      string `json:"last_used_at,omitempty"`
+}
+
 type description struct {
 	Package          string
 	Version          string
@@ -243,6 +261,12 @@ func Install(req Request) error {
 	if err := inst.plan(); err != nil {
 		return err
 	}
+	if err := inst.seedPlannedPackagesFromStore(); err != nil {
+		return err
+	}
+	if err := inst.seedPlannedPackagesFromCache(); err != nil {
+		return err
+	}
 
 	if inst.canParallelInstallPurePackages() {
 		for _, layer := range installPlanLayers(inst.planned, inst.order) {
@@ -263,7 +287,9 @@ func Install(req Request) error {
 				return err
 			}
 			for _, name := range installed {
-				inst.installedPackages[name] = installedPackageForPlanned(inst.planned[name])
+				if err := inst.recordPlannedPackageInstalled(name); err != nil {
+					return err
+				}
 			}
 			for _, name := range compiled {
 				installed, err := inst.installPlannedPackage(name)
@@ -271,7 +297,9 @@ func Install(req Request) error {
 					return err
 				}
 				if installed {
-					inst.installedPackages[name] = installedPackageForPlanned(inst.planned[name])
+					if err := inst.recordPlannedPackageInstalled(name); err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -284,11 +312,313 @@ func Install(req Request) error {
 			return err
 		}
 		if installed {
-			inst.installedPackages[name] = installedPackageForPlanned(inst.planned[name])
+			if err := inst.recordPlannedPackageInstalled(name); err != nil {
+				return err
+			}
 		}
 	}
 
 	return nil
+}
+
+func (i *nativeInstaller) recordPlannedPackageInstalled(name string) error {
+	pkg, ok := i.planned[name]
+	if !ok {
+		return fmt.Errorf("planned package %s not found", name)
+	}
+	i.installedPackages[name] = installedPackageForPlanned(pkg)
+	return i.syncPlannedPackageToStore(name)
+}
+
+func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
+	if len(i.planned) == 0 || strings.TrimSpace(i.req.CacheRoot) == "" || strings.TrimSpace(i.req.LibraryPath) == "" {
+		return nil
+	}
+
+	for name, pkg := range i.planned {
+		if i.isPlannedPackageInstalled(pkg) {
+			continue
+		}
+		storeLibrary := packageStorePathForPlanned(i.req.CacheRoot, pkg, i.req.Runtime)
+		if strings.TrimSpace(storeLibrary) == "" {
+			continue
+		}
+		installed, err := loadInstalledPackagesFromLibrary(storeLibrary)
+		if err != nil {
+			return err
+		}
+		installedPkg, ok := installed[name]
+		if !ok || !plannedPackageMatchesInstalled(pkg, installedPkg) {
+			continue
+		}
+		if err := copyInstalledPackage(storeLibrary, i.req.LibraryPath, name); err != nil {
+			return err
+		}
+		if err := copyInstalledPackageMetadata(storeLibrary, i.metaDir, name); err != nil {
+			return err
+		}
+		if err := touchPackageStoreLastUsed(storeLibrary, pkg, i.req.Runtime, time.Now().UTC()); err != nil {
+			return err
+		}
+		i.installedPackages[name] = installedPkg
+		progresscmd.Stage(i.stderr, "reusing stored "+name)
+	}
+	return nil
+}
+
+func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
+	if len(i.planned) == 0 || strings.TrimSpace(i.req.CacheRoot) == "" || strings.TrimSpace(i.req.LibraryPath) == "" {
+		return nil
+	}
+
+	libraryRoot := filepath.Join(i.req.CacheRoot, "lib")
+	entries, err := os.ReadDir(libraryRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read managed library cache root: %w", err)
+	}
+
+	currentLibrary := filepath.Clean(i.req.LibraryPath)
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		candidateLibrary := filepath.Join(libraryRoot, entry.Name())
+		if filepath.Clean(candidateLibrary) == currentLibrary {
+			continue
+		}
+		installed, err := loadInstalledPackagesFromLibrary(candidateLibrary)
+		if err != nil {
+			return err
+		}
+		if len(installed) == 0 {
+			continue
+		}
+		for name, pkg := range i.planned {
+			if i.isPlannedPackageInstalled(pkg) {
+				continue
+			}
+			installedPkg, ok := installed[name]
+			if !ok || !plannedPackageMatchesInstalled(pkg, installedPkg) {
+				continue
+			}
+			if err := copyInstalledPackage(candidateLibrary, i.req.LibraryPath, name); err != nil {
+				return err
+			}
+			if err := copyInstalledPackageMetadata(candidateLibrary, i.metaDir, name); err != nil {
+				return err
+			}
+			i.installedPackages[name] = installedPkg
+			if err := i.syncPlannedPackageToStore(name); err != nil {
+				return err
+			}
+			progresscmd.Stage(i.stderr, "reusing cached "+name+" from "+entry.Name())
+		}
+	}
+	return nil
+}
+
+func (i *nativeInstaller) syncPlannedPackageToStore(name string) error {
+	if strings.TrimSpace(i.req.CacheRoot) == "" || strings.TrimSpace(i.req.LibraryPath) == "" {
+		return nil
+	}
+	pkg, ok := i.planned[name]
+	if !ok {
+		return nil
+	}
+	storeLibrary := packageStorePathForPlanned(i.req.CacheRoot, pkg, i.req.Runtime)
+	if strings.TrimSpace(storeLibrary) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(storeLibrary, 0o755); err != nil {
+		return fmt.Errorf("create package store dir for %s: %w", name, err)
+	}
+	if err := copyInstalledPackage(i.req.LibraryPath, storeLibrary, name); err != nil {
+		return err
+	}
+	if err := copyInstalledPackageMetadata(i.req.LibraryPath, filepath.Join(storeLibrary, ".rs-source-meta"), name); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	return writePackageStoreState(storeLibrary, pkg, i.req.Runtime, PackageStoreState{
+		UpdatedAt:  now.Format(time.RFC3339),
+		LastUsedAt: now.Format(time.RFC3339),
+	})
+}
+
+func packageStoreRoot(cacheRoot string) string {
+	if strings.TrimSpace(cacheRoot) == "" {
+		return ""
+	}
+	return filepath.Join(cacheRoot, "pkgstore")
+}
+
+func packageStorePathForPlanned(cacheRoot string, pkg plannedPackage, runtime Runtime) string {
+	root := packageStoreRoot(cacheRoot)
+	if root == "" {
+		return ""
+	}
+	sum := sha256.New()
+	for _, part := range packageStoreIdentityParts(pkg, runtime) {
+		_, _ = sum.Write([]byte(part))
+		_, _ = sum.Write([]byte{0})
+	}
+	return filepath.Join(root, hex.EncodeToString(sum.Sum(nil)))
+}
+
+func packageStoreIdentityParts(pkg plannedPackage, runtime Runtime) []string {
+	parts := []string{
+		"v1",
+		pkg.Name,
+		pkg.Version,
+		pkg.Source,
+		runtimeInterpreterIdentity(runtime),
+		runtime.RVersion,
+		runtime.Platform,
+		runtime.Arch,
+		runtime.OS,
+		runtime.PackageType,
+	}
+	if pkg.Prepared != nil {
+		parts = append(parts,
+			pkg.Prepared.Host,
+			pkg.Prepared.Location,
+			pkg.Prepared.Ref,
+			pkg.Prepared.Commit,
+			pkg.Prepared.Subdir,
+			pkg.Prepared.Fingerprint,
+			pkg.Prepared.FingerprintKind,
+		)
+	}
+	return parts
+}
+
+func runtimeInterpreterIdentity(runtime Runtime) string {
+	if identity := strings.TrimSpace(runtime.InterpreterIdentity); identity != "" {
+		return identity
+	}
+	kind := strings.TrimSpace(runtime.InterpreterKind)
+	cleaned := strings.TrimSpace(filepath.Clean(runtime.Interpreter))
+	switch kind {
+	case "managed":
+		if version := managedInterpreterVersion(cleaned); version != "" {
+			return "managed:" + version
+		}
+	case "external-conda":
+		if envName := condaInterpreterEnvironmentName(cleaned); envName != "" {
+			return "external-conda:" + envName
+		}
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+	location := interpreterLocationToken(cleaned)
+	if location == "" {
+		return kind
+	}
+	return kind + ":" + location
+}
+
+func writePackageStoreState(storeLibrary string, pkg plannedPackage, runtime Runtime, state PackageStoreState) error {
+	if strings.TrimSpace(storeLibrary) == "" {
+		return nil
+	}
+	if err := os.MkdirAll(storeLibrary, 0o755); err != nil {
+		return err
+	}
+	state.Package = pkg.Name
+	state.Version = pkg.Version
+	state.Source = pkg.Source
+	state.RuntimeIdentity = runtimeInterpreterIdentity(runtime)
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal package store state for %s: %w", pkg.Name, err)
+	}
+	if err := os.WriteFile(filepath.Join(storeLibrary, PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write package store state for %s: %w", pkg.Name, err)
+	}
+	return nil
+}
+
+func readPackageStoreState(storeLibrary string) (PackageStoreState, error) {
+	data, err := os.ReadFile(filepath.Join(storeLibrary, PackageStoreStateFile))
+	if err != nil {
+		return PackageStoreState{}, err
+	}
+	var state PackageStoreState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return PackageStoreState{}, fmt.Errorf("decode package store state: %w", err)
+	}
+	return state, nil
+}
+
+func touchPackageStoreLastUsed(storeLibrary string, pkg plannedPackage, runtime Runtime, when time.Time) error {
+	state, err := readPackageStoreState(storeLibrary)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return writePackageStoreState(storeLibrary, pkg, runtime, PackageStoreState{
+			LastUsedAt: when.Format(time.RFC3339),
+		})
+	}
+	if state.UpdatedAt == "" {
+		state.UpdatedAt = when.Format(time.RFC3339)
+	}
+	state.LastUsedAt = when.Format(time.RFC3339)
+	return writePackageStoreState(storeLibrary, pkg, runtime, state)
+}
+
+func managedInterpreterVersion(path string) string {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for idx := 0; idx < len(parts)-1; idx++ {
+		if parts[idx] != "versions" {
+			continue
+		}
+		version := strings.TrimSpace(parts[idx+1])
+		if version != "" {
+			return version
+		}
+	}
+	return ""
+}
+
+func condaInterpreterEnvironmentName(path string) string {
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	for idx := 0; idx < len(parts)-1; idx++ {
+		if parts[idx] != "envs" {
+			continue
+		}
+		name := strings.TrimSpace(parts[idx+1])
+		if name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
+func interpreterLocationToken(path string) string {
+	if path == "" || path == "." {
+		return ""
+	}
+	dir := filepath.Dir(path)
+	base := strings.TrimSpace(filepath.Base(dir))
+	switch {
+	case base == "", base == ".", base == string(filepath.Separator), strings.EqualFold(base, "bin"), strings.EqualFold(base, "x64"):
+		parent := strings.TrimSpace(filepath.Base(filepath.Dir(dir)))
+		if parent != "" && parent != "." && parent != string(filepath.Separator) {
+			return parent
+		}
+	default:
+		return base
+	}
+	base = strings.TrimSpace(filepath.Base(path))
+	if base == "" || base == "." {
+		return ""
+	}
+	return base
 }
 
 func (i *nativeInstaller) canParallelInstallPurePackages() bool {
@@ -1182,7 +1512,7 @@ func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 	if err != nil {
 		return fmt.Errorf("download %s: %w", record.Name, err)
 	}
-	if err := i.runRCommandInstall(target); err != nil {
+	if err := i.runRCommandInstall(record.Name, target); err != nil {
 		return fmt.Errorf("install %s from %s: %w", record.Name, record.Source, err)
 	}
 	if err := removeSourceMetadata(i.metaDir, record.Name); err != nil {
@@ -1221,14 +1551,18 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 			return err
 		}
 	}
-	if err := i.runRCommandInstall(prepared.InstallPath); err != nil {
+	if err := i.runRCommandInstall(prepared.Name, prepared.InstallPath); err != nil {
 		return fmt.Errorf("install %s from %s source: %w", prepared.Name, prepared.Source, err)
 	}
 	return writeSourceMetadata(i.metaDir, prepared.Name, prepared)
 }
 
-func (i *nativeInstaller) runRCommandInstall(target string) error {
-	cmd, err := buildInstallCommand(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, target)
+func (i *nativeInstaller) runRCommandInstall(packageName, target string) error {
+	installTarget, err := i.prepareInstallTarget(packageName, target)
+	if err != nil {
+		return err
+	}
+	cmd, err := buildInstallCommand(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, packageName, installTarget)
 	if err != nil {
 		return err
 	}
@@ -1239,8 +1573,8 @@ func (i *nativeInstaller) runRCommandInstall(target string) error {
 	return nil
 }
 
-func buildInstallCommand(rBinary, workDir, cacheRoot, libraryPath string, env []string, target string) (*exec.Cmd, error) {
-	installEnv := withInstallEnv(withLibraryEnv(env, libraryPath), cacheRoot)
+func buildInstallCommand(rBinary, workDir, cacheRoot, libraryPath string, env []string, packageName, target string) (*exec.Cmd, error) {
+	installEnv := withInstallEnv(withPackageNativeFixups(withLibraryEnv(env, libraryPath), packageName), cacheRoot)
 	wrappedName, wrappedArgs, wrappedEnv, _, err := toolchainenv.WrapCommand(
 		rBinary,
 		[]string{"CMD", "INSTALL", "-l", libraryPath, target},
@@ -1253,6 +1587,325 @@ func buildInstallCommand(rBinary, workDir, cacheRoot, libraryPath string, env []
 	cmd.Dir = workDir
 	cmd.Env = wrappedEnv
 	return cmd, nil
+}
+
+func (i *nativeInstaller) prepareInstallTarget(packageName, target string) (string, error) {
+	categories := toolchainenv.NativeCategoriesForPackages([]string{packageName})
+	if !slices.Contains(categories, "encoding") {
+		return target, nil
+	}
+	libDir := encodingLibraryDir(i.req.Environment)
+	if libDir == "" {
+		return target, nil
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return target, nil
+	}
+
+	sourceRoot, err := unpackSourceTarget(target, i.tempRoot)
+	if err != nil {
+		return "", err
+	}
+	if err := patchEncodingMakevars(sourceRoot, libDir); err != nil {
+		return "", err
+	}
+	return sourceRoot, nil
+}
+
+func encodingLibraryDir(env []string) string {
+	for _, prefix := range toolchainenv.PrefixesFromEnv(env) {
+		libDir := filepath.Join(strings.TrimSpace(prefix), "lib")
+		entries, err := os.ReadDir(libDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			name := strings.ToLower(strings.TrimSpace(entry.Name()))
+			if name == "libiconv.so" || strings.HasPrefix(name, "libiconv.so.") || name == "libiconv.dylib" || strings.HasPrefix(name, "libiconv.dylib.") || name == "libiconv.a" {
+				return libDir
+			}
+		}
+	}
+	return ""
+}
+
+func unpackSourceTarget(target, tempRoot string) (string, error) {
+	dest, err := os.MkdirTemp(tempRoot, "patched-source-*")
+	if err != nil {
+		return "", err
+	}
+
+	lower := strings.ToLower(target)
+	switch {
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+		if err := unpackTarGz(target, dest); err != nil {
+			return "", err
+		}
+	case strings.HasSuffix(lower, ".zip"):
+		if err := unpackZipArchive(target, dest); err != nil {
+			return "", err
+		}
+	default:
+		return target, nil
+	}
+	return unpackedSourceRoot(dest)
+}
+
+func unpackedSourceRoot(dest string) (string, error) {
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		return "", err
+	}
+	dirs := make([]fs.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirs = append(dirs, entry)
+		}
+	}
+	if len(dirs) == 1 {
+		return filepath.Join(dest, dirs[0].Name()), nil
+	}
+	return dest, nil
+}
+
+func unpackTarGz(target, dest string) error {
+	file, err := os.Open(target)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	gzReader, err := gzip.NewReader(file)
+	if err != nil {
+		return err
+	}
+	defer gzReader.Close()
+
+	tarReader := tar.NewReader(gzReader)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		path, err := archiveEntryPath(dest, header.Name)
+		if err != nil {
+			return err
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA:
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				return err
+			}
+			file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, fs.FileMode(header.Mode))
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(file, tarReader); err != nil {
+				file.Close()
+				return err
+			}
+			if err := file.Close(); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func unpackZipArchive(target, dest string) error {
+	reader, err := zip.OpenReader(target)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+
+	for _, file := range reader.File {
+		path, err := archiveEntryPath(dest, file.Name)
+		if err != nil {
+			return err
+		}
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		rc, err := file.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, file.Mode())
+		if err != nil {
+			rc.Close()
+			return err
+		}
+		if _, err := io.Copy(out, rc); err != nil {
+			out.Close()
+			rc.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			rc.Close()
+			return err
+		}
+		if err := rc.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func archiveEntryPath(dest, name string) (string, error) {
+	clean := filepath.Clean(name)
+	if clean == "." || clean == string(filepath.Separator) {
+		return dest, nil
+	}
+	full := filepath.Join(dest, clean)
+	rel, err := filepath.Rel(dest, full)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("archive entry escapes destination: %s", name)
+	}
+	return full, nil
+}
+
+func patchEncodingMakevars(sourceRoot, libDir string) error {
+	flags := []string{"-L" + libDir, "-liconv"}
+	patched := false
+	for _, relative := range []string{"src/Makevars.in", "src/Makevars"} {
+		path := filepath.Join(sourceRoot, filepath.FromSlash(relative))
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if err := prependMakevarsFlags(path, "PKG_LIBS", flags); err != nil {
+			return err
+		}
+		patched = true
+	}
+	if patched {
+		return nil
+	}
+	return fmt.Errorf("encoding fixup could not find src/Makevars(.in) under %s", sourceRoot)
+}
+
+func prependMakevarsFlags(path, variable string, flags []string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	needle := strings.Join(flags, " ")
+	changed := false
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, variable) {
+			continue
+		}
+		if strings.Contains(line, needle) {
+			return nil
+		}
+		assign := strings.Index(line, "=")
+		if assign < 0 {
+			continue
+		}
+		prefix := strings.TrimRight(line[:assign+1], " \t")
+		value := strings.TrimSpace(line[assign+1:])
+		switch {
+		case strings.Contains(value, "@libs@"):
+			value = strings.Replace(value, "@libs@", needle+" @libs@", 1)
+		case value == "":
+			value = needle
+		default:
+			value = needle + " " + value
+		}
+		lines[i] = prefix + " " + value
+		changed = true
+		break
+	}
+
+	if !changed {
+		lines = append(lines, variable+" += "+needle)
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+func withPackageNativeFixups(env []string, packageName string) []string {
+	categories := toolchainenv.NativeCategoriesForPackages([]string{packageName})
+	if len(categories) == 0 {
+		return env
+	}
+
+	prefixes := toolchainenv.PrefixesFromEnv(env)
+	pkgConfigPaths := toolchainenv.PkgConfigPathsFromEnv(env)
+	plan := toolchainenv.BuildNativeFixupPlanWithEnv(env, prefixes, pkgConfigPaths, categories)
+	if len(plan.CPPFLAGS) == 0 && len(plan.LDFLAGS) == 0 && len(plan.LIBS) == 0 {
+		return env
+	}
+	return withMakeLinkerFixups(toolchainenv.ApplyWithPlan(env, prefixes, pkgConfigPaths, plan), prefixes, plan)
+}
+
+func withMakeLinkerFixups(env, prefixes []string, plan toolchainenv.NativeFixupPlan) []string {
+	flags := make([]string, 0, len(plan.LDFLAGS)+len(plan.LIBS))
+	for _, prefix := range prefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			continue
+		}
+		flags = append(flags, "-L"+filepath.Join(prefix, "lib"))
+	}
+	flags = append(flags, plan.LDFLAGS...)
+	flags = append(flags, plan.LIBS...)
+	if len(flags) == 0 {
+		return env
+	}
+
+	current := ""
+	filtered := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "SAN_LIBS=") {
+			current = strings.TrimSpace(strings.TrimPrefix(entry, "SAN_LIBS="))
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+
+	merged := make([]string, 0, len(strings.Fields(current))+len(flags))
+	for _, flag := range strings.Fields(current) {
+		if flag == "" || slices.Contains(merged, flag) {
+			continue
+		}
+		merged = append(merged, flag)
+	}
+	for _, flag := range flags {
+		flag = strings.TrimSpace(flag)
+		if flag == "" || slices.Contains(merged, flag) {
+			continue
+		}
+		merged = append(merged, flag)
+	}
+	if len(merged) == 0 {
+		return filtered
+	}
+	return append(filtered, "SAN_LIBS="+strings.Join(merged, " "))
 }
 
 func (i *nativeInstaller) download(rawURL, name string) (string, error) {
@@ -1317,35 +1970,40 @@ func (i *nativeInstaller) cloneGitSource(rawURL, ref, pkg, tokenEnv string) (str
 }
 
 func (i *nativeInstaller) loadInstalledPackages() error {
-	entries, err := os.ReadDir(i.req.LibraryPath)
-	if errors.Is(err, os.ErrNotExist) {
-		i.installedPackages = map[string]installedPackage{}
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read managed library: %w", err)
-	}
-
-	metaByName, err := readInstalledSourceMetadata(i.metaDir)
+	installed, err := loadInstalledPackagesFromLibrary(i.req.LibraryPath)
 	if err != nil {
 		return err
+	}
+	i.installedPackages = installed
+	return nil
+}
+
+func loadInstalledPackagesFromLibrary(libraryPath string) (map[string]installedPackage, error) {
+	entries, err := os.ReadDir(libraryPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]installedPackage{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read managed library: %w", err)
+	}
+
+	metaByName, err := readInstalledSourceMetadata(filepath.Join(libraryPath, ".rs-source-meta"))
+	if err != nil {
+		return nil, err
 	}
 
 	installed := map[string]installedPackage{}
 	for _, entry := range entries {
-		if !entry.IsDir() {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
-		if strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		descPath := filepath.Join(i.req.LibraryPath, entry.Name(), "DESCRIPTION")
+		descPath := filepath.Join(libraryPath, entry.Name(), "DESCRIPTION")
 		data, err := os.ReadFile(descPath)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return fmt.Errorf("read installed DESCRIPTION for %s: %w", entry.Name(), err)
+			return nil, fmt.Errorf("read installed DESCRIPTION for %s: %w", entry.Name(), err)
 		}
 		fields := map[string]string{}
 		for _, record := range parseDCF(data) {
@@ -1378,8 +2036,99 @@ func (i *nativeInstaller) loadInstalledPackages() error {
 		}
 		installed[entry.Name()] = pkg
 	}
-	i.installedPackages = installed
+	return installed, nil
+}
+
+func copyInstalledPackage(sourceLibrary, targetLibrary, pkg string) error {
+	sourcePath := filepath.Join(sourceLibrary, pkg)
+	targetPath := filepath.Join(targetLibrary, pkg)
+	if err := os.RemoveAll(targetPath); err != nil {
+		return fmt.Errorf("clear target package dir for %s: %w", pkg, err)
+	}
+	return copyDirectoryTree(sourcePath, targetPath)
+}
+
+func copyInstalledPackageMetadata(sourceLibrary, targetMetaDir, pkg string) error {
+	if strings.TrimSpace(targetMetaDir) == "" {
+		return nil
+	}
+	sourceMeta := filepath.Join(sourceLibrary, ".rs-source-meta", pkg+".tsv")
+	data, err := os.ReadFile(sourceMeta)
+	if errors.Is(err, os.ErrNotExist) {
+		return removeSourceMetadata(targetMetaDir, pkg)
+	}
+	if err != nil {
+		return fmt.Errorf("read source metadata for %s: %w", pkg, err)
+	}
+	if err := os.MkdirAll(targetMetaDir, 0o755); err != nil {
+		return fmt.Errorf("create source metadata dir: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(targetMetaDir, pkg+".tsv"), data, 0o644); err != nil {
+		return fmt.Errorf("write source metadata for %s: %w", pkg, err)
+	}
 	return nil
+}
+
+func copyDirectoryTree(sourceRoot, targetRoot string) error {
+	return filepath.WalkDir(sourceRoot, func(sourcePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(sourceRoot, sourcePath)
+		if err != nil {
+			return err
+		}
+		targetPath := targetRoot
+		if rel != "." {
+			targetPath = filepath.Join(targetRoot, rel)
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		switch {
+		case entry.IsDir():
+			return os.MkdirAll(targetPath, info.Mode().Perm())
+		case entry.Type()&os.ModeSymlink != 0:
+			linkTarget, err := os.Readlink(sourcePath)
+			if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+				return err
+			}
+			return os.Symlink(linkTarget, targetPath)
+		default:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+				return err
+			}
+			return hardLinkOrCopyFile(sourcePath, targetPath, info.Mode().Perm())
+		}
+	})
+}
+
+func hardLinkOrCopyFile(sourcePath, targetPath string, mode fs.FileMode) error {
+	if err := os.Link(sourcePath, targetPath); err == nil {
+		return nil
+	}
+	return copyFileWithMode(sourcePath, targetPath, mode)
+}
+
+func copyFileWithMode(sourcePath, targetPath string, mode fs.FileMode) error {
+	in, err := os.Open(sourcePath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 func (i *nativeInstaller) isPlannedPackageInstalled(pkg plannedPackage) bool {

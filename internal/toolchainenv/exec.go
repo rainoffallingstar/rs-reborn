@@ -132,6 +132,9 @@ func heuristicCandidateFromEnvironment(env []string) *Candidate {
 		SuggestedSetupNote:    suggestedSetupNote(preset, prefixes),
 	}
 	candidate.Complete = len(candidate.ExistingPrefixes) == len(prefixes) && len(candidate.ExistingPkgConfigPath) == len(pkgConfig)
+	if candidate.Preset == "enva" && len(candidate.ExistingPrefixes) > 0 {
+		candidate.SuggestedSetupCommand = envaInstallCommandWithPackages("enva", filepath.Base(prefixes[0]), nil)
+	}
 	return candidate
 }
 
