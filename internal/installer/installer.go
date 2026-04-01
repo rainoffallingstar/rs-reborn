@@ -45,6 +45,7 @@ const (
 	localKindError        = "unavailable"
 	defaultHTTPTimeout    = 90 * time.Second
 	httpRetryAttempts     = 3
+	repoIndexCacheTTL     = 30 * time.Minute
 	PackageStoreStateFile = ".rs-store-state.json"
 )
 
@@ -2487,7 +2488,7 @@ func (i *nativeInstaller) ensureCRANIndex() error {
 		return nil
 	}
 	i.stage("fetching CRAN package index")
-	index, err := fetchRepoIndex(i.httpClient, strings.TrimRight(i.req.Repo, "/"), sourceCRAN, i.req.Runtime.RVersion)
+	index, err := fetchRepoIndexCached(i.httpClient, strings.TrimRight(i.req.Repo, "/"), sourceCRAN, i.req.Runtime.RVersion, i.repoIndexCacheDir())
 	if err != nil {
 		return fmt.Errorf("load CRAN index: %w", err)
 	}
@@ -2534,7 +2535,7 @@ func (i *nativeInstaller) ensureBiocMainIndex() error {
 		return nil
 	}
 	i.stage("fetching Bioconductor package index")
-	records, err := fetchRepoIndex(i.httpClient, biocMainRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion)
+	records, err := fetchRepoIndexCached(i.httpClient, biocMainRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion, i.repoIndexCacheDir())
 	if err != nil {
 		return fmt.Errorf("load Bioconductor index: %w", err)
 	}
@@ -2548,7 +2549,7 @@ func (i *nativeInstaller) ensureBiocAnnotationIndex() error {
 		return nil
 	}
 	i.stage("fetching Bioconductor annotation index")
-	records, err := fetchRepoIndex(i.httpClient, biocAnnotationRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion)
+	records, err := fetchRepoIndexCached(i.httpClient, biocAnnotationRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion, i.repoIndexCacheDir())
 	if err != nil {
 		return fmt.Errorf("load Bioconductor annotation index: %w", err)
 	}
@@ -2562,7 +2563,7 @@ func (i *nativeInstaller) ensureBiocExperimentIndex() error {
 		return nil
 	}
 	i.stage("fetching Bioconductor experiment index")
-	records, err := fetchRepoIndex(i.httpClient, biocExperimentRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion)
+	records, err := fetchRepoIndexCached(i.httpClient, biocExperimentRepositoryURL(i.req.Runtime.RVersion), sourceBioconductor, i.req.Runtime.RVersion, i.repoIndexCacheDir())
 	if err != nil {
 		return fmt.Errorf("load Bioconductor experiment index: %w", err)
 	}
@@ -2572,11 +2573,15 @@ func (i *nativeInstaller) ensureBiocExperimentIndex() error {
 }
 
 func fetchRepoIndex(client *http.Client, baseURL, source, rVersion string) (map[string][]repoRecord, error) {
+	return fetchRepoIndexCached(client, baseURL, source, rVersion, "")
+}
+
+func fetchRepoIndexCached(client *http.Client, baseURL, source, rVersion, cacheDir string) (map[string][]repoRecord, error) {
 	contribURL, archiveExt := repositoryContribURL(strings.TrimRight(baseURL, "/"), source, rVersion)
 
-	data, err := fetchPackagesFile(client, contribURL+"/PACKAGES.gz")
+	data, err := fetchPackagesFileCached(client, contribURL+"/PACKAGES.gz", cacheDir)
 	if err != nil {
-		data, err = fetchPackagesFile(client, contribURL+"/PACKAGES")
+		data, err = fetchPackagesFileCached(client, contribURL+"/PACKAGES", cacheDir)
 		if err != nil {
 			return nil, err
 		}
@@ -2601,6 +2606,13 @@ func fetchRepoIndex(client *http.Client, baseURL, source, rVersion string) (map[
 		})
 	}
 	return index, nil
+}
+
+func (i *nativeInstaller) repoIndexCacheDir() string {
+	if strings.TrimSpace(i.downloadRoot) == "" {
+		return ""
+	}
+	return filepath.Join(i.downloadRoot, "indexes")
 }
 
 func appendRepoCandidate(index map[string][]repoRecord, record repoRecord) {
@@ -2636,8 +2648,89 @@ func fetchPackagesFile(client *http.Client, rawURL string) ([]byte, error) {
 	return nil, lastErr
 }
 
+func fetchPackagesFileCached(client *http.Client, rawURL, cacheDir string) ([]byte, error) {
+	cachePath := repoIndexCachePath(cacheDir, rawURL)
+	if data, ok := readFreshRepoIndexCache(cachePath, time.Now()); ok {
+		return data, nil
+	}
+
+	data, err := fetchPackagesFile(client, rawURL)
+	if err == nil {
+		if writeErr := writeRepoIndexCache(cachePath, data); writeErr != nil {
+			return data, nil
+		}
+		return data, nil
+	}
+	if stale, ok := readAnyRepoIndexCache(cachePath); ok {
+		return stale, nil
+	}
+	return nil, err
+}
+
+func repoIndexCachePath(cacheDir, rawURL string) string {
+	if strings.TrimSpace(cacheDir) == "" || strings.TrimSpace(rawURL) == "" {
+		return ""
+	}
+	base := filepath.Base(rawURL)
+	if strings.TrimSpace(base) == "" || base == "." || base == string(filepath.Separator) {
+		base = "PACKAGES"
+	}
+	return filepath.Join(cacheDir, downloadCacheName(rawURL, base+".dcf"))
+}
+
+func readFreshRepoIndexCache(path string, now time.Time) ([]byte, bool) {
+	if strings.TrimSpace(path) == "" {
+		return nil, false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return nil, false
+	}
+	if now.Sub(info.ModTime()) > repoIndexCacheTTL {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
+func readAnyRepoIndexCache(path string) ([]byte, bool) {
+	if strings.TrimSpace(path) == "" {
+		return nil, false
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return nil, false
+	}
+	return data, true
+}
+
+func writeRepoIndexCache(path string, data []byte) error {
+	if strings.TrimSpace(path) == "" || len(data) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	part := path + ".part"
+	if err := os.WriteFile(part, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(part, path); err != nil {
+		_ = os.Remove(part)
+		return err
+	}
+	return nil
+}
+
 func fetchPackagesFileOnce(client *http.Client, rawURL string) ([]byte, error) {
-	resp, err := getWithRetry(client, rawURL)
+	resp, err := getOnce(client, rawURL)
 	if err != nil {
 		return nil, err
 	}
@@ -2685,7 +2778,7 @@ func getWithRetry(client *http.Client, rawURL string) (*http.Response, error) {
 	var lastErr error
 	backoff := 500 * time.Millisecond
 	for attempt := 0; attempt < httpRetryAttempts; attempt++ {
-		resp, err := client.Get(rawURL)
+		resp, err := getOnce(client, rawURL)
 		if err == nil {
 			return resp, nil
 		}
@@ -2698,6 +2791,10 @@ func getWithRetry(client *http.Client, rawURL string) (*http.Response, error) {
 		break
 	}
 	return nil, lastErr
+}
+
+func getOnce(client *http.Client, rawURL string) (*http.Response, error) {
+	return client.Get(rawURL)
 }
 
 func shouldRetryHTTPOperation(err error) bool {
@@ -2736,7 +2833,7 @@ func downloadWithRetry(client *http.Client, rawURL, target, label string, progre
 }
 
 func downloadOnce(client *http.Client, rawURL, target, label string, progress io.Writer) error {
-	resp, err := getWithRetry(client, rawURL)
+	resp, err := getOnce(client, rawURL)
 	if err != nil {
 		return err
 	}

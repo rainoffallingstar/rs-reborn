@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rainoffallingstar/rs-reborn/internal/project"
 	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
@@ -1297,6 +1298,79 @@ func TestFetchPackagesFileRetriesBodyReadTimeout(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestFetchPackagesFileCachedReusesFreshCache(t *testing.T) {
+	cacheDir := t.TempDir()
+	packages := "Package: cli\nVersion: 3.6.5\n\n"
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	_, _ = gz.Write([]byte(packages))
+	_ = gz.Close()
+
+	attempts := 0
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(buf.Bytes())),
+			}, nil
+		}),
+	}
+
+	rawURL := "https://example.test/src/contrib/PACKAGES.gz"
+	data, err := fetchPackagesFileCached(client, rawURL, cacheDir)
+	if err != nil {
+		t.Fatalf("fetchPackagesFileCached(first) error = %v", err)
+	}
+	if string(data) != packages {
+		t.Fatalf("fetchPackagesFileCached(first) = %q, want %q", string(data), packages)
+	}
+
+	data, err = fetchPackagesFileCached(client, rawURL, cacheDir)
+	if err != nil {
+		t.Fatalf("fetchPackagesFileCached(second) error = %v", err)
+	}
+	if string(data) != packages {
+		t.Fatalf("fetchPackagesFileCached(second) = %q, want %q", string(data), packages)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 with fresh cache reuse", attempts)
+	}
+}
+
+func TestFetchPackagesFileCachedFallsBackToStaleCache(t *testing.T) {
+	cacheDir := t.TempDir()
+	rawURL := "https://example.test/src/contrib/PACKAGES.gz"
+	cached := []byte("Package: cli\nVersion: 3.6.5\n\n")
+	cachePath := repoIndexCachePath(cacheDir, rawURL)
+	if err := writeRepoIndexCache(cachePath, cached); err != nil {
+		t.Fatalf("writeRepoIndexCache() error = %v", err)
+	}
+	staleTime := time.Now().Add(-repoIndexCacheTTL - time.Minute)
+	if err := os.Chtimes(cachePath, staleTime, staleTime); err != nil {
+		t.Fatalf("Chtimes(%q) error = %v", cachePath, err)
+	}
+
+	attempts := 0
+	client := &http.Client{
+		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			attempts++
+			return nil, timeoutErr{}
+		}),
+	}
+
+	data, err := fetchPackagesFileCached(client, rawURL, cacheDir)
+	if err != nil {
+		t.Fatalf("fetchPackagesFileCached() error = %v", err)
+	}
+	if string(data) != string(cached) {
+		t.Fatalf("fetchPackagesFileCached() = %q, want stale cache %q", string(data), string(cached))
+	}
+	if attempts != httpRetryAttempts {
+		t.Fatalf("attempts = %d, want %d retry attempts before stale fallback", attempts, httpRetryAttempts)
 	}
 }
 
