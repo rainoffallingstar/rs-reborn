@@ -1044,6 +1044,63 @@ func TestSyncPlannedPackageToStoreSkipsRewriteForMatchingStoreEntry(t *testing.T
 	}
 }
 
+func TestRecordPlannedPackagesInstalledSyncsBatchToStore(t *testing.T) {
+	cacheRoot := t.TempDir()
+	libraryPath := filepath.Join(cacheRoot, "lib", "current")
+	metaDir := filepath.Join(libraryPath, ".rs-source-meta")
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	for _, name := range []string{"cli", "glue"} {
+		for _, path := range []string{
+			filepath.Join(libraryPath, name),
+			metaDir,
+		} {
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				t.Fatalf("MkdirAll(%q) error = %v", path, err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(libraryPath, name, "DESCRIPTION"), []byte(fmt.Sprintf("Package: %s\nVersion: 1.0.0\nRepository: CRAN\n", name)), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s DESCRIPTION) error = %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(libraryPath, name, "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s NAMESPACE) error = %v", name, err)
+		}
+	}
+
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: libraryPath,
+			Runtime:     runtime,
+		},
+		planned: map[string]plannedPackage{
+			"cli":  {Name: "cli", Version: "1.0.0", Source: sourceCRAN},
+			"glue": {Name: "glue", Version: "1.0.0", Source: sourceCRAN},
+		},
+		metaDir:           metaDir,
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.recordPlannedPackagesInstalled([]string{"cli", "glue"}); err != nil {
+		t.Fatalf("recordPlannedPackagesInstalled() error = %v", err)
+	}
+	for _, name := range []string{"cli", "glue"} {
+		if inst.installedPackages[name].Version != "1.0.0" {
+			t.Fatalf("installedPackages[%s] = %#v", name, inst.installedPackages[name])
+		}
+		storeLib := packageStorePathForPlanned(cacheRoot, inst.planned[name], runtime)
+		if _, err := os.Stat(filepath.Join(storeLib, name, "DESCRIPTION")); err != nil {
+			t.Fatalf("Stat(store %s DESCRIPTION) error = %v", name, err)
+		}
+	}
+}
+
 func TestPackageStorePathForPlannedIncludesRuntimeIdentity(t *testing.T) {
 	cacheRoot := t.TempDir()
 	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}

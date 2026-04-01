@@ -297,10 +297,8 @@ func Install(req Request) error {
 			if err != nil {
 				return err
 			}
-			for _, name := range installed {
-				if err := inst.recordPlannedPackageInstalled(name); err != nil {
-					return err
-				}
+			if err := inst.recordPlannedPackagesInstalled(installed); err != nil {
+				return err
 			}
 			for _, name := range compiled {
 				installed, err := inst.installPlannedPackage(name)
@@ -334,12 +332,69 @@ func Install(req Request) error {
 }
 
 func (i *nativeInstaller) recordPlannedPackageInstalled(name string) error {
+	if err := i.markPlannedPackageInstalled(name); err != nil {
+		return err
+	}
+	return i.syncPlannedPackageToStore(name)
+}
+
+func (i *nativeInstaller) recordPlannedPackagesInstalled(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	for _, name := range names {
+		if err := i.markPlannedPackageInstalled(name); err != nil {
+			return err
+		}
+	}
+	if len(names) == 1 {
+		return i.syncPlannedPackageToStore(names[0])
+	}
+
+	type syncResult struct {
+		name string
+		err  error
+	}
+	workers := parallelWorkerLimit(len(names))
+	jobs := make(chan string)
+	results := make(chan syncResult, len(names))
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for name := range jobs {
+				results <- syncResult{name: name, err: i.syncPlannedPackageToStore(name)}
+			}
+		}()
+	}
+	for _, name := range names {
+		jobs <- name
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	byName := make(map[string]error, len(names))
+	for result := range results {
+		byName[result.name] = result.err
+	}
+	for _, name := range names {
+		if err := byName[name]; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (i *nativeInstaller) markPlannedPackageInstalled(name string) error {
 	pkg, ok := i.planned[name]
 	if !ok {
 		return fmt.Errorf("planned package %s not found", name)
 	}
 	i.installedPackages[name] = installedPackageForPlanned(pkg)
-	return i.syncPlannedPackageToStore(name)
+	return nil
 }
 
 func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
