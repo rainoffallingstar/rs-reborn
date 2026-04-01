@@ -29,6 +29,10 @@ cat >"$MANAGED_RSCRIPT" <<'EOF'
 set -euo pipefail
 if [[ "${1:-}" == "-e" ]]; then
   expr="${2:-}"
+  if [[ "$expr" == *'cat(file.path(R.home("bin"), "R"))'* ]]; then
+    printf '%s\n4.5.3' "$(dirname "$0")/R"
+    exit 0
+  fi
   if [[ "$expr" == *"cat(as.character(getRversion()))"* ]]; then
     printf '4.5.3'
     exit 0
@@ -45,12 +49,21 @@ fi
 printf 'managed-current-selected\n'
 EOF
 chmod +x "$MANAGED_RSCRIPT"
+cat >"$MANAGED_ROOT/bin/R" <<'EOF'
+#!/usr/bin/env bash
+printf 'managed-R-binary\n'
+EOF
+chmod +x "$MANAGED_ROOT/bin/R"
 
 cat >"$EXTERNAL_RSCRIPT" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ "${1:-}" == "-e" ]]; then
   expr="${2:-}"
+  if [[ "$expr" == *'cat(file.path(R.home("bin"), "R"))'* ]]; then
+    printf '%s\n4.4.3' "$(dirname "$0")/R"
+    exit 0
+  fi
   if [[ "$expr" == *"cat(as.character(getRversion()))"* ]]; then
     printf '4.4.3'
     exit 0
@@ -67,6 +80,11 @@ fi
 printf 'external-conda-selected\n'
 EOF
 chmod +x "$EXTERNAL_RSCRIPT"
+cat >"$EXTERNAL_ROOT/R" <<'EOF'
+#!/usr/bin/env bash
+printf 'external-R-binary\n'
+EOF
+chmod +x "$EXTERNAL_ROOT/R"
 
 printf '%s\n' "$MANAGED_ROOT" >"$RS_HOME_DIR/r/current"
 

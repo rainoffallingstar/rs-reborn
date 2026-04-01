@@ -1647,12 +1647,14 @@ func TestInstallRepoPackageReadsDescriptionFromDownloadedArtifact(t *testing.T) 
 		fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", rLog),
 		fmt.Sprintf("@echo off\r\n> %q echo %%*\r\n", rLog),
 	)
-	makeName := "make"
-	if runtime.GOOS == "windows" {
-		makeName += ".exe"
+	successUnix := "#!/bin/sh\nexit 0\n"
+	successWindows := "@echo off\r\nexit /b 0\r\n"
+	requiredTools := []string{"make", "gcc"}
+	if runtime.GOOS != "windows" {
+		requiredTools = append(requiredTools, "g++", "gfortran")
 	}
-	if err := os.WriteFile(filepath.Join(dir, makeName), []byte("binary"), 0o755); err != nil {
-		t.Fatalf("WriteFile(%q) error = %v", makeName, err)
+	for _, tool := range requiredTools {
+		writeTestCommand(t, dir, tool, successUnix, successWindows)
 	}
 
 	inst := nativeInstaller{
