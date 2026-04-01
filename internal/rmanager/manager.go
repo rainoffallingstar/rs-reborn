@@ -38,6 +38,10 @@ type Installation struct {
 	Source      string
 }
 
+func DiscoverInstallations() ([]Installation, error) {
+	return discoverInstallations()
+}
+
 func List(stdout, stderr io.Writer) error {
 	return nativeList(stdout, stderr)
 }

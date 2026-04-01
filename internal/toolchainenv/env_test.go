@@ -281,6 +281,9 @@ func TestBootstrapCandidateExplicitMicromambaStillWorks(t *testing.T) {
 	if !strings.Contains(candidate.SuggestedSetupCommand, "create -y -p") {
 		t.Fatalf("candidate.SuggestedSetupCommand = %q", candidate.SuggestedSetupCommand)
 	}
+	if !strings.Contains(candidate.SuggestedSetupCommand, " cmake") {
+		t.Fatalf("candidate.SuggestedSetupCommand = %q, want cmake included", candidate.SuggestedSetupCommand)
+	}
 }
 
 func TestBootstrapCandidateAutoPrefersEnvaBeforeMicromambaMambaAndConda(t *testing.T) {

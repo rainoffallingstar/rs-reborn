@@ -18,8 +18,8 @@ import (
 	"strings"
 	"testing"
 
-	"gr/internal/project"
-	"gr/internal/toolchainenv"
+	"github.com/rainoffallingstar/rs-reborn/internal/project"
+	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -792,7 +792,7 @@ func TestEnsureLinuxSourceBuildToolsUsesDistroAdvice(t *testing.T) {
 	if err == nil {
 		t.Fatal("ensureLinuxSourceBuildTools() error = nil, want missing compiler guidance")
 	}
-	if !strings.Contains(err.Error(), "build-essential gfortran") {
+	if !strings.Contains(err.Error(), "build-essential gfortran cmake") {
 		t.Fatalf("ensureLinuxSourceBuildTools() error = %v", err)
 	}
 	if !strings.Contains(err.Error(), "rs toolchain detect") {
@@ -841,6 +841,79 @@ func TestEnsureLinuxSourceBuildToolsFailsWhenCompilerCannotLink(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "linker missing") {
 		t.Fatalf("ensureLinuxSourceBuildTools() error missing compiler stderr = %v", err)
+	}
+}
+
+func TestEnsureLinuxSourceBuildToolsFailsEarlyWhenFSPackageNeedsMissingCMake(t *testing.T) {
+	oldGOOS := installerGOOS
+	oldReadFile := installerReadFile
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+		installerReadFile = oldReadFile
+	})
+	installerGOOS = "linux"
+	installerReadFile = func(path string) ([]byte, error) {
+		if path != "/etc/os-release" {
+			return nil, errors.New("unexpected path")
+		}
+		return []byte("ID=ubuntu\n"), nil
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(binDir) error = %v", err)
+	}
+	successUnix := "#!/bin/sh\nexit 0\n"
+	successWindows := "@echo off\r\nexit /b 0\r\n"
+	writeTestCommand(t, binDir, "gcc", successUnix, successWindows)
+	writeTestCommand(t, binDir, "g++", successUnix, successWindows)
+	writeTestCommand(t, binDir, "gfortran", successUnix, successWindows)
+	writeTestCommand(t, binDir, "make", successUnix, successWindows)
+
+	err := ensureLinuxSourceBuildTools("fs", []string{"PATH=" + binDir})
+	if err == nil {
+		t.Fatal("ensureLinuxSourceBuildTools() error = nil, want missing cmake guidance")
+	}
+	if !strings.Contains(err.Error(), "cmake >= 3.10 was not found on PATH") {
+		t.Fatalf("ensureLinuxSourceBuildTools() error = %v", err)
+	}
+}
+
+func TestEnsureLinuxSourceBuildToolsFailsEarlyWhenFSPackageNeedsNewerCMake(t *testing.T) {
+	oldGOOS := installerGOOS
+	oldReadFile := installerReadFile
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+		installerReadFile = oldReadFile
+	})
+	installerGOOS = "linux"
+	installerReadFile = func(path string) ([]byte, error) {
+		if path != "/etc/os-release" {
+			return nil, errors.New("unexpected path")
+		}
+		return []byte("ID=ubuntu\n"), nil
+	}
+
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(binDir) error = %v", err)
+	}
+	successUnix := "#!/bin/sh\nexit 0\n"
+	successWindows := "@echo off\r\nexit /b 0\r\n"
+	writeTestCommand(t, binDir, "gcc", successUnix, successWindows)
+	writeTestCommand(t, binDir, "g++", successUnix, successWindows)
+	writeTestCommand(t, binDir, "gfortran", successUnix, successWindows)
+	writeTestCommand(t, binDir, "make", successUnix, successWindows)
+	writeTestCommand(t, binDir, "cmake", "#!/bin/sh\necho 'cmake version 2.8.12.2'\n", "@echo off\r\necho cmake version 2.8.12.2\r\n")
+
+	err := ensureLinuxSourceBuildTools("fs", []string{"PATH=" + binDir})
+	if err == nil {
+		t.Fatal("ensureLinuxSourceBuildTools() error = nil, want old cmake guidance")
+	}
+	if !strings.Contains(err.Error(), "cmake >= 3.10 is required, but the active cmake is 2.8.12") {
+		t.Fatalf("ensureLinuxSourceBuildTools() error = %v", err)
 	}
 }
 

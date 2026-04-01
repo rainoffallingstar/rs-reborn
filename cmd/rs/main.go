@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"gr/internal/cli"
-	"gr/internal/runner"
+	"github.com/rainoffallingstar/rs-reborn/internal/cli"
+	"github.com/rainoffallingstar/rs-reborn/internal/runner"
 )
 
 func main() {

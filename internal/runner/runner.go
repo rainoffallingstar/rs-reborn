@@ -18,13 +18,13 @@ import (
 	"strings"
 	"time"
 
-	"gr/internal/installer"
-	"gr/internal/lockfile"
-	"gr/internal/progresscmd"
-	"gr/internal/project"
-	"gr/internal/rdeps"
-	"gr/internal/rmanager"
-	"gr/internal/toolchainenv"
+	"github.com/rainoffallingstar/rs-reborn/internal/installer"
+	"github.com/rainoffallingstar/rs-reborn/internal/lockfile"
+	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
+	"github.com/rainoffallingstar/rs-reborn/internal/project"
+	"github.com/rainoffallingstar/rs-reborn/internal/rdeps"
+	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
+	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
 
 type RunOptions struct {

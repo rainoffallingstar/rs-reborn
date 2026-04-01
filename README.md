@@ -30,6 +30,36 @@ Build the CLI:
 go build -o rs ./cmd/rs
 ```
 
+Use `rs` as a Go library:
+
+```go
+import (
+    "github.com/rainoffallingstar/rs-reborn/pkg/project"
+    "github.com/rainoffallingstar/rs-reborn/pkg/rdeps"
+    "github.com/rainoffallingstar/rs-reborn/pkg/rmanager"
+    "github.com/rainoffallingstar/rs-reborn/pkg/runner"
+)
+
+cfg, _ := project.Load("rs.toml")
+deps, _ := rdeps.FromFile("analysis.R")
+rscript, _ := rmanager.ResolveVersionOrPath("4.5")
+_ = runner.Run(runner.RunOptions{
+    ScriptPath:  "analysis.R",
+    RscriptPath: rscript,
+})
+
+_ = cfg
+_ = deps
+```
+
+Public SDK packages currently live under:
+
+- `github.com/rainoffallingstar/rs-reborn/pkg/project`
+- `github.com/rainoffallingstar/rs-reborn/pkg/rdeps`
+- `github.com/rainoffallingstar/rs-reborn/pkg/rmanager`
+- `github.com/rainoffallingstar/rs-reborn/pkg/lockfile`
+- `github.com/rainoffallingstar/rs-reborn/pkg/runner`
+
 Install the latest published binary into `$HOME/.cargo/bin` on macOS or Linux:
 
 ```bash

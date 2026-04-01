@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"gr/internal/progresscmd"
-	"gr/internal/toolchainenv"
+	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
+	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
 
 var (

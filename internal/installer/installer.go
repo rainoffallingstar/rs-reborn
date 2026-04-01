@@ -26,10 +26,10 @@ import (
 	"sync"
 	"time"
 
-	"gr/internal/progresscmd"
-	"gr/internal/project"
-	"gr/internal/rdeps"
-	"gr/internal/toolchainenv"
+	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
+	"github.com/rainoffallingstar/rs-reborn/internal/project"
+	"github.com/rainoffallingstar/rs-reborn/internal/rdeps"
+	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
 
 const (
@@ -2329,7 +2329,43 @@ func ensureLinuxSourceBuildTools(pkg string, env []string) error {
 				err,
 			)
 		}
+		if issue := linuxPackageSpecificBuildToolIssue(pkg, env); issue != "" {
+			advice := linuxSourceBuildAdvice()
+			if advice != "" {
+				return fmt.Errorf(
+					"package %s requires additional Linux build tools, but %s\nnext step: %s\nnext step: %s",
+					pkg,
+					issue,
+					advice,
+					rootlessToolchainAdvice(env),
+				)
+			}
+			return fmt.Errorf(
+				"package %s requires additional Linux build tools, but %s\nnext step: %s",
+				pkg,
+				issue,
+				rootlessToolchainAdvice(env),
+			)
+		}
 		return nil
+	}
+	if issue := linuxPackageSpecificBuildToolIssue(pkg, env); issue != "" {
+		advice := linuxSourceBuildAdvice()
+		if advice != "" {
+			return fmt.Errorf(
+				"package %s requires additional Linux build tools, but %s\nnext step: %s\nnext step: %s",
+				pkg,
+				issue,
+				advice,
+				rootlessToolchainAdvice(env),
+			)
+		}
+		return fmt.Errorf(
+			"package %s requires additional Linux build tools, but %s\nnext step: %s",
+			pkg,
+			issue,
+			rootlessToolchainAdvice(env),
+		)
 	}
 	advice := linuxSourceBuildAdvice()
 	if advice != "" {
@@ -2347,6 +2383,47 @@ func ensureLinuxSourceBuildTools(pkg string, env []string) error {
 		strings.Join(missing, ", "),
 		rootlessToolchainAdvice(env),
 	)
+}
+
+func linuxPackageSpecificBuildToolIssue(pkg string, env []string) string {
+	switch strings.ToLower(strings.TrimSpace(pkg)) {
+	case "fs":
+		return requireCMakeVersion(env, "3.10")
+	default:
+		return ""
+	}
+}
+
+func requireCMakeVersion(env []string, minimum string) string {
+	cmakePath, err := findInstallerTool("cmake", env)
+	if err != nil {
+		return fmt.Sprintf("cmake >= %s was not found on PATH", minimum)
+	}
+	version, err := installedToolVersion(cmakePath, env, `cmake version ([0-9]+(?:\.[0-9]+){0,2})`)
+	if err != nil {
+		return fmt.Sprintf("cmake >= %s is required, but the active cmake could not be inspected: %v", minimum, err)
+	}
+	if compareVersions(version, minimum) < 0 {
+		return fmt.Sprintf("cmake >= %s is required, but the active cmake is %s", minimum, version)
+	}
+	return ""
+}
+
+func installedToolVersion(toolPath string, env []string, pattern string) (string, error) {
+	cmd := exec.Command(toolPath, "--version")
+	if len(env) > 0 {
+		cmd.Env = env
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("run %s --version: %w", filepath.Base(toolPath), err)
+	}
+	re := regexp.MustCompile(pattern)
+	matches := re.FindStringSubmatch(string(output))
+	if len(matches) < 2 {
+		return "", fmt.Errorf("parse version from output %q", strings.TrimSpace(string(output)))
+	}
+	return matches[1], nil
 }
 
 func missingLinuxSourceBuildTools(env []string) []string {
@@ -2467,13 +2544,13 @@ func linuxSourceBuildAdvice() string {
 	}
 	switch {
 	case distro == "arch":
-		return "pacman -S --needed base-devel gcc-fortran"
+		return "pacman -S --needed base-devel gcc-fortran cmake"
 	case distro == "debian", distro == "ubuntu":
-		return "apt-get update && apt-get install -y build-essential gfortran"
+		return "apt-get update && apt-get install -y build-essential gfortran cmake"
 	case distro == "rhel", distro == "centos", distro == "rocky", distro == "almalinux", distro == "fedora":
-		return "dnf install -y gcc gcc-c++ gcc-gfortran make"
+		return "dnf install -y gcc gcc-c++ gcc-gfortran make cmake"
 	default:
-		return "install gcc, g++, gfortran, and make before retrying"
+		return "install gcc, g++, gfortran, make, and cmake before retrying"
 	}
 }
 

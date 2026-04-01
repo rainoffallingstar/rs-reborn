@@ -12,11 +12,11 @@ import (
 	"strconv"
 	"strings"
 
-	"gr/internal/project"
-	"gr/internal/rdeps"
-	"gr/internal/rmanager"
-	"gr/internal/runner"
-	"gr/internal/toolchainenv"
+	"github.com/rainoffallingstar/rs-reborn/internal/project"
+	"github.com/rainoffallingstar/rs-reborn/internal/rdeps"
+	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
+	"github.com/rainoffallingstar/rs-reborn/internal/runner"
+	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
 
 type stringList []string

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"gr/internal/project"
-	"gr/internal/rmanager"
-	"gr/internal/runner"
+	"github.com/rainoffallingstar/rs-reborn/internal/project"
+	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
+	"github.com/rainoffallingstar/rs-reborn/internal/runner"
 )
 
 func TestInitCommandFromScriptWritesRootPackages(t *testing.T) {

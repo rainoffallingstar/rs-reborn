@@ -15,11 +15,11 @@ import (
 	"testing"
 	"time"
 
-	"gr/internal/installer"
-	"gr/internal/lockfile"
-	"gr/internal/project"
-	"gr/internal/rmanager"
-	"gr/internal/toolchainenv"
+	"github.com/rainoffallingstar/rs-reborn/internal/installer"
+	"github.com/rainoffallingstar/rs-reborn/internal/lockfile"
+	"github.com/rainoffallingstar/rs-reborn/internal/project"
+	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
+	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
 
 func writeFakeRscript(t *testing.T, dir string) string {
