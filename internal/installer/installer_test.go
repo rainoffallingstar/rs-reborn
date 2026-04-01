@@ -940,6 +940,18 @@ func TestParallelWorkerLimitBoundsToCPUAndItemCount(t *testing.T) {
 	}
 }
 
+func TestWaitAllSyncPlannedPackagesToStoreReturnsFirstError(t *testing.T) {
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	first <- errors.New("first")
+	second <- errors.New("second")
+
+	err := waitAllSyncPlannedPackagesToStore([]<-chan error{nil, first, second})
+	if err == nil || err.Error() != "first" {
+		t.Fatalf("waitAllSyncPlannedPackagesToStore() error = %v, want first", err)
+	}
+}
+
 func TestSyncPlannedPackageToStoreMaterializesStoreEntry(t *testing.T) {
 	cacheRoot := t.TempDir()
 	libraryPath := filepath.Join(cacheRoot, "lib", "aaaaaaaaaaaaaaaa")

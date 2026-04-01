@@ -288,6 +288,7 @@ func Install(req Request) error {
 
 	if inst.canParallelInstallPurePackages() {
 		layers := installPlanLayers(inst.planned, inst.order)
+		pendingStoreSyncs := make([]<-chan error, 0, len(layers)*2)
 		for idx, layer := range layers {
 			progresscmd.Stage(inst.stderr, fmt.Sprintf("installing dependency layer %d/%d", idx+1, len(layers)))
 			pure := make([]string, 0, len(layer))
@@ -304,33 +305,36 @@ func Install(req Request) error {
 			}
 			installed, err := inst.installPackageBatch(pure)
 			if err != nil {
+				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
 				return err
 			}
 			if err := inst.markPlannedPackagesInstalled(installed); err != nil {
+				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
 				return err
 			}
-			pureSyncErrs := inst.startSyncPlannedPackagesToStore(installed)
+			if syncDone := inst.startSyncPlannedPackagesToStore(installed); syncDone != nil {
+				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
+			}
 			compiledInstalled := make([]string, 0, len(compiled))
 			for _, name := range compiled {
 				installed, err := inst.installPlannedPackage(name)
 				if err != nil {
+					_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
 					return err
 				}
 				if installed {
 					if err := inst.markPlannedPackageInstalled(name); err != nil {
+						_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
 						return err
 					}
 					compiledInstalled = append(compiledInstalled, name)
 				}
 			}
-			if err := waitSyncPlannedPackagesToStore(pureSyncErrs); err != nil {
-				return err
-			}
-			if err := inst.syncPlannedPackagesToStore(compiledInstalled); err != nil {
-				return err
+			if syncDone := inst.startSyncPlannedPackagesToStore(compiledInstalled); syncDone != nil {
+				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
 			}
 		}
-		return nil
+		return waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
 	}
 
 	for idx, name := range inst.order {
@@ -433,6 +437,16 @@ func waitSyncPlannedPackagesToStore(done <-chan error) error {
 		return nil
 	}
 	return <-done
+}
+
+func waitAllSyncPlannedPackagesToStore(dones []<-chan error) error {
+	var firstErr error
+	for _, done := range dones {
+		if err := waitSyncPlannedPackagesToStore(done); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func (i *nativeInstaller) markPlannedPackageInstalled(name string) error {
