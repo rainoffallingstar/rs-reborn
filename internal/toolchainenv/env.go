@@ -55,21 +55,21 @@ func ApplyWithPlan(base []string, prefixes, pkgConfigPaths []string, plan Native
 		prefix := prefixes[i]
 		libDir := filepath.Join(prefix, "lib")
 		pathEntries = prependUnique(pathEntries, filepath.Join(prefix, "bin"))
-		cppFlags = prependUnique(cppFlags, "-I"+filepath.Join(prefix, "include"))
-		ldFlags = prependUnique(ldFlags, "-L"+libDir)
+		cppFlags = prependUniqueValue(cppFlags, "-I"+filepath.Join(prefix, "include"))
+		ldFlags = prependUniqueValue(ldFlags, "-L"+libDir)
 		libraryEntries = prependUnique(libraryEntries, libDir)
 		runtimeLibraryEntries = prependUnique(runtimeLibraryEntries, libDir)
 		pkgEntries = prependUnique(pkgEntries, filepath.Join(libDir, "pkgconfig"))
 		pkgEntries = prependUnique(pkgEntries, filepath.Join(prefix, "share", "pkgconfig"))
 	}
 	for i := len(plan.CPPFLAGS) - 1; i >= 0; i-- {
-		cppFlags = prependUnique(cppFlags, plan.CPPFLAGS[i])
+		cppFlags = prependUniqueValue(cppFlags, plan.CPPFLAGS[i])
 	}
 	for i := len(plan.LDFLAGS) - 1; i >= 0; i-- {
-		ldFlags = prependUnique(ldFlags, plan.LDFLAGS[i])
+		ldFlags = prependUniqueValue(ldFlags, plan.LDFLAGS[i])
 	}
 	for i := len(plan.LIBS) - 1; i >= 0; i-- {
-		libsFlags = prependUnique(libsFlags, plan.LIBS[i])
+		libsFlags = prependUniqueValue(libsFlags, plan.LIBS[i])
 	}
 	for i := len(pkgConfigPaths) - 1; i >= 0; i-- {
 		pkgEntries = prependUnique(pkgEntries, pkgConfigPaths[i])
@@ -299,7 +299,7 @@ func splitShellWords(value string) []string {
 	if strings.TrimSpace(value) == "" {
 		return nil
 	}
-	return cleanList(strings.Fields(value))
+	return uniqueTrimmed(strings.Fields(value))
 }
 
 func cleanList(values []string) []string {
@@ -336,6 +336,21 @@ func prependUnique(values []string, value string) []string {
 	return out
 }
 
+func prependUniqueValue(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	out := []string{value}
+	for _, existing := range values {
+		if strings.TrimSpace(existing) == value {
+			continue
+		}
+		out = append(out, existing)
+	}
+	return out
+}
+
 func appendUnique(dst *[]string, value string, seen map[string]struct{}) {
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -347,6 +362,23 @@ func appendUnique(dst *[]string, value string, seen map[string]struct{}) {
 	}
 	seen[cleaned] = struct{}{}
 	*dst = append(*dst, cleaned)
+}
+
+func uniqueTrimmed(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
 }
 
 func candidateNames(name string) []string {

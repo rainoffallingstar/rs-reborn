@@ -291,7 +291,8 @@ var (
 	nativeDiagCombinedOutput = func(name string, args ...string) ([]byte, error) {
 		return exec.Command(name, args...).CombinedOutput()
 	}
-	sharedObjectPathPattern = regexp.MustCompile(`((?:/[^'" \t\r\n:]+)+\.(?:so(?:\.[^'" \t\r\n:]+)*|dylib|dll))`)
+	sharedObjectQuotedPathPattern = regexp.MustCompile(`unable to load shared object ['"]([^'"]+\.(?:so(?:\.[^'" \t\r\n:]+)*|dylib|dll))['"]`)
+	sharedObjectPathPattern       = regexp.MustCompile(`((?:[A-Za-z]:[\\/]|/)[^'" \t\r\n]+\.(?:so(?:\.[^'" \t\r\n:]+)*|dylib|dll))`)
 )
 
 var nativeValidatePlan = func(req installer.Request) error {
@@ -6131,7 +6132,11 @@ func extractMissingSharedLibraryName(message string) string {
 }
 
 func extractSharedObjectPath(message string) string {
-	match := sharedObjectPathPattern.FindStringSubmatch(message)
+	match := sharedObjectQuotedPathPattern.FindStringSubmatch(message)
+	if len(match) >= 2 {
+		return strings.TrimSpace(match[1])
+	}
+	match = sharedObjectPathPattern.FindStringSubmatch(message)
 	if len(match) < 2 {
 		return ""
 	}
