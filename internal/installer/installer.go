@@ -55,6 +55,7 @@ var (
 	installerReadFile            = os.ReadFile
 	installerRunCmd              = func(cmd *exec.Cmd) error { return cmd.Run() }
 	installerReadDescriptionFile = readDescriptionFromTarball
+	installerEnsureBuildTools    = ensurePackageBuildToolsForEnvironment
 )
 
 type Runtime struct {
@@ -110,6 +111,7 @@ type nativeInstaller struct {
 	requirements      map[string][]constraintRequest
 	selectedVersions  map[string]string
 	buildToolsChecked bool
+	buildToolsMu      sync.Mutex
 	prefetchedMu      sync.RWMutex
 	prefetchedRepo    map[string]string
 	descriptionMu     sync.RWMutex
@@ -1366,14 +1368,7 @@ func (i *nativeInstaller) validateBuildPrerequisites(pkg plannedPackage) error {
 	if !needsCompilation {
 		return nil
 	}
-	if i.buildToolsChecked {
-		return nil
-	}
-	if err := i.ensurePackageBuildTools(pkg.Name); err != nil {
-		return err
-	}
-	i.buildToolsChecked = true
-	return nil
+	return i.ensurePackageBuildToolsReady(pkg.Name)
 }
 
 func (i *nativeInstaller) planDependencyList(deps []packageRequirement, idx int, parentName string, chain []string, skips versionSkips) error {
@@ -1786,7 +1781,7 @@ func (i *nativeInstaller) prepareSource(spec project.SourceSpec) (preparedSource
 func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 	fmt.Fprintf(i.stdout, "[rs] installing %s package %s %s via native backend\n", record.Source, record.Name, record.Version)
 	if strings.HasSuffix(strings.ToLower(record.TarballURL), ".tar.gz") && record.NeedsCompilation {
-		if err := i.ensurePackageBuildTools(record.Name); err != nil {
+		if err := i.ensurePackageBuildToolsReady(record.Name); err != nil {
 			return err
 		}
 	}
@@ -1804,7 +1799,7 @@ func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 			needsCompilation = desc.NeedsCompilation
 		}
 		if needsCompilation && !record.NeedsCompilation {
-			if err := i.ensurePackageBuildTools(record.Name); err != nil {
+			if err := i.ensurePackageBuildToolsReady(record.Name); err != nil {
 				return err
 			}
 		}
@@ -1942,7 +1937,7 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 		fmt.Fprintf(i.stdout, "[rs] installing github package %s from %s via native backend\n", prepared.Name, label)
 	}
 	if prepared.NeedsCompilation {
-		if err := i.ensurePackageBuildTools(prepared.Name); err != nil {
+		if err := i.ensurePackageBuildToolsReady(prepared.Name); err != nil {
 			return err
 		}
 	}
@@ -3609,12 +3604,25 @@ func parseNeedsCompilation(value string) bool {
 	}
 }
 
-func (i *nativeInstaller) ensurePackageBuildTools(pkg string) error {
+func (i *nativeInstaller) ensurePackageBuildToolsReady(pkg string) error {
+	i.buildToolsMu.Lock()
+	defer i.buildToolsMu.Unlock()
+	if i.buildToolsChecked {
+		return nil
+	}
+	if err := installerEnsureBuildTools(pkg, i.req.Environment); err != nil {
+		return err
+	}
+	i.buildToolsChecked = true
+	return nil
+}
+
+func ensurePackageBuildToolsForEnvironment(pkg string, env []string) error {
 	switch installerGOOS {
 	case "windows":
-		return ensureWindowsSourceBuildTools(pkg, i.req.Environment)
+		return ensureWindowsSourceBuildTools(pkg, env)
 	case "linux":
-		return ensureLinuxSourceBuildTools(pkg, i.req.Environment)
+		return ensureLinuxSourceBuildTools(pkg, env)
 	default:
 		return nil
 	}

@@ -2113,6 +2113,29 @@ func TestValidateBuildPrerequisitesFailsEarlyOnLinuxCompilationPackage(t *testin
 	}
 }
 
+func TestEnsurePackageBuildToolsReadyCachesSuccessfulCheck(t *testing.T) {
+	original := installerEnsureBuildTools
+	t.Cleanup(func() {
+		installerEnsureBuildTools = original
+	})
+	calls := 0
+	installerEnsureBuildTools = func(pkg string, env []string) error {
+		calls++
+		return nil
+	}
+
+	inst := nativeInstaller{}
+	if err := inst.ensurePackageBuildToolsReady("stringi"); err != nil {
+		t.Fatalf("ensurePackageBuildToolsReady(first) error = %v", err)
+	}
+	if err := inst.ensurePackageBuildToolsReady("xml2"); err != nil {
+		t.Fatalf("ensurePackageBuildToolsReady(second) error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("installerEnsureBuildTools calls = %d, want 1", calls)
+	}
+}
+
 func TestRootlessToolchainAdviceIncludesDetectedPresetRecommendation(t *testing.T) {
 	dir := t.TempDir()
 	setTestHomeDir(t, dir)
