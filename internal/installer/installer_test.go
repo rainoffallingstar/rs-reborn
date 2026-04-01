@@ -799,6 +799,66 @@ func TestSeedPlannedPackagesFromStoreReusesMatchingStoredPackage(t *testing.T) {
 	}
 }
 
+func TestSeedPlannedPackagesFromStoreReusesMultipleStoredPackages(t *testing.T) {
+	cacheRoot := t.TempDir()
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
+	if err := os.MkdirAll(targetLib, 0o755); err != nil {
+		t.Fatalf("MkdirAll(target) error = %v", err)
+	}
+
+	planned := map[string]plannedPackage{
+		"cli":  {Name: "cli", Version: "3.6.5", Source: sourceCRAN},
+		"glue": {Name: "glue", Version: "1.8.0", Source: sourceCRAN},
+	}
+	order := []string{"cli", "glue"}
+	for _, name := range order {
+		pkg := planned[name]
+		storeLib := packageStorePathForPlanned(cacheRoot, pkg, runtime)
+		if err := os.MkdirAll(filepath.Join(storeLib, name), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s store) error = %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(storeLib, name, "DESCRIPTION"), []byte(fmt.Sprintf("Package: %s\nVersion: %s\nRepository: CRAN\n", name, pkg.Version)), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s DESCRIPTION) error = %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(storeLib, name, "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s NAMESPACE) error = %v", name, err)
+		}
+	}
+
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: targetLib,
+			Runtime:     runtime,
+		},
+		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
+		stderr:            io.Discard,
+		planned:           planned,
+		order:             order,
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.seedPlannedPackagesFromStore(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromStore() error = %v", err)
+	}
+	for _, name := range order {
+		if got := inst.installedPackages[name]; got.Version != planned[name].Version {
+			t.Fatalf("installedPackages[%s] = %#v", name, got)
+		}
+		if _, err := os.Stat(filepath.Join(targetLib, name, "DESCRIPTION")); err != nil {
+			t.Fatalf("Stat(%s DESCRIPTION) error = %v", name, err)
+		}
+	}
+}
+
 func TestLoadInstalledPackageFromLibraryReadsSourceMetadata(t *testing.T) {
 	library := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(library, "cli"), 0o755); err != nil {

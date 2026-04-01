@@ -209,6 +209,19 @@ type constraintRequest struct {
 	Chain       []string
 }
 
+type storeSeedTask struct {
+	name         string
+	pkg          plannedPackage
+	storeLibrary string
+}
+
+type storeSeedResult struct {
+	name         string
+	installedPkg installedPackage
+	reused       bool
+	err          error
+}
+
 type planningState struct {
 	planned          map[string]plannedPackage
 	resolved         map[string]bool
@@ -457,7 +470,20 @@ func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
 		return nil
 	}
 
-	for name, pkg := range i.planned {
+	tasks := make([]storeSeedTask, 0, len(i.planned))
+	order := append([]string(nil), i.order...)
+	if len(order) == 0 {
+		order = make([]string, 0, len(i.planned))
+		for name := range i.planned {
+			order = append(order, name)
+		}
+		slices.Sort(order)
+	}
+	for _, name := range order {
+		pkg, ok := i.planned[name]
+		if !ok {
+			continue
+		}
 		if i.isPlannedPackageInstalled(pkg) {
 			continue
 		}
@@ -465,26 +491,88 @@ func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
 		if strings.TrimSpace(storeLibrary) == "" {
 			continue
 		}
-		installedPkg, ok, err := loadInstalledPackageFromLibrary(storeLibrary, name)
-		if err != nil {
-			return err
+		tasks = append(tasks, storeSeedTask{name: name, pkg: pkg, storeLibrary: storeLibrary})
+	}
+	if len(tasks) == 0 {
+		return nil
+	}
+
+	if len(tasks) == 1 {
+		result := i.seedPlannedPackageFromStore(tasks[0])
+		if result.err != nil {
+			return result.err
 		}
-		if !ok || !plannedPackageMatchesInstalled(pkg, installedPkg) {
+		if result.reused {
+			i.installedPackages[result.name] = result.installedPkg
+			progresscmd.Stage(i.stderr, "reusing stored "+result.name)
+		}
+		return nil
+	}
+
+	workers := parallelWorkerLimit(len(tasks))
+	jobs := make(chan storeSeedTask)
+	results := make(chan storeSeedResult, len(tasks))
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range jobs {
+				results <- i.seedPlannedPackageFromStore(task)
+			}
+		}()
+	}
+	for _, task := range tasks {
+		jobs <- task
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	byName := make(map[string]storeSeedResult, len(tasks))
+	for result := range results {
+		byName[result.name] = result
+	}
+	for _, task := range tasks {
+		result := byName[task.name]
+		if result.err != nil {
+			return result.err
+		}
+		if !result.reused {
 			continue
 		}
-		if err := copyInstalledPackage(storeLibrary, i.req.LibraryPath, name); err != nil {
-			return err
-		}
-		if err := copyInstalledPackageMetadata(storeLibrary, i.metaDir, name); err != nil {
-			return err
-		}
-		if err := touchPackageStoreLastUsed(storeLibrary, pkg, i.req.Runtime, time.Now().UTC()); err != nil {
-			return err
-		}
-		i.installedPackages[name] = installedPkg
-		progresscmd.Stage(i.stderr, "reusing stored "+name)
+		i.installedPackages[result.name] = result.installedPkg
+		progresscmd.Stage(i.stderr, "reusing stored "+result.name)
 	}
 	return nil
+}
+
+func (i *nativeInstaller) seedPlannedPackageFromStore(task storeSeedTask) storeSeedResult {
+	result := storeSeedResult{name: task.name}
+	installedPkg, ok, err := loadInstalledPackageFromLibrary(task.storeLibrary, task.name)
+	if err != nil {
+		result.err = err
+		return result
+	}
+	if !ok || !plannedPackageMatchesInstalled(task.pkg, installedPkg) {
+		return result
+	}
+	if err := copyInstalledPackage(task.storeLibrary, i.req.LibraryPath, task.name); err != nil {
+		result.err = err
+		return result
+	}
+	if err := copyInstalledPackageMetadata(task.storeLibrary, i.metaDir, task.name); err != nil {
+		result.err = err
+		return result
+	}
+	if err := touchPackageStoreLastUsed(task.storeLibrary, task.pkg, i.req.Runtime, time.Now().UTC()); err != nil {
+		result.err = err
+		return result
+	}
+	result.installedPkg = installedPkg
+	result.reused = true
+	return result
 }
 
 func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
