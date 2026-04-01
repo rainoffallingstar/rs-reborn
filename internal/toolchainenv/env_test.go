@@ -117,20 +117,21 @@ func TestApplyWithPlanAddsLibrarySearchPathsFromLDFLAGS(t *testing.T) {
 	env := ApplyWithPlan(base, nil, nil, NativeFixupPlan{
 		LDFLAGS: []string{"-L/tmp/xml-lib", "-Wl,-rpath,/tmp/xml-lib"},
 	})
+	expectedLibDir := filepath.Clean("/tmp/xml-lib")
 
 	if got := envValue(env, "LDFLAGS"); got != "-L/tmp/xml-lib -L/existing/lib -Wl,-rpath,/tmp/xml-lib" && got != "-L/tmp/xml-lib -Wl,-rpath,/tmp/xml-lib -L/existing/lib" {
 		t.Fatalf("LDFLAGS = %q", got)
 	}
-	if got := envValue(env, "LIBRARY_PATH"); !strings.HasPrefix(got, "/tmp/xml-lib") {
+	if got := envValue(env, "LIBRARY_PATH"); !strings.HasPrefix(got, expectedLibDir) {
 		t.Fatalf("LIBRARY_PATH = %q", got)
 	}
 	switch runtime.GOOS {
 	case "linux":
-		if got := envValue(env, "LD_LIBRARY_PATH"); !strings.HasPrefix(got, "/tmp/xml-lib") {
+		if got := envValue(env, "LD_LIBRARY_PATH"); !strings.HasPrefix(got, expectedLibDir) {
 			t.Fatalf("LD_LIBRARY_PATH = %q", got)
 		}
 	case "darwin":
-		if got := envValue(env, "DYLD_FALLBACK_LIBRARY_PATH"); !strings.HasPrefix(got, "/tmp/xml-lib") {
+		if got := envValue(env, "DYLD_FALLBACK_LIBRARY_PATH"); !strings.HasPrefix(got, expectedLibDir) {
 			t.Fatalf("DYLD_FALLBACK_LIBRARY_PATH = %q", got)
 		}
 	}
