@@ -451,6 +451,12 @@ func (i *nativeInstaller) syncPlannedPackageToStore(name string) error {
 	if strings.TrimSpace(storeLibrary) == "" {
 		return nil
 	}
+	now := time.Now().UTC()
+	if installedPkg, installed, err := loadInstalledPackageFromLibrary(storeLibrary, name); err != nil {
+		return err
+	} else if installed && plannedPackageMatchesInstalled(pkg, installedPkg) {
+		return touchPackageStoreLastUsed(storeLibrary, pkg, i.req.Runtime, now)
+	}
 	if err := os.MkdirAll(storeLibrary, 0o755); err != nil {
 		return fmt.Errorf("create package store dir for %s: %w", name, err)
 	}
@@ -460,7 +466,6 @@ func (i *nativeInstaller) syncPlannedPackageToStore(name string) error {
 	if err := copyInstalledPackageMetadata(i.req.LibraryPath, filepath.Join(storeLibrary, ".rs-source-meta"), name); err != nil {
 		return err
 	}
-	now := time.Now().UTC()
 	return writePackageStoreState(storeLibrary, pkg, i.req.Runtime, PackageStoreState{
 		UpdatedAt:  now.Format(time.RFC3339),
 		LastUsedAt: now.Format(time.RFC3339),

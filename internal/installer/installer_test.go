@@ -885,6 +885,112 @@ func TestSyncPlannedPackageToStoreMaterializesStoreEntry(t *testing.T) {
 	}
 }
 
+func TestSyncPlannedPackageToStoreSkipsRewriteForMatchingStoreEntry(t *testing.T) {
+	cacheRoot := t.TempDir()
+	libraryPath := filepath.Join(cacheRoot, "lib", "current")
+	metaDir := filepath.Join(libraryPath, ".rs-source-meta")
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	prepared := preparedSource{
+		Name:            "demo",
+		Version:         "0.1.0",
+		Source:          sourceGitHub,
+		Host:            "github.com",
+		Location:        "owner/demo",
+		Ref:             "main",
+		Commit:          "abc123",
+		Fingerprint:     "feedbeef",
+		FingerprintKind: localKindDirSHA256,
+	}
+	pkg := plannedPackage{
+		Name:     "demo",
+		Version:  "0.1.0",
+		Source:   sourceGitHub,
+		Prepared: &prepared,
+	}
+	storeLib := packageStorePathForPlanned(cacheRoot, pkg, runtime)
+	for _, path := range []string{
+		filepath.Join(libraryPath, "demo"),
+		metaDir,
+		filepath.Join(storeLib, "demo"),
+		filepath.Join(storeLib, ".rs-source-meta"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	currentDesc := filepath.Join(libraryPath, "demo", "DESCRIPTION")
+	storeDesc := filepath.Join(storeLib, "demo", "DESCRIPTION")
+	for _, path := range []string{currentDesc, storeDesc} {
+		if err := os.WriteFile(path, []byte("Package: demo\nVersion: 0.1.0\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", path, err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(libraryPath, "demo", "NAMESPACE"),
+		filepath.Join(storeLib, "demo", "NAMESPACE"),
+	} {
+		if err := os.WriteFile(path, []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", path, err)
+		}
+	}
+	if err := writeSourceMetadata(metaDir, "demo", prepared); err != nil {
+		t.Fatalf("writeSourceMetadata(current) error = %v", err)
+	}
+	if err := writeSourceMetadata(filepath.Join(storeLib, ".rs-source-meta"), "demo", prepared); err != nil {
+		t.Fatalf("writeSourceMetadata(store) error = %v", err)
+	}
+	originalTime := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	if err := writePackageStoreState(storeLib, pkg, runtime, PackageStoreState{
+		UpdatedAt:  originalTime,
+		LastUsedAt: originalTime,
+	}); err != nil {
+		t.Fatalf("writePackageStoreState() error = %v", err)
+	}
+	beforeInfo, err := os.Stat(storeDesc)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", storeDesc, err)
+	}
+
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: libraryPath,
+			Runtime:     runtime,
+		},
+		planned: map[string]plannedPackage{"demo": pkg},
+		metaDir: metaDir,
+	}
+	if err := inst.syncPlannedPackageToStore("demo"); err != nil {
+		t.Fatalf("syncPlannedPackageToStore() error = %v", err)
+	}
+
+	afterInfo, err := os.Stat(storeDesc)
+	if err != nil {
+		t.Fatalf("Stat(%q) after sync error = %v", storeDesc, err)
+	}
+	if !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatalf("expected matching store entry to be reused without rewriting package files")
+	}
+	state, err := readPackageStoreState(storeLib)
+	if err != nil {
+		t.Fatalf("readPackageStoreState() error = %v", err)
+	}
+	if state.UpdatedAt != originalTime {
+		t.Fatalf("state.UpdatedAt = %q, want preserved %q", state.UpdatedAt, originalTime)
+	}
+	if state.LastUsedAt == "" || state.LastUsedAt == originalTime {
+		t.Fatalf("state.LastUsedAt = %q, want refreshed timestamp", state.LastUsedAt)
+	}
+}
+
 func TestPackageStorePathForPlannedIncludesRuntimeIdentity(t *testing.T) {
 	cacheRoot := t.TempDir()
 	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
