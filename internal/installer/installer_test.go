@@ -940,6 +940,24 @@ func TestParallelWorkerLimitBoundsToCPUAndItemCount(t *testing.T) {
 	}
 }
 
+func TestCompiledBatchWorkerLimitCapsAtTwo(t *testing.T) {
+	original := runtime.GOMAXPROCS(0)
+	runtime.GOMAXPROCS(16)
+	t.Cleanup(func() {
+		runtime.GOMAXPROCS(original)
+	})
+
+	if got := compiledBatchWorkerLimit(0); got != 0 {
+		t.Fatalf("compiledBatchWorkerLimit(0) = %d, want 0", got)
+	}
+	if got := compiledBatchWorkerLimit(1); got != 1 {
+		t.Fatalf("compiledBatchWorkerLimit(1) = %d, want 1", got)
+	}
+	if got := compiledBatchWorkerLimit(8); got != 2 {
+		t.Fatalf("compiledBatchWorkerLimit(8) = %d, want 2", got)
+	}
+}
+
 func TestWaitAllSyncPlannedPackagesToStoreReturnsFirstError(t *testing.T) {
 	first := make(chan error, 1)
 	second := make(chan error, 1)

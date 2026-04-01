@@ -315,20 +315,14 @@ func Install(req Request) error {
 			if syncDone := inst.startSyncPlannedPackagesToStore(installed); syncDone != nil {
 				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
 			}
-			compiledInstalled := make([]string, 0, len(compiled))
-			for _, name := range compiled {
-				installed, err := inst.installPlannedPackage(name)
-				if err != nil {
-					_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
-					return err
-				}
-				if installed {
-					if err := inst.markPlannedPackageInstalled(name); err != nil {
-						_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
-						return err
-					}
-					compiledInstalled = append(compiledInstalled, name)
-				}
+			compiledInstalled, err := inst.installPackageBatchWithWorkers(compiled, compiledBatchWorkerLimit(len(compiled)))
+			if err != nil {
+				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
+				return err
+			}
+			if err := inst.markPlannedPackagesInstalled(compiledInstalled); err != nil {
+				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
+				return err
 			}
 			if syncDone := inst.startSyncPlannedPackagesToStore(compiledInstalled); syncDone != nil {
 				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
@@ -1165,6 +1159,10 @@ func (i *nativeInstaller) applyPrefetchedRepoDescription(name string, desc descr
 }
 
 func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) {
+	return i.installPackageBatchWithWorkers(names, parallelWorkerLimit(len(names)))
+}
+
+func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers int) ([]string, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
@@ -1182,7 +1180,12 @@ func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) 
 		err       error
 	}
 
-	workers := parallelWorkerLimit(len(names))
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(names) {
+		workers = len(names)
+	}
 	jobs := make(chan string)
 	results := make(chan installResult, len(names))
 
@@ -1226,7 +1229,15 @@ func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) 
 	return installed, nil
 }
 
+func compiledBatchWorkerLimit(items int) int {
+	return parallelWorkerLimitCap(items, 2)
+}
+
 func parallelWorkerLimit(items int) int {
+	return parallelWorkerLimitCap(items, 8)
+}
+
+func parallelWorkerLimitCap(items, maxWorkers int) int {
 	if items <= 1 {
 		return items
 	}
@@ -1234,8 +1245,8 @@ func parallelWorkerLimit(items int) int {
 	if workers <= 0 {
 		workers = 1
 	}
-	if workers > 8 {
-		workers = 8
+	if maxWorkers > 0 && workers > maxWorkers {
+		workers = maxWorkers
 	}
 	if workers > items {
 		workers = items
