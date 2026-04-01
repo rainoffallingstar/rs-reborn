@@ -300,16 +300,18 @@ func Install(req Request) error {
 			if err := inst.recordPlannedPackagesInstalled(installed); err != nil {
 				return err
 			}
+			compiledInstalled := make([]string, 0, len(compiled))
 			for _, name := range compiled {
 				installed, err := inst.installPlannedPackage(name)
 				if err != nil {
 					return err
 				}
 				if installed {
-					if err := inst.recordPlannedPackageInstalled(name); err != nil {
-						return err
-					}
+					compiledInstalled = append(compiledInstalled, name)
 				}
+			}
+			if err := inst.recordPlannedPackagesInstalled(compiledInstalled); err != nil {
+				return err
 			}
 		}
 		return nil
