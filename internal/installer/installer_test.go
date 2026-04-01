@@ -1374,6 +1374,65 @@ func TestFetchPackagesFileCachedFallsBackToStaleCache(t *testing.T) {
 	}
 }
 
+func TestEnsureCRANArchiveCandidatesReusesCachedArchivePage(t *testing.T) {
+	cacheRoot := t.TempDir()
+	archiveHTML := `<html><body><a href="cli_3.6.4.tar.gz">cli_3.6.4.tar.gz</a></body></html>`
+	hits := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if r.URL.Path != "/src/contrib/Archive/cli/" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, archiveHTML)
+	}))
+	defer server.Close()
+
+	inst := nativeInstaller{
+		req: Request{
+			Repo: server.URL,
+		},
+		downloadRoot:      filepath.Join(cacheRoot, "downloads"),
+		stderr:            io.Discard,
+		httpClient:        server.Client(),
+		cranIndex:         map[string][]repoRecord{},
+		cranArchiveLoaded: map[string]bool{},
+	}
+	if err := inst.ensureCRANArchiveCandidates("cli"); err != nil {
+		t.Fatalf("ensureCRANArchiveCandidates(first) error = %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("server hits after first load = %d, want 1", hits)
+	}
+	if len(inst.cranIndex["cli"]) != 1 || inst.cranIndex["cli"][0].Version != "3.6.4" {
+		t.Fatalf("cranIndex[cli] = %v, want cached archive candidate", inst.cranIndex["cli"])
+	}
+
+	inst2 := nativeInstaller{
+		req: Request{
+			Repo: server.URL,
+		},
+		downloadRoot: filepath.Join(cacheRoot, "downloads"),
+		stderr:       io.Discard,
+		httpClient: &http.Client{
+			Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				return nil, timeoutErr{}
+			}),
+		},
+		cranIndex:         map[string][]repoRecord{},
+		cranArchiveLoaded: map[string]bool{},
+	}
+	if err := inst2.ensureCRANArchiveCandidates("cli"); err != nil {
+		t.Fatalf("ensureCRANArchiveCandidates(second) error = %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("server hits after cached load = %d, want still 1", hits)
+	}
+	if len(inst2.cranIndex["cli"]) != 1 || inst2.cranIndex["cli"][0].Version != "3.6.4" {
+		t.Fatalf("cached cranIndex[cli] = %v, want archive candidate", inst2.cranIndex["cli"])
+	}
+}
+
 func TestDownloadCacheNamePreservesOriginalBasename(t *testing.T) {
 	got := downloadCacheName("https://cloud.r-project.org/bin/windows/contrib/4.4/jsonlite_2.0.0.zip", "jsonlite_2.0.0.zip")
 	if filepath.Base(got) != "jsonlite_2.0.0.zip" {

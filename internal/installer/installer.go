@@ -2505,15 +2505,7 @@ func (i *nativeInstaller) ensureCRANArchiveCandidates(name string) error {
 	baseURL := strings.TrimRight(i.req.Repo, "/")
 	archiveURL := baseURL + "/src/contrib/Archive/" + name + "/"
 	i.stage("checking CRAN archive for " + name)
-	resp, err := getWithRetry(i.httpClient, archiveURL)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected HTTP %d from %s", resp.StatusCode, archiveURL)
-	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := fetchURLBytesCached(i.httpClient, archiveURL, archiveIndexCachePath(i.repoIndexCacheDir(), archiveURL))
 	if err != nil {
 		return err
 	}
@@ -2668,14 +2660,25 @@ func fetchPackagesFileCached(client *http.Client, rawURL, cacheDir string) ([]by
 }
 
 func repoIndexCachePath(cacheDir, rawURL string) string {
+	return repoMetadataCachePath(cacheDir, rawURL, "PACKAGES.dcf")
+}
+
+func archiveIndexCachePath(cacheDir, rawURL string) string {
+	return repoMetadataCachePath(filepath.Join(cacheDir, "archives"), rawURL, "archive.html")
+}
+
+func repoMetadataCachePath(cacheDir, rawURL, name string) string {
 	if strings.TrimSpace(cacheDir) == "" || strings.TrimSpace(rawURL) == "" {
 		return ""
 	}
-	base := filepath.Base(rawURL)
-	if strings.TrimSpace(base) == "" || base == "." || base == string(filepath.Separator) {
-		base = "PACKAGES"
+	base := strings.TrimSpace(name)
+	if base == "" {
+		base = filepath.Base(rawURL)
 	}
-	return filepath.Join(cacheDir, downloadCacheName(rawURL, base+".dcf"))
+	if strings.TrimSpace(base) == "" || base == "." || base == string(filepath.Separator) {
+		base = "metadata"
+	}
+	return filepath.Join(cacheDir, downloadCacheName(rawURL, base))
 }
 
 func readFreshRepoIndexCache(path string, now time.Time) ([]byte, bool) {
@@ -2727,6 +2730,54 @@ func writeRepoIndexCache(path string, data []byte) error {
 		return err
 	}
 	return nil
+}
+
+func fetchURLBytesCached(client *http.Client, rawURL, cachePath string) ([]byte, error) {
+	if data, ok := readFreshRepoIndexCache(cachePath, time.Now()); ok {
+		return data, nil
+	}
+	data, err := fetchURLBytes(client, rawURL)
+	if err == nil {
+		if writeErr := writeRepoIndexCache(cachePath, data); writeErr != nil {
+			return data, nil
+		}
+		return data, nil
+	}
+	if stale, ok := readAnyRepoIndexCache(cachePath); ok {
+		return stale, nil
+	}
+	return nil, err
+}
+
+func fetchURLBytes(client *http.Client, rawURL string) ([]byte, error) {
+	var lastErr error
+	backoff := 500 * time.Millisecond
+	for attempt := 0; attempt < httpRetryAttempts; attempt++ {
+		data, err := fetchURLBytesOnce(client, rawURL)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		if attempt < httpRetryAttempts-1 && shouldRetryHTTPOperation(err) {
+			time.Sleep(backoff)
+			backoff *= 2
+			continue
+		}
+		break
+	}
+	return nil, lastErr
+}
+
+func fetchURLBytesOnce(client *http.Client, rawURL string) ([]byte, error) {
+	resp, err := getOnce(client, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected HTTP %d from %s", resp.StatusCode, rawURL)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 func fetchPackagesFileOnce(client *http.Client, rawURL string) ([]byte, error) {
