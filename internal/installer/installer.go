@@ -222,6 +222,18 @@ type storeSeedResult struct {
 	err          error
 }
 
+type cacheSeedLibrary struct {
+	entryName string
+	path      string
+}
+
+type cacheSeedResult struct {
+	entryName string
+	path      string
+	installed map[string]installedPackage
+	err       error
+}
+
 type planningState struct {
 	planned          map[string]plannedPackage
 	resolved         map[string]bool
@@ -597,10 +609,8 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 		}
 		remaining[name] = pkg
 	}
+	libraries := make([]cacheSeedLibrary, 0, len(entries))
 	for _, entry := range entries {
-		if len(remaining) == 0 {
-			break
-		}
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
@@ -608,10 +618,17 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 		if filepath.Clean(candidateLibrary) == currentLibrary {
 			continue
 		}
-		installed, err := findReusablePackagesInLibrary(candidateLibrary, remaining)
-		if err != nil {
-			return err
+		libraries = append(libraries, cacheSeedLibrary{entryName: entry.Name(), path: candidateLibrary})
+	}
+	results, err := discoverReusablePackagesInLibraries(libraries, remaining)
+	if err != nil {
+		return err
+	}
+	for _, result := range results {
+		if len(remaining) == 0 {
+			break
 		}
+		installed := result.installed
 		if len(installed) == 0 {
 			continue
 		}
@@ -620,10 +637,10 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 			if !ok || !plannedPackageMatchesInstalled(pkg, installedPkg) {
 				continue
 			}
-			if err := copyInstalledPackage(candidateLibrary, i.req.LibraryPath, name); err != nil {
+			if err := copyInstalledPackage(result.path, i.req.LibraryPath, name); err != nil {
 				return err
 			}
-			if err := copyInstalledPackageMetadata(candidateLibrary, i.metaDir, name); err != nil {
+			if err := copyInstalledPackageMetadata(result.path, i.metaDir, name); err != nil {
 				return err
 			}
 			i.installedPackages[name] = installedPkg
@@ -631,10 +648,68 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 				return err
 			}
 			delete(remaining, name)
-			progresscmd.Stage(i.stderr, "reusing cached "+name+" from "+entry.Name())
+			progresscmd.Stage(i.stderr, "reusing cached "+name+" from "+result.entryName)
 		}
 	}
 	return nil
+}
+
+func discoverReusablePackagesInLibraries(libraries []cacheSeedLibrary, remaining map[string]plannedPackage) ([]cacheSeedResult, error) {
+	if len(libraries) == 0 || len(remaining) == 0 {
+		return nil, nil
+	}
+	if len(libraries) == 1 {
+		installed, err := findReusablePackagesInLibrary(libraries[0].path, remaining)
+		if err != nil {
+			return nil, err
+		}
+		return []cacheSeedResult{{
+			entryName: libraries[0].entryName,
+			path:      libraries[0].path,
+			installed: installed,
+		}}, nil
+	}
+
+	workers := parallelWorkerLimit(len(libraries))
+	jobs := make(chan cacheSeedLibrary)
+	results := make(chan cacheSeedResult, len(libraries))
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for library := range jobs {
+				installed, err := findReusablePackagesInLibrary(library.path, remaining)
+				results <- cacheSeedResult{
+					entryName: library.entryName,
+					path:      library.path,
+					installed: installed,
+					err:       err,
+				}
+			}
+		}()
+	}
+	for _, library := range libraries {
+		jobs <- library
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	byPath := make(map[string]cacheSeedResult, len(libraries))
+	for result := range results {
+		byPath[result.path] = result
+	}
+	ordered := make([]cacheSeedResult, 0, len(libraries))
+	for _, library := range libraries {
+		result := byPath[library.path]
+		if result.err != nil {
+			return nil, result.err
+		}
+		ordered = append(ordered, result)
+	}
+	return ordered, nil
 }
 
 func findReusablePackagesInLibrary(libraryPath string, remaining map[string]plannedPackage) (map[string]installedPackage, error) {
