@@ -300,7 +300,7 @@ export RS_PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/share/pkgconf
 ./rs run analysis.R
 ```
 
-`rs` expands each `toolchain_prefixes` entry into the usual `bin`, `include`, and `lib` locations and injects the resulting `PATH`, `CPPFLAGS`, `LDFLAGS`, and `PKG_CONFIG_PATH` automatically for native R builds and source package installs.
+`rs` expands each `toolchain_prefixes` entry into the usual `bin`, `include`, and `lib` locations and injects the resulting `PATH`, `CPPFLAGS`, `LDFLAGS`, `LIBRARY_PATH`, runtime library path, and `PKG_CONFIG_PATH` automatically for native R builds and source package installs.
 
 The detailed rootless cookbook lives at [`docs/rootless-toolchains.md`](/Volumes/DataCenter_01/GitHub/gr/docs/rootless-toolchains.md). It includes copy-paste examples for `enva`, Homebrew-in-home, compatibility conda-family layouts, and Spack, and explains the current product boundary clearly: `rs` auto-detects and auto-uses an existing user-local prefix by default, and with `--bootstrap-toolchain` it can invoke a supported external manager to create one for you.
 

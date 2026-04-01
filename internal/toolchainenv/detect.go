@@ -462,27 +462,27 @@ func bootstrapCommandForCandidate(candidate Candidate, env []string) (string, bo
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`, path, prefix), true
+		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, path, prefix), true
 	case "mamba":
 		path, err := FindInPath("mamba", env)
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`, path, prefix), true
+		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, path, prefix), true
 	case "conda":
 		path, err := FindInPath("conda", env)
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`, path, prefix), true
+		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, path, prefix), true
 	case "homebrew":
 		brewPath := filepath.Join(prefix, "bin", "brew")
 		if info, err := detectStat(brewPath); err == nil && !info.IsDir() {
-			return fmt.Sprintf(`"%s" install pkg-config gcc cmake`, brewPath), true
+			return fmt.Sprintf(`"%s" install pkg-config gcc cmake libiconv`, brewPath), true
 		}
 		if len(candidate.ExistingPrefixes) > 0 {
 			if path, err := FindInPath("brew", env); err == nil {
-				return fmt.Sprintf(`"%s" install pkg-config gcc cmake`, path), true
+				return fmt.Sprintf(`"%s" install pkg-config gcc cmake libiconv`, path), true
 			}
 		}
 		return "", false
@@ -491,7 +491,7 @@ func bootstrapCommandForCandidate(candidate Candidate, env []string) (string, bo
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" view symlink "%s" pkgconf gcc cmake`, path, prefix), true
+		return fmt.Sprintf(`"%s" view symlink "%s" pkgconf gcc cmake libiconv`, path, prefix), true
 	default:
 		return "", false
 	}
@@ -608,29 +608,29 @@ func suggestedSetupCommand(preset string, prefixes []string) string {
 		return envaBootstrapCommand("enva")
 	case "micromamba":
 		if prefix == "" {
-			return `micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`
+			return `micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`
 		}
-		return fmt.Sprintf(`micromamba create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`, prefix)
+		return fmt.Sprintf(`micromamba create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, prefix)
 	case "mamba":
 		if prefix == "" {
-			return `mamba create -y -p "$HOME/.local/share/mamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`
+			return `mamba create -y -p "$HOME/.local/share/mamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`
 		}
-		return fmt.Sprintf(`mamba create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`, prefix)
+		return fmt.Sprintf(`mamba create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, prefix)
 	case "conda":
 		if prefix == "" {
-			return `conda create -y -p "$HOME/.conda/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`
+			return `conda create -y -p "$HOME/.conda/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`
 		}
-		return fmt.Sprintf(`conda create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake`, prefix)
+		return fmt.Sprintf(`conda create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, prefix)
 	case "homebrew":
 		if prefix == "" {
-			return `"$HOME/homebrew/bin/brew" install pkg-config gcc cmake`
+			return `"$HOME/homebrew/bin/brew" install pkg-config gcc cmake libiconv`
 		}
-		return fmt.Sprintf(`"%s" install pkg-config gcc cmake`, filepath.Join(prefix, "bin", "brew"))
+		return fmt.Sprintf(`"%s" install pkg-config gcc cmake libiconv`, filepath.Join(prefix, "bin", "brew"))
 	case "spack":
 		if prefix == "" {
-			return `spack view symlink "$HOME/spack/views/rs-sysdeps" pkgconf gcc cmake`
+			return `spack view symlink "$HOME/spack/views/rs-sysdeps" pkgconf gcc cmake libiconv`
 		}
-		return fmt.Sprintf(`spack view symlink "%s" pkgconf gcc cmake`, prefix)
+		return fmt.Sprintf(`spack view symlink "%s" pkgconf gcc cmake libiconv`, prefix)
 	default:
 		return ""
 	}
@@ -646,22 +646,22 @@ func suggestedSetupNote(preset string, prefixes []string) string {
 		if prefix == "" {
 			return "create a dedicated rattler-managed rs-sysdeps environment with enva, then let rs wire its bin/include/lib/pkgconfig paths automatically"
 		}
-		return fmt.Sprintf("this creates a dedicated enva-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, and PKG_CONFIG_PATH", prefix)
+		return fmt.Sprintf("this creates a dedicated enva-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix)
 	case "micromamba":
 		if prefix == "" {
 			return "create a dedicated micromamba or Conda environment for build tools instead of reusing a large runtime R environment"
 		}
-		return fmt.Sprintf("this creates a dedicated build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, and PKG_CONFIG_PATH", prefix)
+		return fmt.Sprintf("this creates a dedicated build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix)
 	case "mamba":
 		if prefix == "" {
 			return "create a dedicated mamba environment for build tools instead of reusing a large runtime R environment"
 		}
-		return fmt.Sprintf("this creates a dedicated mamba-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, and PKG_CONFIG_PATH", prefix)
+		return fmt.Sprintf("this creates a dedicated mamba-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix)
 	case "conda":
 		if prefix == "" {
 			return "create a dedicated conda environment for build tools instead of reusing a large runtime R environment"
 		}
-		return fmt.Sprintf("this creates a dedicated conda-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, and PKG_CONFIG_PATH", prefix)
+		return fmt.Sprintf("this creates a dedicated conda-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix)
 	case "homebrew":
 		if prefix == "" {
 			return "install or reuse a Homebrew prefix in your home directory first, then use brew to add pkg-config, gcc, and any headers or libraries your R packages need"
@@ -691,6 +691,7 @@ dependencies:
   - pkg-config
   - make
   - cmake
+  - libiconv
 EOF
 "%s" create --yaml "$tmp" --name rs-sysdeps --force --clean-cache`, path)
 }

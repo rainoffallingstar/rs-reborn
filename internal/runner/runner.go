@@ -2744,6 +2744,11 @@ func collectSystemDependencyHintDetails(cranDeps, biocDeps []string, sourceDeps 
 			message:  "commonly need font and text rendering libraries such as freetype, harfbuzz, fribidi, and cairo",
 		},
 		{
+			category: "encoding",
+			packages: []string{"haven", "readr", "vroom"},
+			message:  "may need libiconv available on both the link path and runtime library path when source installs are required",
+		},
+		{
 			category: "pdf",
 			packages: []string{"pdftools", "qpdf"},
 			message:  "commonly need poppler and qpdf system libraries",

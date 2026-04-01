@@ -38,12 +38,20 @@ func TestApplyPrependsPrefixesAndPkgConfigPaths(t *testing.T) {
 	existingPath := filepath.Join(string(filepath.Separator), "usr", "bin")
 	existingCPP := "-I" + filepath.Join(string(filepath.Separator), "existing", "include")
 	existingLD := "-L" + filepath.Join(string(filepath.Separator), "existing", "lib")
+	existingLibrary := filepath.Join(string(filepath.Separator), "existing", "runtime-lib")
 	existingPkg := filepath.Join(string(filepath.Separator), "existing", "pkgconfig")
 	base := []string{
 		"PATH=" + existingPath,
 		"CPPFLAGS=" + existingCPP,
 		"LDFLAGS=" + existingLD,
+		"LIBRARY_PATH=" + existingLibrary,
 		"PKG_CONFIG_PATH=" + existingPkg,
+	}
+	switch runtime.GOOS {
+	case "linux":
+		base = append(base, "LD_LIBRARY_PATH="+existingLibrary)
+	case "darwin":
+		base = append(base, "DYLD_FALLBACK_LIBRARY_PATH="+existingLibrary)
 	}
 
 	env := Apply(base, []string{root}, []string{customPkg})
@@ -57,6 +65,19 @@ func TestApplyPrependsPrefixesAndPkgConfigPaths(t *testing.T) {
 	}
 	if ld := envValue(env, "LDFLAGS"); !strings.Contains(ld, "-L"+filepath.Join(root, "lib")) {
 		t.Fatalf("LDFLAGS = %q", ld)
+	}
+	if libraryPath := envValue(env, "LIBRARY_PATH"); !strings.HasPrefix(libraryPath, filepath.Join(root, "lib")+string(os.PathListSeparator)) {
+		t.Fatalf("LIBRARY_PATH = %q", libraryPath)
+	}
+	switch runtime.GOOS {
+	case "linux":
+		if runtimePath := envValue(env, "LD_LIBRARY_PATH"); !strings.HasPrefix(runtimePath, filepath.Join(root, "lib")+string(os.PathListSeparator)) {
+			t.Fatalf("LD_LIBRARY_PATH = %q", runtimePath)
+		}
+	case "darwin":
+		if runtimePath := envValue(env, "DYLD_FALLBACK_LIBRARY_PATH"); !strings.HasPrefix(runtimePath, filepath.Join(root, "lib")+string(os.PathListSeparator)) {
+			t.Fatalf("DYLD_FALLBACK_LIBRARY_PATH = %q", runtimePath)
+		}
 	}
 	if pkg := envValue(env, "PKG_CONFIG_PATH"); !strings.HasPrefix(pkg, customPkg+string(os.PathListSeparator)) {
 		t.Fatalf("PKG_CONFIG_PATH = %q", pkg)
@@ -281,8 +302,8 @@ func TestBootstrapCandidateExplicitMicromambaStillWorks(t *testing.T) {
 	if !strings.Contains(candidate.SuggestedSetupCommand, "create -y -p") {
 		t.Fatalf("candidate.SuggestedSetupCommand = %q", candidate.SuggestedSetupCommand)
 	}
-	if !strings.Contains(candidate.SuggestedSetupCommand, " cmake") {
-		t.Fatalf("candidate.SuggestedSetupCommand = %q, want cmake included", candidate.SuggestedSetupCommand)
+	if !strings.Contains(candidate.SuggestedSetupCommand, " cmake") || !strings.Contains(candidate.SuggestedSetupCommand, " libiconv") {
+		t.Fatalf("candidate.SuggestedSetupCommand = %q, want cmake and libiconv included", candidate.SuggestedSetupCommand)
 	}
 }
 

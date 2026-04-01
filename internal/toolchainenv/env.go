@@ -34,19 +34,26 @@ func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
 	currentPath := envValue(base, "PATH")
 	currentCPP := envValue(base, "CPPFLAGS")
 	currentLD := envValue(base, "LDFLAGS")
+	currentLibrary := envValue(base, "LIBRARY_PATH")
+	currentRuntimeLibrary := runtimeLibraryEnvValue(base)
 	currentPkg := envValue(base, "PKG_CONFIG_PATH")
 
 	pathEntries := splitPathList(currentPath)
 	cppFlags := splitShellWords(currentCPP)
 	ldFlags := splitShellWords(currentLD)
+	libraryEntries := splitPathList(currentLibrary)
+	runtimeLibraryEntries := splitPathList(currentRuntimeLibrary)
 	pkgEntries := splitPathList(currentPkg)
 
 	for i := len(prefixes) - 1; i >= 0; i-- {
 		prefix := prefixes[i]
+		libDir := filepath.Join(prefix, "lib")
 		pathEntries = prependUnique(pathEntries, filepath.Join(prefix, "bin"))
 		cppFlags = prependUnique(cppFlags, "-I"+filepath.Join(prefix, "include"))
-		ldFlags = prependUnique(ldFlags, "-L"+filepath.Join(prefix, "lib"))
-		pkgEntries = prependUnique(pkgEntries, filepath.Join(prefix, "lib", "pkgconfig"))
+		ldFlags = prependUnique(ldFlags, "-L"+libDir)
+		libraryEntries = prependUnique(libraryEntries, libDir)
+		runtimeLibraryEntries = prependUnique(runtimeLibraryEntries, libDir)
+		pkgEntries = prependUnique(pkgEntries, filepath.Join(libDir, "pkgconfig"))
 		pkgEntries = prependUnique(pkgEntries, filepath.Join(prefix, "share", "pkgconfig"))
 	}
 	for i := len(pkgConfigPaths) - 1; i >= 0; i-- {
@@ -59,6 +66,8 @@ func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
 		case strings.HasPrefix(entry, "PATH="),
 			strings.HasPrefix(entry, "CPPFLAGS="),
 			strings.HasPrefix(entry, "LDFLAGS="),
+			strings.HasPrefix(entry, "LIBRARY_PATH="),
+			isRuntimeLibraryEnv(entry),
 			strings.HasPrefix(entry, "PKG_CONFIG_PATH="),
 			strings.HasPrefix(entry, PrefixesEnv+"="),
 			strings.HasPrefix(entry, PkgConfigEnv+"="):
@@ -76,6 +85,12 @@ func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
 	}
 	if len(ldFlags) > 0 {
 		filtered = append(filtered, "LDFLAGS="+strings.Join(ldFlags, " "))
+	}
+	if len(libraryEntries) > 0 {
+		filtered = append(filtered, "LIBRARY_PATH="+strings.Join(libraryEntries, string(os.PathListSeparator)))
+	}
+	if runtimeLibraryEnv := runtimeLibraryEnvName(); runtimeLibraryEnv != "" && len(runtimeLibraryEntries) > 0 {
+		filtered = append(filtered, runtimeLibraryEnv+"="+strings.Join(runtimeLibraryEntries, string(os.PathListSeparator)))
 	}
 	if len(pkgEntries) > 0 {
 		filtered = append(filtered, "PKG_CONFIG_PATH="+strings.Join(pkgEntries, string(os.PathListSeparator)))
@@ -196,6 +211,33 @@ func envValue(env []string, key string) string {
 		}
 	}
 	return ""
+}
+
+func runtimeLibraryEnvName() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "LD_LIBRARY_PATH"
+	case "darwin":
+		return "DYLD_FALLBACK_LIBRARY_PATH"
+	default:
+		return ""
+	}
+}
+
+func runtimeLibraryEnvValue(env []string) string {
+	name := runtimeLibraryEnvName()
+	if name == "" {
+		return ""
+	}
+	return envValue(env, name)
+}
+
+func isRuntimeLibraryEnv(entry string) bool {
+	name := runtimeLibraryEnvName()
+	if name == "" {
+		return false
+	}
+	return strings.HasPrefix(entry, name+"=")
 }
 
 func splitPathList(value string) []string {

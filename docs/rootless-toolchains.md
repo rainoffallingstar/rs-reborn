@@ -114,14 +114,14 @@ rs init --toolchain-preset enva
 rs doctor --toolchain-only
 ```
 
-`rs toolchain bootstrap enva` generates and runs a small temporary `conda-forge` YAML that creates an `rs-sysdeps` environment under `~/.local/share/rattler/envs/rs-sysdeps` with compilers, binutils, `cmake`, and a compatible Linux sysroot, then `rs` wires that prefix into native builds.
+`rs toolchain bootstrap enva` generates and runs a small temporary `conda-forge` YAML that creates an `rs-sysdeps` environment under `~/.local/share/rattler/envs/rs-sysdeps` with compilers, binutils, `cmake`, `libiconv`, and a compatible Linux sysroot, then `rs` wires that prefix into native builds and runtime library lookup.
 
 ### micromamba
 
 If micromamba, mamba, or Conda is already allowed on your machine, these remain supported compatibility bootstrap paths when selected explicitly:
 
 ```bash
-micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake
+micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv
 rs init --toolchain-preset micromamba
 rs doctor --toolchain-only
 ```
@@ -133,7 +133,7 @@ After that, add more user-local libraries to the same environment when specific 
 If you already have a Homebrew prefix in your home directory, install toolchain pieces there and point `rs` at it:
 
 ```bash
-"$HOME/homebrew/bin/brew" install pkg-config gcc
+"$HOME/homebrew/bin/brew" install pkg-config gcc cmake libiconv
 rs init --toolchain-preset homebrew
 rs doctor --toolchain-only
 ```
@@ -145,7 +145,7 @@ This works best when your team or cluster already standardized on a shared "Home
 If your cluster already uses Spack, populate a dedicated view that exposes the compilers and metadata tools you need:
 
 ```bash
-spack view symlink "$HOME/spack/views/rs-sysdeps" pkgconf gcc cmake
+spack view symlink "$HOME/spack/views/rs-sysdeps" pkgconf gcc cmake libiconv
 rs init --toolchain-preset spack
 rs doctor --toolchain-only
 ```
