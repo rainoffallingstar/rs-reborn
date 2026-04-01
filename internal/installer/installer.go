@@ -2289,6 +2289,13 @@ func archiveEntryPath(dest, name string) (string, error) {
 }
 
 func patchEncodingMakevars(sourceRoot, libDir string) error {
+	srcDir := filepath.Join(sourceRoot, "src")
+	if _, err := os.Stat(srcDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+
 	flags := []string{"-L" + libDir, "-liconv"}
 	patched := false
 	for _, relative := range []string{"src/Makevars.in", "src/Makevars"} {
@@ -2306,7 +2313,9 @@ func patchEncodingMakevars(sourceRoot, libDir string) error {
 	if patched {
 		return nil
 	}
-	return fmt.Errorf("encoding fixup could not find src/Makevars(.in) under %s", sourceRoot)
+	// Some packages with compiled code rely entirely on inherited environment
+	// flags and do not ship a src/Makevars template to patch.
+	return nil
 }
 
 func prependMakevarsFlags(path, variable string, flags []string) error {

@@ -598,6 +598,49 @@ func TestPrepareInstallTargetPatchesEncodingMakevarsInTarball(t *testing.T) {
 	}
 }
 
+func TestPrepareInstallTargetAllowsEncodingTarballWithoutMakevars(t *testing.T) {
+	dir := t.TempDir()
+	prefix := filepath.Join(dir, "prefix")
+	libDir := filepath.Join(prefix, "lib")
+	if err := os.MkdirAll(libDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(libDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libDir, "libiconv.so"), []byte("binary"), 0o644); err != nil {
+		t.Fatalf("WriteFile(libiconv) error = %v", err)
+	}
+
+	tarball := filepath.Join(dir, "readr_2.2.0.tar.gz")
+	if err := writeTestTarball(tarball, map[string]string{
+		"readr/DESCRIPTION": "Package: readr\nVersion: 2.2.0\n",
+		"readr/src/init.c":  "void R_init_readr(void) {}\n",
+	}); err != nil {
+		t.Fatalf("writeTestTarball() error = %v", err)
+	}
+
+	inst := nativeInstaller{
+		tempRoot: dir,
+		req: Request{
+			Environment: toolchainenv.Apply([]string{"PATH=/usr/bin"}, []string{prefix}, []string{
+				filepath.Join(prefix, "lib", "pkgconfig"),
+				filepath.Join(prefix, "share", "pkgconfig"),
+			}),
+		},
+	}
+	target, err := inst.prepareInstallTarget("readr", tarball)
+	if err != nil {
+		t.Fatalf("prepareInstallTarget() error = %v", err)
+	}
+	if target == tarball {
+		t.Fatalf("prepareInstallTarget() returned original tarball, want unpacked source dir")
+	}
+	if _, err := os.Stat(filepath.Join(target, "src", "Makevars")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat(Makevars) error = %v, want not exists", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "src", "Makevars.in")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat(Makevars.in) error = %v, want not exists", err)
+	}
+}
+
 func TestSeedPlannedPackagesFromCacheReusesMatchingSiblingLibrary(t *testing.T) {
 	cacheRoot := t.TempDir()
 	libraryRoot := filepath.Join(cacheRoot, "lib")
