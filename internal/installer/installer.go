@@ -410,7 +410,7 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 		if filepath.Clean(candidateLibrary) == currentLibrary {
 			continue
 		}
-		installed, err := loadInstalledPackagesFromLibrary(candidateLibrary)
+		installed, err := findReusablePackagesInLibrary(candidateLibrary, remaining)
 		if err != nil {
 			return err
 		}
@@ -437,6 +437,27 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 		}
 	}
 	return nil
+}
+
+func findReusablePackagesInLibrary(libraryPath string, remaining map[string]plannedPackage) (map[string]installedPackage, error) {
+	if len(remaining) == 0 {
+		return map[string]installedPackage{}, nil
+	}
+	// Point lookups avoid scanning large sibling libraries when only a few packages remain.
+	if len(remaining) <= 12 {
+		matches := map[string]installedPackage{}
+		for name := range remaining {
+			pkg, ok, err := loadInstalledPackageFromLibrary(libraryPath, name)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				matches[name] = pkg
+			}
+		}
+		return matches, nil
+	}
+	return loadInstalledPackagesFromLibrary(libraryPath)
 }
 
 func (i *nativeInstaller) syncPlannedPackageToStore(name string) error {
@@ -835,10 +856,7 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 		err    error
 	}
 
-	workers := len(records)
-	if workers > 4 {
-		workers = 4
-	}
+	workers := parallelWorkerLimit(len(records))
 	jobs := make(chan repoRecord)
 	results := make(chan prefetchResult, len(records))
 
@@ -942,10 +960,7 @@ func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) 
 		err       error
 	}
 
-	workers := len(names)
-	if workers > 4 {
-		workers = 4
-	}
+	workers := parallelWorkerLimit(len(names))
 	jobs := make(chan string)
 	results := make(chan installResult, len(names))
 
@@ -987,6 +1002,26 @@ func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) 
 		}
 	}
 	return installed, nil
+}
+
+func parallelWorkerLimit(items int) int {
+	if items <= 1 {
+		return items
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers <= 0 {
+		workers = 1
+	}
+	if workers > 8 {
+		workers = 8
+	}
+	if workers > items {
+		workers = items
+	}
+	if workers < 1 {
+		return 1
+	}
+	return workers
 }
 
 func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {

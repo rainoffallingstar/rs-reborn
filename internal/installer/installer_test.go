@@ -787,6 +787,59 @@ func TestLoadInstalledPackageFromLibraryReadsSourceMetadata(t *testing.T) {
 	}
 }
 
+func TestFindReusablePackagesInLibraryUsesPointLookupsForSmallRemainder(t *testing.T) {
+	library := t.TempDir()
+	for _, path := range []string{
+		filepath.Join(library, "cli"),
+		filepath.Join(library, ".rs-source-meta"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(library, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+
+	got, err := findReusablePackagesInLibrary(library, map[string]plannedPackage{
+		"cli":   {Name: "cli", Version: "3.6.5", Source: sourceCRAN},
+		"glue":  {Name: "glue", Version: "1.8.0", Source: sourceCRAN},
+		"rlang": {Name: "rlang", Version: "1.1.7", Source: sourceCRAN},
+	})
+	if err != nil {
+		t.Fatalf("findReusablePackagesInLibrary() error = %v", err)
+	}
+	if len(got) != 1 || got["cli"].Version != "3.6.5" {
+		t.Fatalf("findReusablePackagesInLibrary() = %#v, want only cli", got)
+	}
+}
+
+func TestParallelWorkerLimitBoundsToCPUAndItemCount(t *testing.T) {
+	original := runtime.GOMAXPROCS(0)
+	runtime.GOMAXPROCS(6)
+	t.Cleanup(func() {
+		runtime.GOMAXPROCS(original)
+	})
+
+	if got := parallelWorkerLimit(0); got != 0 {
+		t.Fatalf("parallelWorkerLimit(0) = %d, want 0", got)
+	}
+	if got := parallelWorkerLimit(1); got != 1 {
+		t.Fatalf("parallelWorkerLimit(1) = %d, want 1", got)
+	}
+	if got := parallelWorkerLimit(3); got != 3 {
+		t.Fatalf("parallelWorkerLimit(3) = %d, want 3", got)
+	}
+	if got := parallelWorkerLimit(99); got != 6 {
+		t.Fatalf("parallelWorkerLimit(99) = %d, want 6", got)
+	}
+
+	runtime.GOMAXPROCS(32)
+	if got := parallelWorkerLimit(99); got != 8 {
+		t.Fatalf("parallelWorkerLimit(99) with high GOMAXPROCS = %d, want 8", got)
+	}
+}
+
 func TestSyncPlannedPackageToStoreMaterializesStoreEntry(t *testing.T) {
 	cacheRoot := t.TempDir()
 	libraryPath := filepath.Join(cacheRoot, "lib", "aaaaaaaaaaaaaaaa")
