@@ -1073,6 +1073,49 @@ func TestSyncPlannedPackageToStoreSkipsRewriteForMatchingStoreEntry(t *testing.T
 	}
 }
 
+func TestLoadInstalledPackageFromLibraryUsesPackageStoreStateFastPath(t *testing.T) {
+	library := t.TempDir()
+	pkg := plannedPackage{
+		Name:    "demo",
+		Version: "0.1.0",
+		Source:  sourceGitHub,
+		Prepared: &preparedSource{
+			Name:            "demo",
+			Version:         "0.1.0",
+			Source:          sourceGitHub,
+			Host:            "github.com",
+			Location:        "owner/demo",
+			Ref:             "main",
+			Commit:          "abc123",
+			Subdir:          "pkg",
+			Fingerprint:     "feedbeef",
+			FingerprintKind: localKindDirSHA256,
+		},
+	}
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+	}
+	if err := writePackageStoreState(library, pkg, runtime, PackageStoreState{
+		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writePackageStoreState() error = %v", err)
+	}
+
+	got, ok, err := loadInstalledPackageFromLibrary(library, "demo")
+	if err != nil {
+		t.Fatalf("loadInstalledPackageFromLibrary() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("loadInstalledPackageFromLibrary() ok = false, want true")
+	}
+	if got.Source != sourceGitHub || got.Location != "owner/demo" || got.Commit != "abc123" || got.Subdir != "pkg" || got.FingerprintKind != localKindDirSHA256 {
+		t.Fatalf("got = %#v", got)
+	}
+}
+
 func TestRecordPlannedPackagesInstalledSyncsBatchToStore(t *testing.T) {
 	cacheRoot := t.TempDir()
 	libraryPath := filepath.Join(cacheRoot, "lib", "current")

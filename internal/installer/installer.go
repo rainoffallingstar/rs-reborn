@@ -174,6 +174,13 @@ type PackageStoreState struct {
 	Package         string `json:"package"`
 	Version         string `json:"version"`
 	Source          string `json:"source"`
+	Host            string `json:"host,omitempty"`
+	Location        string `json:"location,omitempty"`
+	Ref             string `json:"ref,omitempty"`
+	Commit          string `json:"commit,omitempty"`
+	Subdir          string `json:"subdir,omitempty"`
+	Fingerprint     string `json:"fingerprint,omitempty"`
+	FingerprintKind string `json:"fingerprint_kind,omitempty"`
 	RuntimeIdentity string `json:"runtime_identity"`
 	UpdatedAt       string `json:"updated_at,omitempty"`
 	LastUsedAt      string `json:"last_used_at,omitempty"`
@@ -653,6 +660,15 @@ func writePackageStoreState(storeLibrary string, pkg plannedPackage, runtime Run
 	state.Version = pkg.Version
 	state.Source = pkg.Source
 	state.RuntimeIdentity = runtimeInterpreterIdentity(runtime)
+	if installed := installedPackageForPlanned(pkg); installed.Name != "" {
+		state.Host = installed.Host
+		state.Location = installed.Location
+		state.Ref = installed.Ref
+		state.Commit = installed.Commit
+		state.Subdir = installed.Subdir
+		state.Fingerprint = installed.Fingerprint
+		state.FingerprintKind = installed.FingerprintKind
+	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal package store state for %s: %w", pkg.Name, err)
@@ -690,6 +706,21 @@ func touchPackageStoreLastUsed(storeLibrary string, pkg plannedPackage, runtime 
 	}
 	state.LastUsedAt = when.Format(time.RFC3339)
 	return writePackageStoreState(storeLibrary, pkg, runtime, state)
+}
+
+func installedPackageFromStoreState(state PackageStoreState) installedPackage {
+	return installedPackage{
+		Name:            state.Package,
+		Version:         state.Version,
+		Source:          state.Source,
+		Host:            state.Host,
+		Location:        state.Location,
+		Ref:             state.Ref,
+		Commit:          state.Commit,
+		Subdir:          state.Subdir,
+		Fingerprint:     state.Fingerprint,
+		FingerprintKind: state.FingerprintKind,
+	}
 }
 
 func managedInterpreterVersion(path string) string {
@@ -2420,6 +2451,13 @@ func loadInstalledPackagesFromLibrary(libraryPath string) (map[string]installedP
 func loadInstalledPackageFromLibrary(libraryPath, pkg string) (installedPackage, bool, error) {
 	if strings.TrimSpace(libraryPath) == "" || strings.TrimSpace(pkg) == "" {
 		return installedPackage{}, false, nil
+	}
+	if state, err := readPackageStoreState(libraryPath); err == nil {
+		if state.Package == pkg && strings.TrimSpace(state.Version) != "" {
+			return installedPackageFromStoreState(state), true, nil
+		}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return installedPackage{}, false, err
 	}
 	descPath := filepath.Join(libraryPath, pkg, "DESCRIPTION")
 	data, err := os.ReadFile(descPath)
