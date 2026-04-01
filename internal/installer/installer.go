@@ -50,10 +50,11 @@ const (
 )
 
 var (
-	installerGOOS     = runtime.GOOS
-	installerLookPath = exec.LookPath
-	installerReadFile = os.ReadFile
-	installerRunCmd   = func(cmd *exec.Cmd) error { return cmd.Run() }
+	installerGOOS                = runtime.GOOS
+	installerLookPath            = exec.LookPath
+	installerReadFile            = os.ReadFile
+	installerRunCmd              = func(cmd *exec.Cmd) error { return cmd.Run() }
+	installerReadDescriptionFile = readDescriptionFromTarball
 )
 
 type Runtime struct {
@@ -1781,6 +1782,13 @@ func repoDownloadName(record repoRecord) string {
 	return fmt.Sprintf("%s_%s%s", record.Name, record.Version, ext)
 }
 
+func descriptionSidecarPath(target string) string {
+	if strings.TrimSpace(target) == "" {
+		return ""
+	}
+	return target + ".description.json"
+}
+
 func (i *nativeInstaller) readDescriptionFromCachedPath(path string) (description, error) {
 	key := "path:" + path
 	if desc, ok := i.cachedDescription(key); ok {
@@ -3246,11 +3254,16 @@ func readDescriptionFromPath(target string) (description, error) {
 		}
 		return parseDescription(data), nil
 	}
-	data, err := readDescriptionFromTarball(target)
+	if desc, ok := readDescriptionSidecar(target, info.ModTime()); ok {
+		return desc, nil
+	}
+	data, err := installerReadDescriptionFile(target)
 	if err != nil {
 		return description{}, err
 	}
-	return parseDescription(data), nil
+	desc := parseDescription(data)
+	writeDescriptionSidecar(target, desc)
+	return desc, nil
 }
 
 func readDescriptionFromTarball(target string) ([]byte, error) {
@@ -3300,6 +3313,47 @@ func readDescriptionFromTarReader(reader io.Reader) ([]byte, error) {
 		return io.ReadAll(tarReader)
 	}
 	return nil, fmt.Errorf("DESCRIPTION not found in tar stream")
+}
+
+func readDescriptionSidecar(target string, targetModTime time.Time) (description, bool) {
+	sidecar := descriptionSidecarPath(target)
+	if strings.TrimSpace(sidecar) == "" {
+		return description{}, false
+	}
+	info, err := os.Stat(sidecar)
+	if err != nil || info.IsDir() || info.Size() == 0 {
+		return description{}, false
+	}
+	if info.ModTime().Before(targetModTime) {
+		return description{}, false
+	}
+	data, err := os.ReadFile(sidecar)
+	if err != nil || len(data) == 0 {
+		return description{}, false
+	}
+	var desc description
+	if err := json.Unmarshal(data, &desc); err != nil {
+		return description{}, false
+	}
+	return desc, true
+}
+
+func writeDescriptionSidecar(target string, desc description) {
+	sidecar := descriptionSidecarPath(target)
+	if strings.TrimSpace(sidecar) == "" {
+		return
+	}
+	data, err := json.Marshal(desc)
+	if err != nil {
+		return
+	}
+	part := sidecar + ".part"
+	if err := os.WriteFile(part, data, 0o644); err != nil {
+		return
+	}
+	if err := os.Rename(part, sidecar); err != nil {
+		_ = os.Remove(part)
+	}
 }
 
 func parseDescription(data []byte) description {

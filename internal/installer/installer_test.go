@@ -206,6 +206,89 @@ func TestReadDescriptionFromTarball(t *testing.T) {
 	}
 }
 
+func TestReadDescriptionFromPathReusesSidecarCache(t *testing.T) {
+	dir := t.TempDir()
+	tarball := filepath.Join(dir, "pkg_0.1.0.tar.gz")
+	if err := writeTestTarball(tarball, map[string]string{
+		"pkg/DESCRIPTION": "Package: pkg\nVersion: 0.1.0\nImports: cli\n",
+	}); err != nil {
+		t.Fatalf("writeTestTarball() error = %v", err)
+	}
+
+	desc, err := readDescriptionFromPath(tarball)
+	if err != nil {
+		t.Fatalf("readDescriptionFromPath(first) error = %v", err)
+	}
+	if desc.Package != "pkg" || desc.Version != "0.1.0" {
+		t.Fatalf("description = %#v", desc)
+	}
+	sidecar := descriptionSidecarPath(tarball)
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Fatalf("Stat(%q) error = %v", sidecar, err)
+	}
+
+	original := installerReadDescriptionFile
+	t.Cleanup(func() {
+		installerReadDescriptionFile = original
+	})
+	installerReadDescriptionFile = func(string) ([]byte, error) {
+		t.Fatalf("installerReadDescriptionFile should not be called when sidecar cache is warm")
+		return nil, nil
+	}
+
+	desc, err = readDescriptionFromPath(tarball)
+	if err != nil {
+		t.Fatalf("readDescriptionFromPath(second) error = %v", err)
+	}
+	if desc.Package != "pkg" || desc.Version != "0.1.0" {
+		t.Fatalf("cached description = %#v", desc)
+	}
+}
+
+func TestReadDescriptionFromPathIgnoresStaleSidecarCache(t *testing.T) {
+	dir := t.TempDir()
+	tarball := filepath.Join(dir, "pkg_0.1.0.tar.gz")
+	if err := writeTestTarball(tarball, map[string]string{
+		"pkg/DESCRIPTION": "Package: pkg\nVersion: 0.1.0\nImports: cli\n",
+	}); err != nil {
+		t.Fatalf("writeTestTarball() error = %v", err)
+	}
+
+	sidecar := descriptionSidecarPath(tarball)
+	if err := os.WriteFile(sidecar, []byte(`{"Package":"stale","Version":"9.9.9"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", sidecar, err)
+	}
+	staleTime := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(sidecar, staleTime, staleTime); err != nil {
+		t.Fatalf("Chtimes(%q) error = %v", sidecar, err)
+	}
+	freshTime := time.Now()
+	if err := os.Chtimes(tarball, freshTime, freshTime); err != nil {
+		t.Fatalf("Chtimes(%q) error = %v", tarball, err)
+	}
+
+	called := false
+	original := installerReadDescriptionFile
+	t.Cleanup(func() {
+		installerReadDescriptionFile = original
+	})
+	installerReadDescriptionFile = func(target string) ([]byte, error) {
+		called = true
+		return original(target)
+	}
+
+	desc, err := readDescriptionFromPath(tarball)
+	if err != nil {
+		t.Fatalf("readDescriptionFromPath() error = %v", err)
+	}
+	if !called {
+		t.Fatalf("installerReadDescriptionFile was not called for stale sidecar")
+	}
+	if desc.Package != "pkg" || desc.Version != "0.1.0" {
+		t.Fatalf("description = %#v", desc)
+	}
+}
+
 func TestVersionSatisfies(t *testing.T) {
 	cases := []struct {
 		version    string
