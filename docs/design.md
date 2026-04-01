@@ -182,6 +182,12 @@ Installed packages do not go into the default user library. Instead, `rs` create
 <cache>/lib/<hash>
 ```
 
+The cache root can also keep a persistent package store for already-built packages:
+
+```text
+<cache>/pkgstore/<hash>
+```
+
 The hash is derived from inputs that materially affect package compatibility and installation intent, including:
 
 - absolute script path
@@ -198,6 +204,8 @@ This design gives a few useful properties:
 - repeated runs can reuse an existing library
 - different scripts can have different environments without manual naming
 - cache management can stay filesystem-oriented and debuggable
+
+The package store exists to reduce rebuild churn across library hashes that target the same effective runtime and package source identity. `rs` can seed a fresh managed library from that store, reuse already-built package directories, and then sync newly installed packages back into the store with usage timestamps.
 
 The current design still does not include every conceivable ABI-relevant dimension in the hash, but it now folds in the major runtime metadata plus local-source content fingerprints so the most obvious cross-runtime and same-path local-source reuse hazards are avoided.
 
@@ -318,11 +326,11 @@ The cache is explicitly user-visible because hidden mutation tends to make langu
 Current cache commands support:
 
 - printing the cache root
-- listing managed libraries
-- pruning stale managed libraries
-- removing one managed library by hash or explicit managed path
+- listing managed libraries and persistent package-store entries
+- pruning stale managed libraries plus old or empty package-store entries
+- removing one managed library or package-store entry by hash or explicit managed path
 
-Safety rules are intentionally strict. Deletion only applies to directories that match the managed `<cache>/lib/<16-hex>` layout.
+Safety rules are intentionally strict. Deletion only applies to directories that match the managed `<cache>/lib/<16-hex>` or package-store `<cache>/pkgstore/<64-hex>` layouts.
 
 ## Why Go
 
@@ -347,9 +355,9 @@ The tradeoff is that the TOML parser and R scanner are currently minimal and pur
 
 The repository includes example projects that map directly to the design:
 
-- [`examples/cran-basic/`](/Volumes/DataCenter_01/GitHub/gr/examples/cran-basic): one script, CRAN-only dependencies
-- [`examples/bioc-rnaseq/`](/Volumes/DataCenter_01/GitHub/gr/examples/bioc-rnaseq): Bioconductor-heavy script
-- [`examples/multi-script/`](/Volumes/DataCenter_01/GitHub/gr/examples/multi-script): one `rs.toml`, multiple script profiles
+- [`examples/cran-basic/`](../examples/cran-basic): one script, CRAN-only dependencies
+- [`examples/bioc-rnaseq/`](../examples/bioc-rnaseq): Bioconductor-heavy script
+- [`examples/multi-script/`](../examples/multi-script): one `rs.toml`, multiple script profiles
 
 These examples are a good sanity check for future changes: if a new command or config change makes these layouts awkward, the design has probably become too complicated.
 
@@ -358,7 +366,7 @@ These examples are a good sanity check for future changes: if a new command or c
 The most useful next improvements are:
 
 1. tighten `rs.toml` rewrite fidelity in edge cases such as exact blank-line placement
-2. harden cache keys with richer runtime and source metadata
+2. broaden mixed-source drift coverage and older-library metadata compatibility checks
 3. surface better system dependency hints in `doctor`
 4. add more explicit lockfile refresh policies
 5. improve custom source verification for immutable GitHub and git revisions

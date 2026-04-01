@@ -7,6 +7,19 @@ BIN_DIR="${RS_INSTALL_DIR:-$HOME/.cargo/bin}"
 BIN_NAME="rs"
 BASE_URL="${RS_INSTALL_BASE_URL:-}"
 
+checksum_cmd() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "sha256sum"
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    echo "shasum"
+    return
+  fi
+  echo "missing required checksum command: sha256sum or shasum" >&2
+  exit 1
+}
+
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "missing required command: $1" >&2
@@ -75,11 +88,40 @@ download_release() {
   local url output auth_header
   url="$1"
   output="$2"
+  if [[ "$url" == file://* ]]; then
+    cp "${url#file://}" "$output"
+    return
+  fi
+  if [ -e "$url" ]; then
+    cp "$url" "$output"
+    return
+  fi
   if auth_header="$(github_auth_header)"; then
     curl -fsSL -H "$auth_header" "$url" -o "$output"
   else
     curl -fsSL "$url" -o "$output"
   fi
+}
+
+archive_sha256() {
+  local archive_path cmd
+  archive_path="$1"
+  cmd="$(checksum_cmd)"
+  case "$cmd" in
+    sha256sum)
+      sha256sum "$archive_path" | awk '{print $1}'
+      ;;
+    shasum)
+      shasum -a 256 "$archive_path" | awk '{print $1}'
+      ;;
+  esac
+}
+
+expected_sha256() {
+  local checksum_file asset
+  checksum_file="$1"
+  asset="$2"
+  awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' "$checksum_file"
 }
 
 need_cmd curl
@@ -107,11 +149,35 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 ARCHIVE_PATH="$TMP_DIR/$ASSET"
+CHECKSUM_PATH="$TMP_DIR/SHA256SUMS"
 EXTRACT_DIR="$TMP_DIR/extract"
 mkdir -p "$EXTRACT_DIR"
 
 echo "==> downloading $URL"
 download_release "$URL" "$ARCHIVE_PATH"
+
+if [ -n "$BASE_URL" ]; then
+  CHECKSUM_URL="${BASE_URL%/}/SHA256SUMS"
+else
+  CHECKSUM_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${TAG}/SHA256SUMS"
+fi
+
+echo "==> downloading checksums"
+download_release "$CHECKSUM_URL" "$CHECKSUM_PATH"
+
+EXPECTED_SHA="$(expected_sha256 "$CHECKSUM_PATH" "$ASSET")"
+if [ -z "$EXPECTED_SHA" ]; then
+  echo "could not find checksum for $ASSET in SHA256SUMS" >&2
+  exit 1
+fi
+ACTUAL_SHA="$(archive_sha256 "$ARCHIVE_PATH")"
+if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+  echo "checksum mismatch for $ASSET" >&2
+  echo "expected: $EXPECTED_SHA" >&2
+  echo "actual:   $ACTUAL_SHA" >&2
+  exit 1
+fi
+echo "==> verified sha256 for $ASSET"
 
 echo "==> extracting $ASSET"
 tar -xzf "$ARCHIVE_PATH" -C "$EXTRACT_DIR"

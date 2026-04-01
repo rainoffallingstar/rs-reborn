@@ -73,6 +73,10 @@ RS_INSTALL_TAG=2026-03-30 curl -fsSL https://raw.githubusercontent.com/rainoffal
 RS_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/rainoffallingstar/rs-reborn/main/install.sh | bash
 ```
 
+The install scripts fetch the matching `SHA256SUMS` asset from the release and verify the downloaded archive before extraction.
+
+After install, use `rs version` to confirm the release tag, commit, and build date baked into the binary.
+
 Install the latest published Windows binary into `%USERPROFILE%\.cargo\bin` with PowerShell:
 
 ```powershell
@@ -82,9 +86,9 @@ $env:RS_INSTALL_TAG="2026-03-30"; irm https://raw.githubusercontent.com/rainoffa
 
 Continuous integration:
 
-- [`.github/workflows/ci.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux, macOS, and Windows x64, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and native multi-R manager integration checks
-- [`.github/workflows/release.yml`](/Volumes/DataCenter_01/GitHub/gr/.github/workflows/release.yml) publishes date-tagged GitHub Release binaries after successful `main` or `master` CI runs; successful rebuilds later the same day reuse that date tag and refresh the assets
-- the CI helper scripts live under [`scripts/ci/`](/Volumes/DataCenter_01/GitHub/gr/scripts/ci)
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `go test`, real-R CLI smoke coverage on Linux, macOS, and Windows x64, native-backend end-to-end coverage for CRAN, Bioconductor, local, and GitHub installs, compatibility coverage for the `pak` backend, and native multi-R manager integration checks
+- [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes date-tagged GitHub Release binaries after successful `main` or `master` CI runs; successful rebuilds later the same day reuse that date tag and refresh the assets
+- the CI helper scripts live under [`scripts/ci/`](scripts/ci)
 
 Initialize a project:
 
@@ -302,7 +306,7 @@ export RS_PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/share/pkgconf
 
 `rs` expands each `toolchain_prefixes` entry into the usual `bin`, `include`, and `lib` locations and injects the resulting `PATH`, `CPPFLAGS`, `LDFLAGS`, `LIBRARY_PATH`, runtime library path, and `PKG_CONFIG_PATH` automatically for native R builds and source package installs.
 
-The detailed rootless cookbook lives at [`docs/rootless-toolchains.md`](/Volumes/DataCenter_01/GitHub/gr/docs/rootless-toolchains.md). It includes copy-paste examples for `enva`, Homebrew-in-home, compatibility conda-family layouts, and Spack, and explains the current product boundary clearly: `rs` auto-detects and auto-uses an existing user-local prefix by default, and with `--bootstrap-toolchain` it can invoke a supported external manager to create one for you.
+The detailed rootless cookbook lives at [`docs/rootless-toolchains.md`](docs/rootless-toolchains.md). It includes copy-paste examples for `enva`, Homebrew-in-home, compatibility conda-family layouts, and Spack, and explains the current product boundary clearly: `rs` auto-detects and auto-uses an existing user-local prefix by default, and with `--bootstrap-toolchain` it can invoke a supported external manager to create one for you.
 
 For faster bootstrapping, `rs init` also supports `--toolchain-preset auto|enva|micromamba|mamba|conda|homebrew|spack`, which seeds `toolchain_prefixes` and `pkg_config_path` with a common user-local template. `auto` reuses the top recommendation from `rs toolchain detect`, so if one of the built-in layouts already exists under your home directory you can wire it into a new project in one step. You can still append explicit `--toolchain-prefix` or `--pkg-config-path` values on the same command.
 
@@ -345,11 +349,11 @@ rs toolchain bootstrap auto
 
 ## Examples
 
-The [`examples/`](/Volumes/DataCenter_01/GitHub/gr/examples) directory includes three small projects you can copy or run in place:
+The [`examples/`](examples) directory includes three small projects you can copy or run in place:
 
-- [`examples/cran-basic/`](/Volumes/DataCenter_01/GitHub/gr/examples/cran-basic) shows a simple CRAN-only script with a local `rs.toml`
-- [`examples/bioc-rnaseq/`](/Volumes/DataCenter_01/GitHub/gr/examples/bioc-rnaseq) shows a Bioconductor-heavy RNA-seq style workflow
-- [`examples/multi-script/`](/Volumes/DataCenter_01/GitHub/gr/examples/multi-script) shows one project with per-script dependency blocks
+- [`examples/cran-basic/`](examples/cran-basic) shows a simple CRAN-only script with a local `rs.toml`
+- [`examples/bioc-rnaseq/`](examples/bioc-rnaseq) shows a Bioconductor-heavy RNA-seq style workflow
+- [`examples/multi-script/`](examples/multi-script) shows one project with per-script dependency blocks
 
 Try them from the repository root:
 
@@ -364,11 +368,11 @@ Each example keeps its own `cache_dir` and `lockfile` under that example directo
 
 ## Design Doc
 
-The fuller design write-up lives at [`docs/design.md`](/Volumes/DataCenter_01/GitHub/gr/docs/design.md). It captures the current R-only scope, command model, config merge rules, runtime bootstrap lifecycle, and the intended evolution path from prototype to a more production-ready tool.
+The fuller design write-up lives at [`docs/design.md`](docs/design.md). It captures the current R-only scope, command model, config merge rules, runtime bootstrap lifecycle, and the intended evolution path from prototype to a more production-ready tool.
 
 ## Roadmap
 
-The staged delivery plan lives at [`docs/roadmap.md`](/Volumes/DataCenter_01/GitHub/gr/docs/roadmap.md). It breaks the next work into near-term, mid-term, and later milestones so implementation can stay focused without losing the larger direction.
+The staged delivery plan lives at [`docs/roadmap.md`](docs/roadmap.md). It breaks the next work into near-term, mid-term, and later milestones so implementation can stay focused without losing the larger direction.
 
 ## Architecture
 
@@ -558,10 +562,10 @@ For CI or gating scripts, `rs doctor --strict` exits non-zero unless the report 
 If you want this to grow from prototype into a real tool, the next steps are:
 
 1. keep tightening `rs.toml` rewrite fidelity in edge cases such as exact blank-line placement
-2. add shared cache indexing keyed by R version and source metadata to avoid ABI mismatches
-3. enrich `rs doctor` with system dependency hints for packages that need external libraries or compilers
+2. broaden mixed-source drift coverage and immutable custom-source verification
+3. enrich `rs doctor` with more system dependency hints for packages that need external libraries or compilers
 4. add finer lockfile update policies such as partial refresh modes and selective package relocking
-5. validate immutable GitHub commits and generic git revisions more strictly across every custom source path
+5. keep tightening cache and release observability so package reuse and published artifacts stay easy to audit
 
 ## Notes
 

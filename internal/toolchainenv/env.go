@@ -28,12 +28,17 @@ type Preview struct {
 }
 
 func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
+	return ApplyWithPlan(base, prefixes, pkgConfigPaths, NativeFixupPlan{})
+}
+
+func ApplyWithPlan(base []string, prefixes, pkgConfigPaths []string, plan NativeFixupPlan) []string {
 	prefixes = cleanList(prefixes)
 	pkgConfigPaths = cleanList(pkgConfigPaths)
 
 	currentPath := envValue(base, "PATH")
 	currentCPP := envValue(base, "CPPFLAGS")
 	currentLD := envValue(base, "LDFLAGS")
+	currentLibs := envValue(base, "LIBS")
 	currentLibrary := envValue(base, "LIBRARY_PATH")
 	currentRuntimeLibrary := runtimeLibraryEnvValue(base)
 	currentPkg := envValue(base, "PKG_CONFIG_PATH")
@@ -41,6 +46,7 @@ func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
 	pathEntries := splitPathList(currentPath)
 	cppFlags := splitShellWords(currentCPP)
 	ldFlags := splitShellWords(currentLD)
+	libsFlags := splitShellWords(currentLibs)
 	libraryEntries := splitPathList(currentLibrary)
 	runtimeLibraryEntries := splitPathList(currentRuntimeLibrary)
 	pkgEntries := splitPathList(currentPkg)
@@ -56,8 +62,23 @@ func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
 		pkgEntries = prependUnique(pkgEntries, filepath.Join(libDir, "pkgconfig"))
 		pkgEntries = prependUnique(pkgEntries, filepath.Join(prefix, "share", "pkgconfig"))
 	}
+	for i := len(plan.CPPFLAGS) - 1; i >= 0; i-- {
+		cppFlags = prependUnique(cppFlags, plan.CPPFLAGS[i])
+	}
+	for i := len(plan.LDFLAGS) - 1; i >= 0; i-- {
+		ldFlags = prependUnique(ldFlags, plan.LDFLAGS[i])
+	}
+	for i := len(plan.LIBS) - 1; i >= 0; i-- {
+		libsFlags = prependUnique(libsFlags, plan.LIBS[i])
+	}
 	for i := len(pkgConfigPaths) - 1; i >= 0; i-- {
 		pkgEntries = prependUnique(pkgEntries, pkgConfigPaths[i])
+	}
+	ldLibraryDirs := libraryDirsFromLDFLAGS(ldFlags)
+	for i := len(ldLibraryDirs) - 1; i >= 0; i-- {
+		libDir := ldLibraryDirs[i]
+		libraryEntries = prependUnique(libraryEntries, libDir)
+		runtimeLibraryEntries = prependUnique(runtimeLibraryEntries, libDir)
 	}
 
 	filtered := make([]string, 0, len(base)+6)
@@ -66,6 +87,7 @@ func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
 		case strings.HasPrefix(entry, "PATH="),
 			strings.HasPrefix(entry, "CPPFLAGS="),
 			strings.HasPrefix(entry, "LDFLAGS="),
+			strings.HasPrefix(entry, "LIBS="),
 			strings.HasPrefix(entry, "LIBRARY_PATH="),
 			isRuntimeLibraryEnv(entry),
 			strings.HasPrefix(entry, "PKG_CONFIG_PATH="),
@@ -86,6 +108,9 @@ func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
 	if len(ldFlags) > 0 {
 		filtered = append(filtered, "LDFLAGS="+strings.Join(ldFlags, " "))
 	}
+	if len(libsFlags) > 0 {
+		filtered = append(filtered, "LIBS="+strings.Join(libsFlags, " "))
+	}
 	if len(libraryEntries) > 0 {
 		filtered = append(filtered, "LIBRARY_PATH="+strings.Join(libraryEntries, string(os.PathListSeparator)))
 	}
@@ -102,6 +127,29 @@ func Apply(base []string, prefixes, pkgConfigPaths []string) []string {
 		filtered = append(filtered, PkgConfigEnv+"="+strings.Join(pkgConfigPaths, string(os.PathListSeparator)))
 	}
 	return filtered
+}
+
+func libraryDirsFromLDFLAGS(flags []string) []string {
+	if len(flags) == 0 {
+		return nil
+	}
+	dirs := []string{}
+	seen := map[string]struct{}{}
+	for _, flag := range flags {
+		if !strings.HasPrefix(flag, "-L") {
+			continue
+		}
+		dir := strings.TrimSpace(strings.TrimPrefix(flag, "-L"))
+		if dir == "" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	return dirs
 }
 
 func PrefixesFromEnv(env []string) []string {

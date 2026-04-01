@@ -24,9 +24,12 @@ bash "$ROOT_DIR/install.sh" | tee "$TMP_DIR/install.txt"
 
 test -x "$INSTALL_DIR/rs"
 grep -q "installed rs $TAG" "$TMP_DIR/install.txt"
+grep -q "verified sha256" "$TMP_DIR/install.txt"
 
 echo "==> running the installed binary"
 "$INSTALL_DIR/rs" --help | tee "$TMP_DIR/help.txt"
 grep -q "Usage:" "$TMP_DIR/help.txt"
+"$INSTALL_DIR/rs" version | tee "$TMP_DIR/version.txt"
+grep -q "rs $TAG" "$TMP_DIR/version.txt"
 
 echo "release install smoke E2E passed"

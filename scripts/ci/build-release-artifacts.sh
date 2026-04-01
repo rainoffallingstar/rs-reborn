@@ -56,6 +56,13 @@ fi
 
 cd "$ROOT_DIR"
 
+commit="unknown"
+if command -v git >/dev/null 2>&1; then
+  commit="$(git rev-parse HEAD 2>/dev/null || printf 'unknown')"
+fi
+build_date="${RS_BUILD_DATE:-$(date -u +%FT%TZ)}"
+version_ldflags="-X github.com/rainoffallingstar/rs-reborn/internal/cli.cliVersion=$TAG -X github.com/rainoffallingstar/rs-reborn/internal/cli.cliCommit=$commit -X github.com/rainoffallingstar/rs-reborn/internal/cli.cliBuildDate=$build_date"
+
 for target in "${platforms[@]}"; do
   read -r goos goarch archive <<<"$target"
 
@@ -68,7 +75,7 @@ for target in "${platforms[@]}"; do
 
   mkdir -p "$staging_dir"
   echo "==> building $artifact_base"
-  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$staging_dir/$binary_name" ./cmd/rs
+  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w ${version_ldflags}" -o "$staging_dir/$binary_name" ./cmd/rs
 
   case "$archive" in
     tar.gz)
