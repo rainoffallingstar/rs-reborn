@@ -310,6 +310,17 @@ For faster bootstrapping, `rs init` also supports `--toolchain-preset auto|enva|
 
 When no explicit `toolchain_prefixes` / `pkg_config_path` config or `RS_TOOLCHAIN_PREFIXES` / `RS_PKG_CONFIG_PATH` environment is present, native source-build paths and runtime package-install environments now also auto-detect a recommended existing rootless prefix and use it automatically. Explicit config still wins.
 
+If you want `rs` to first parse one script, then turn the detected package set into a rootless system-dependency plan, use:
+
+```bash
+rs toolchain plan analysis.R
+rs toolchain plan --preset enva --phase base analysis.R
+rs toolchain init --preset enva analysis.R
+rs toolchain init --preset enva --phase base analysis.R
+```
+
+`plan` reports the base build-tool packages plus any extra system-library packages inferred from the resolved dependency set. `init` executes that plan through the selected preset, so you can either bootstrap everything in one shot with `--phase full` or seed just the compiler/toolchain floor first with `--phase base`.
+
 If no suitable prefix exists yet and you want `rs` to create one for you, use a command that accepts `--bootstrap-toolchain`. `auto` bootstrap now only attempts first-class managers such as `enva`, plus already-detected Homebrew and Spack layouts. Compatibility conda-family presets remain available when selected explicitly:
 
 ```bash

@@ -2910,8 +2910,10 @@ func TestDoctorToolchainOnlyFallsBackToEnvironmentVariables(t *testing.T) {
 
 func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T) {
 	oldBootstrap := bootstrapToolchainPreset
+	oldBootstrapPhase := bootstrapToolchainPresetForPhase
 	t.Cleanup(func() {
 		bootstrapToolchainPreset = oldBootstrap
+		bootstrapToolchainPresetForPhase = oldBootstrapPhase
 	})
 
 	dir := t.TempDir()
@@ -2963,6 +2965,15 @@ func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T
 			},
 		}, nil
 	}
+	bootstrapToolchainPresetForPhase = func(categories []string, phase string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+		if len(categories) != 0 {
+			t.Fatalf("categories = %v, want none for toolchain-only bootstrap", categories)
+		}
+		if phase != "base" {
+			t.Fatalf("phase = %q, want base for toolchain-only bootstrap", phase)
+		}
+		return bootstrapToolchainPreset(stdout, stderr)
+	}
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -3004,6 +3015,165 @@ func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(expectedPrefix, "bin", pkgConfigName)); err != nil {
 		t.Fatalf("bootstrapped pkg-config missing: %v", err)
+	}
+}
+
+func TestMaybeBootstrapResolvedEnvironmentUsesDependencyAwareCategories(t *testing.T) {
+	oldBootstrap := bootstrapToolchainPresetForPhase
+	t.Cleanup(func() {
+		bootstrapToolchainPresetForPhase = oldBootstrap
+	})
+
+	called := false
+	bootstrapToolchainPresetForPhase = func(categories []string, phase string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+		called = true
+		if phase != "base" {
+			t.Fatalf("phase = %q, want base", phase)
+		}
+		if !slices.Contains(categories, "icu") || !slices.Contains(categories, "xml") {
+			t.Fatalf("categories = %v, want icu and xml", categories)
+		}
+		return &toolchainenv.Candidate{
+			Preset:            "enva",
+			ToolchainPrefixes: []string{"/tmp/rs-sysdeps"},
+			PkgConfigPath:     []string{"/tmp/rs-sysdeps/lib/pkgconfig", "/tmp/rs-sysdeps/share/pkgconfig"},
+		}, nil
+	}
+
+	env := ResolvedEnvironment{
+		CRANDeps:  []string{"stringi", "xml2"},
+		CacheRoot: t.TempDir(),
+		Stdout:    io.Discard,
+		Stderr:    io.Discard,
+	}
+	if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
+		t.Fatalf("maybeBootstrapResolvedEnvironment() error = %v", err)
+	}
+	if !called {
+		t.Fatal("maybeBootstrapResolvedEnvironment() did not call dependency-aware bootstrap")
+	}
+	if !env.BootstrappedToolchain || env.BootstrappedToolchainPhase != "base" {
+		t.Fatalf("env bootstrap state = %#v", env)
+	}
+	if !reflect.DeepEqual(env.ToolchainPrefixes, []string{"/tmp/rs-sysdeps"}) {
+		t.Fatalf("env.ToolchainPrefixes = %v", env.ToolchainPrefixes)
+	}
+	statePath := toolchainBootstrapStatePath(env.CacheRoot)
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", statePath, err)
+	}
+	var state toolchainBootstrapState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("json.Unmarshal(state) error = %v", err)
+	}
+	if state.Phase != "base" || state.Preset != "enva" {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestMaybeBootstrapPlanToolchainUsesDependencyAwareCategories(t *testing.T) {
+	oldBootstrap := bootstrapToolchainPresetForPhase
+	t.Cleanup(func() {
+		bootstrapToolchainPresetForPhase = oldBootstrap
+	})
+
+	called := false
+	bootstrapToolchainPresetForPhase = func(categories []string, phase string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+		called = true
+		if phase != "base" {
+			t.Fatalf("phase = %q, want base", phase)
+		}
+		if !slices.Contains(categories, "encoding") {
+			t.Fatalf("categories = %v, want encoding", categories)
+		}
+		return &toolchainenv.Candidate{
+			Preset:            "enva",
+			ToolchainPrefixes: []string{"/tmp/rs-sysdeps"},
+			PkgConfigPath:     []string{"/tmp/rs-sysdeps/lib/pkgconfig"},
+		}, nil
+	}
+
+	plan := dependencyPlan{
+		CRANDeps: []string{"haven"},
+	}
+	if err := maybeBootstrapPlanToolchain(&plan, io.Discard, io.Discard); err != nil {
+		t.Fatalf("maybeBootstrapPlanToolchain() error = %v", err)
+	}
+	if !called {
+		t.Fatal("maybeBootstrapPlanToolchain() did not call dependency-aware bootstrap")
+	}
+	if !reflect.DeepEqual(plan.ToolchainPrefixes, []string{"/tmp/rs-sysdeps"}) {
+		t.Fatalf("plan.ToolchainPrefixes = %v", plan.ToolchainPrefixes)
+	}
+}
+
+func TestEnsureInstalledNativeRetriesWithFullBootstrapAfterBaseFailure(t *testing.T) {
+	oldNative := nativeInstall
+	oldBootstrapPhase := bootstrapToolchainPresetForPhase
+	t.Cleanup(func() {
+		nativeInstall = oldNative
+		bootstrapToolchainPresetForPhase = oldBootstrapPhase
+	})
+
+	bootstrapCalls := []string{}
+	bootstrapToolchainPresetForPhase = func(categories []string, phase string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+		bootstrapCalls = append(bootstrapCalls, phase+":"+strings.Join(categories, ","))
+		return &toolchainenv.Candidate{
+			Preset:            "enva",
+			ToolchainPrefixes: []string{"/tmp/rs-sysdeps"},
+			PkgConfigPath:     []string{"/tmp/rs-sysdeps/lib/pkgconfig"},
+		}, nil
+	}
+
+	calls := 0
+	nativeInstall = func(req installer.Request) error {
+		calls++
+		if calls == 1 {
+			return errors.New("configure: error: missing icu")
+		}
+		if got := strings.Join(req.CRANDeps, ","); got != "stringi" {
+			t.Fatalf("req.CRANDeps = %v", req.CRANDeps)
+		}
+		return nil
+	}
+
+	env := ResolvedEnvironment{
+		ScriptPath:  filepath.Join(t.TempDir(), "analysis.R"),
+		CacheRoot:   t.TempDir(),
+		LibraryPath: t.TempDir(),
+		Interpreter: "fake-Rscript",
+		Runtime: RuntimeMetadata{
+			Interpreter: "fake-Rscript",
+			RVersion:    "4.4.1",
+		},
+		CRANDeps: []string{"stringi"},
+		Stdout:   &bytes.Buffer{},
+		Stderr:   &bytes.Buffer{},
+	}
+	if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
+		t.Fatalf("maybeBootstrapResolvedEnvironment() error = %v", err)
+	}
+	if err := ensureInstalledNative(env); err != nil {
+		t.Fatalf("ensureInstalledNative() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("nativeInstall calls = %d, want 2", calls)
+	}
+	if !reflect.DeepEqual(bootstrapCalls, []string{"base:icu", "full:icu"}) {
+		t.Fatalf("bootstrapCalls = %v", bootstrapCalls)
+	}
+	statePath := toolchainBootstrapStatePath(env.CacheRoot)
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", statePath, err)
+	}
+	var state toolchainBootstrapState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("json.Unmarshal(state) error = %v", err)
+	}
+	if state.Phase != "full" {
+		t.Fatalf("state.Phase = %q, want full (%#v)", state.Phase, state)
 	}
 }
 

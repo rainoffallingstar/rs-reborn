@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -304,6 +305,25 @@ func TestBootstrapCandidateExplicitMicromambaStillWorks(t *testing.T) {
 	}
 	if !strings.Contains(candidate.SuggestedSetupCommand, " cmake") || !strings.Contains(candidate.SuggestedSetupCommand, " libiconv") {
 		t.Fatalf("candidate.SuggestedSetupCommand = %q, want cmake and libiconv included", candidate.SuggestedSetupCommand)
+	}
+}
+
+func TestBuildPackagePlanAddsSystemPackagesForEnva(t *testing.T) {
+	plan, err := BuildPackagePlan("enva", []string{"icu", "xml", "encoding", "icu"})
+	if err != nil {
+		t.Fatalf("BuildPackagePlan() error = %v", err)
+	}
+	if !reflect.DeepEqual(plan.Groups, []PackageGroup{
+		{Category: "icu", Packages: []string{"icu"}},
+		{Category: "xml", Packages: []string{"libxml2"}},
+		{Category: "encoding", Packages: []string{"libiconv"}},
+	}) {
+		t.Fatalf("plan.Groups = %#v", plan.Groups)
+	}
+	for _, want := range []string{"compilers", "cmake", "icu", "libxml2", "libiconv"} {
+		if !slices.Contains(plan.Packages, want) {
+			t.Fatalf("plan.Packages = %v, want %s", plan.Packages, want)
+		}
 	}
 }
 

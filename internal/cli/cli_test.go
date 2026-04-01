@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/rainoffallingstar/rs-reborn/internal/project"
 	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
 	"github.com/rainoffallingstar/rs-reborn/internal/runner"
+	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
 
 func TestInitCommandFromScriptWritesRootPackages(t *testing.T) {
@@ -704,7 +706,7 @@ func TestToolchainDetectCommandJSONOutput(t *testing.T) {
 	if report.Candidates[0].SuggestedInitCommand != "rs init --toolchain-preset micromamba" {
 		t.Fatalf("report.Candidates[0].SuggestedInitCommand = %q", report.Candidates[0].SuggestedInitCommand)
 	}
-	if !strings.Contains(report.Candidates[0].SuggestedSetupCommand, `micromamba create -y -p "`) {
+	if !strings.Contains(report.Candidates[0].SuggestedSetupCommand, `"micromamba" create -y -p "`) {
 		t.Fatalf("report.Candidates[0].SuggestedSetupCommand = %q", report.Candidates[0].SuggestedSetupCommand)
 	}
 	if !strings.Contains(report.Candidates[0].SuggestedSetupNote, "dedicated build-tools environment") {
@@ -900,7 +902,7 @@ func TestToolchainBootstrapCommandJSONOutput(t *testing.T) {
 	if report.TemplateCheckCommand != "rs toolchain template micromamba --check" {
 		t.Fatalf("report.TemplateCheckCommand = %q", report.TemplateCheckCommand)
 	}
-	if !strings.Contains(report.Candidate.SuggestedSetupCommand, `micromamba create -y -p "`) {
+	if !strings.Contains(report.Candidate.SuggestedSetupCommand, `"micromamba" create -y -p "`) {
 		t.Fatalf("report.Candidate.SuggestedSetupCommand = %q", report.Candidate.SuggestedSetupCommand)
 	}
 }
@@ -920,6 +922,140 @@ func TestToolchainBootstrapCommandPrintsEnvaPlan(t *testing.T) {
 	}
 	if !strings.Contains(output, "[next] initialize project defaults: rs init --toolchain-preset enva") {
 		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
+	}
+}
+
+func TestToolchainPlanCommandJSONOutputIncludesResolvedSystemPackages(t *testing.T) {
+	oldHome := cliUserHomeDir
+	oldPlan := cliPlanToolchain
+	oldDescribe := cliDescribeToolchainPreset
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+		cliPlanToolchain = oldPlan
+		cliDescribeToolchainPreset = oldDescribe
+	})
+	cliUserHomeDir = func() (string, error) {
+		return "/demo-home", nil
+	}
+	cliDescribeToolchainPreset = func(name, home string) (*toolchainenv.Candidate, error) {
+		return &toolchainenv.Candidate{
+			Preset:               "enva",
+			ToolchainPrefixes:    []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps")},
+			PkgConfigPath:        []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps", "lib", "pkgconfig")},
+			SuggestedInitCommand: "rs init --toolchain-preset enva",
+		}, nil
+	}
+	cliPlanToolchain = func(opts runner.ToolchainPlanOptions) (runner.ToolchainPlanReport, error) {
+		return runner.ToolchainPlanReport{
+			Script:       opts.ScriptPath,
+			DetectedDeps: []string{"stringi", "xml2"},
+			CRANDeps:     []string{"stringi", "xml2"},
+			SystemHintDetails: []runner.SystemHintDetail{
+				{Category: "icu"},
+				{Category: "xml"},
+			},
+		}, nil
+	}
+
+	scriptPath := filepath.Join(t.TempDir(), "analysis.R")
+	if err := os.WriteFile(scriptPath, []byte("stringi::stri_detect_fixed('a', 'a')\nxml2::read_xml('<x/>')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(scriptPath) error = %v", err)
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainPlanCommand([]string{"--preset", "enva", "--json", scriptPath})
+	})
+	if err != nil {
+		t.Fatalf("toolchainPlanCommand() error = %v", err)
+	}
+	var report toolchainPlanReport
+	if err := json.Unmarshal([]byte(output), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, output)
+	}
+	if report.Candidate.Preset != "enva" {
+		t.Fatalf("report.Candidate.Preset = %q", report.Candidate.Preset)
+	}
+	if !slices.Contains(report.PackagePlan.BasePackages, "compilers") {
+		t.Fatalf("report.PackagePlan.BasePackages = %v", report.PackagePlan.BasePackages)
+	}
+	for _, want := range []string{"icu", "libxml2"} {
+		if !slices.Contains(report.PlannedPackages, want) {
+			t.Fatalf("report.PlannedPackages = %v, want %s", report.PlannedPackages, want)
+		}
+	}
+}
+
+func TestToolchainInitCommandBasePhaseBootstrapsOnlyBasePackages(t *testing.T) {
+	oldHome := cliUserHomeDir
+	oldPlan := cliPlanToolchain
+	oldDescribe := cliDescribeToolchainPreset
+	oldBootstrap := cliBootstrapToolchain
+	t.Cleanup(func() {
+		cliUserHomeDir = oldHome
+		cliPlanToolchain = oldPlan
+		cliDescribeToolchainPreset = oldDescribe
+		cliBootstrapToolchain = oldBootstrap
+	})
+	cliUserHomeDir = func() (string, error) {
+		return "/demo-home", nil
+	}
+	cliDescribeToolchainPreset = func(name, home string) (*toolchainenv.Candidate, error) {
+		return &toolchainenv.Candidate{
+			Preset:               "enva",
+			ToolchainPrefixes:    []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps")},
+			PkgConfigPath:        []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps", "lib", "pkgconfig")},
+			SuggestedInitCommand: "rs init --toolchain-preset enva",
+		}, nil
+	}
+	cliPlanToolchain = func(opts runner.ToolchainPlanOptions) (runner.ToolchainPlanReport, error) {
+		return runner.ToolchainPlanReport{
+			Script:       opts.ScriptPath,
+			DetectedDeps: []string{"stringi", "xml2"},
+			CRANDeps:     []string{"stringi", "xml2"},
+			SystemHintDetails: []runner.SystemHintDetail{
+				{Category: "icu"},
+				{Category: "xml"},
+			},
+		}, nil
+	}
+	called := false
+	cliBootstrapToolchain = func(name, home string, env, packages []string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+		called = true
+		if name != "enva" {
+			t.Fatalf("name = %q", name)
+		}
+		if slices.Contains(packages, "icu") || slices.Contains(packages, "libxml2") {
+			t.Fatalf("packages = %v, want base-only package set", packages)
+		}
+		for _, want := range []string{"compilers", "cmake", "libiconv"} {
+			if !slices.Contains(packages, want) {
+				t.Fatalf("packages = %v, want %s", packages, want)
+			}
+		}
+		return &toolchainenv.Candidate{
+			Preset:               "enva",
+			ToolchainPrefixes:    []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps")},
+			PkgConfigPath:        []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps", "lib", "pkgconfig")},
+			SuggestedInitCommand: "rs init --toolchain-preset enva",
+		}, nil
+	}
+
+	scriptPath := filepath.Join(t.TempDir(), "analysis.R")
+	if err := os.WriteFile(scriptPath, []byte("stringi::stri_detect_fixed('a', 'a')\nxml2::read_xml('<x/>')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(scriptPath) error = %v", err)
+	}
+
+	output, err := runWithCapturedStdout(t, func() error {
+		return toolchainInitCommand([]string{"--preset", "enva", "--phase", "base", scriptPath})
+	})
+	if err != nil {
+		t.Fatalf("toolchainInitCommand() error = %v", err)
+	}
+	if !called {
+		t.Fatal("toolchainInitCommand() did not bootstrap toolchain")
+	}
+	if !strings.Contains(output, "[init] phase: base") {
+		t.Fatalf("toolchainInitCommand() output = %q", output)
 	}
 }
 

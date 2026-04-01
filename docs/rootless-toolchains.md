@@ -100,6 +100,16 @@ It also prints a preset-specific setup hint so you can go from "which layout sho
 
 If you want that collapsed into one short action plan, use `rs toolchain bootstrap <preset|auto>`. It prints the setup command, the matching template/init follow-up, and the `rs doctor --toolchain-only` validation step together.
 
+If you want `rs` to inspect one script first and fold the inferred system-library packages into the same rootless environment setup, use:
+
+```bash
+rs toolchain plan analysis.R
+rs toolchain init analysis.R
+rs toolchain init --phase base analysis.R
+```
+
+`rs toolchain plan` resolves the script dependency set first, then maps the resulting system-hint categories onto a preset-specific package list. `rs toolchain init` executes that plan. `--phase base` installs only the shared compiler/toolchain floor; `--phase full` adds the inferred system-library packages in the same initialization run.
+
 ## Quick Rootless Recipes
 
 These are starting points, not guaranteed universal one-liners. The exact libraries you need still depend on which R packages you install.

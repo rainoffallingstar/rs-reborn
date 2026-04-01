@@ -201,9 +201,16 @@ func MergeWithDetected(prefixes, pkgConfig []string, home string) ([]string, []s
 }
 
 func Bootstrap(name, home string, env []string, stdout, stderr io.Writer) (*Candidate, error) {
+	return BootstrapWithPackages(name, home, env, nil, stdout, stderr)
+}
+
+func BootstrapWithPackages(name, home string, env, packages []string, stdout, stderr io.Writer) (*Candidate, error) {
 	candidate, err := BootstrapCandidate(name, home, env)
 	if err != nil {
 		return nil, err
+	}
+	if len(packages) > 0 {
+		candidate.SuggestedSetupCommand = SetupCommandForCandidate(*candidate, packages)
 	}
 	if stderr != nil {
 		fmt.Fprintf(stderr, "[rs] bootstrapping rootless toolchain preset: %s\n", candidate.Preset)
@@ -219,12 +226,16 @@ func BootstrapCandidate(name, home string, env []string) (*Candidate, error) {
 	if len(env) == 0 {
 		env = os.Environ()
 	}
+	return bootstrapCandidateWithPackages(name, home, env, nil)
+}
+
+func bootstrapCandidateWithPackages(name, home string, env, packages []string) (*Candidate, error) {
 	candidates, err := bootstrapCandidates(name, home)
 	if err != nil {
 		return nil, err
 	}
 	for _, candidate := range candidates {
-		command, ok := bootstrapCommandForCandidate(candidate, env)
+		command, ok := bootstrapCommandForCandidatePackages(candidate, env, packages)
 		if !ok {
 			continue
 		}
@@ -446,6 +457,10 @@ func bootstrapCandidates(name, home string) ([]Candidate, error) {
 }
 
 func bootstrapCommandForCandidate(candidate Candidate, env []string) (string, bool) {
+	return bootstrapCommandForCandidatePackages(candidate, env, nil)
+}
+
+func bootstrapCommandForCandidatePackages(candidate Candidate, env, packages []string) (string, bool) {
 	prefix := ""
 	if len(candidate.ToolchainPrefixes) > 0 {
 		prefix = candidate.ToolchainPrefixes[0]
@@ -456,33 +471,33 @@ func bootstrapCommandForCandidate(candidate Candidate, env []string) (string, bo
 		if err != nil {
 			return "", false
 		}
-		return envaBootstrapCommand(path), true
+		return envaBootstrapCommandWithPackages(path, packages), true
 	case "micromamba":
 		path, err := FindInPath("micromamba", env)
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, path, prefix), true
+		return condaBootstrapCommand(path, prefix, packages), true
 	case "mamba":
 		path, err := FindInPath("mamba", env)
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, path, prefix), true
+		return condaBootstrapCommand(path, prefix, packages), true
 	case "conda":
 		path, err := FindInPath("conda", env)
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, path, prefix), true
+		return condaBootstrapCommand(path, prefix, packages), true
 	case "homebrew":
 		brewPath := filepath.Join(prefix, "bin", "brew")
 		if info, err := detectStat(brewPath); err == nil && !info.IsDir() {
-			return fmt.Sprintf(`"%s" install pkg-config gcc cmake libiconv`, brewPath), true
+			return brewBootstrapCommand(brewPath, packages), true
 		}
 		if len(candidate.ExistingPrefixes) > 0 {
 			if path, err := FindInPath("brew", env); err == nil {
-				return fmt.Sprintf(`"%s" install pkg-config gcc cmake libiconv`, path), true
+				return brewBootstrapCommand(path, packages), true
 			}
 		}
 		return "", false
@@ -491,10 +506,14 @@ func bootstrapCommandForCandidate(candidate Candidate, env []string) (string, bo
 		if err != nil {
 			return "", false
 		}
-		return fmt.Sprintf(`"%s" view symlink "%s" pkgconf gcc cmake libiconv`, path, prefix), true
+		return spackBootstrapCommand(path, prefix, packages), true
 	default:
 		return "", false
 	}
+}
+
+func SetupCommandForCandidate(candidate Candidate, packages []string) string {
+	return suggestedSetupCommandWithPackages(candidate.Preset, candidate.ToolchainPrefixes, packages)
 }
 
 func runBootstrapCommand(command string, env []string, stdout, stderr io.Writer) error {
@@ -599,38 +618,42 @@ func presetPriority(preset string) int {
 }
 
 func suggestedSetupCommand(preset string, prefixes []string) string {
+	return suggestedSetupCommandWithPackages(preset, prefixes, nil)
+}
+
+func suggestedSetupCommandWithPackages(preset string, prefixes, packages []string) string {
 	prefix := ""
 	if len(prefixes) > 0 {
 		prefix = prefixes[0]
 	}
 	switch preset {
 	case "enva":
-		return envaBootstrapCommand("enva")
+		return envaBootstrapCommandWithPackages("enva", packages)
 	case "micromamba":
 		if prefix == "" {
-			return `micromamba create -y -p "$HOME/micromamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`
+			return condaBootstrapCommand("micromamba", "$HOME/micromamba/envs/rs-sysdeps", packages)
 		}
-		return fmt.Sprintf(`micromamba create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, prefix)
+		return condaBootstrapCommand("micromamba", prefix, packages)
 	case "mamba":
 		if prefix == "" {
-			return `mamba create -y -p "$HOME/.local/share/mamba/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`
+			return condaBootstrapCommand("mamba", "$HOME/.local/share/mamba/envs/rs-sysdeps", packages)
 		}
-		return fmt.Sprintf(`mamba create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, prefix)
+		return condaBootstrapCommand("mamba", prefix, packages)
 	case "conda":
 		if prefix == "" {
-			return `conda create -y -p "$HOME/.conda/envs/rs-sysdeps" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`
+			return condaBootstrapCommand("conda", "$HOME/.conda/envs/rs-sysdeps", packages)
 		}
-		return fmt.Sprintf(`conda create -y -p "%s" -c conda-forge compilers binutils sysroot_linux-64=2.17 pkg-config make cmake libiconv`, prefix)
+		return condaBootstrapCommand("conda", prefix, packages)
 	case "homebrew":
 		if prefix == "" {
-			return `"$HOME/homebrew/bin/brew" install pkg-config gcc cmake libiconv`
+			return brewBootstrapCommand(`$HOME/homebrew/bin/brew`, packages)
 		}
-		return fmt.Sprintf(`"%s" install pkg-config gcc cmake libiconv`, filepath.Join(prefix, "bin", "brew"))
+		return brewBootstrapCommand(filepath.Join(prefix, "bin", "brew"), packages)
 	case "spack":
 		if prefix == "" {
-			return `spack view symlink "$HOME/spack/views/rs-sysdeps" pkgconf gcc cmake libiconv`
+			return spackBootstrapCommand("spack", "$HOME/spack/views/rs-sysdeps", packages)
 		}
-		return fmt.Sprintf(`spack view symlink "%s" pkgconf gcc cmake libiconv`, prefix)
+		return spackBootstrapCommand("spack", prefix, packages)
 	default:
 		return ""
 	}
@@ -678,20 +701,46 @@ func suggestedSetupNote(preset string, prefixes []string) string {
 }
 
 func envaBootstrapCommand(path string) string {
+	return envaBootstrapCommandWithPackages(path, nil)
+}
+
+func envaBootstrapCommandWithPackages(path string, packages []string) string {
 	if strings.TrimSpace(path) == "" {
 		path = "enva"
+	}
+	if len(packages) == 0 {
+		packages, _ = basePackagesForPreset("enva")
+	}
+	lines := make([]string, 0, len(packages))
+	for _, pkg := range packages {
+		lines = append(lines, "  - "+pkg)
 	}
 	return fmt.Sprintf(`tmp="$(mktemp "${TMPDIR:-/tmp}/rs-enva-XXXXXX.yaml")" && cat >"$tmp" <<'EOF'
 channels:
   - conda-forge
 dependencies:
-  - compilers
-  - binutils
-  - sysroot_linux-64=2.17
-  - pkg-config
-  - make
-  - cmake
-  - libiconv
+%s
 EOF
-"%s" create --yaml "$tmp" --name rs-sysdeps --force --clean-cache`, path)
+"%s" create --yaml "$tmp" --name rs-sysdeps --force --clean-cache`, strings.Join(lines, "\n"), path)
+}
+
+func condaBootstrapCommand(executable, prefix string, packages []string) string {
+	if len(packages) == 0 {
+		packages, _ = basePackagesForPreset("enva")
+	}
+	return fmt.Sprintf(`"%s" create -y -p "%s" -c conda-forge %s`, executable, prefix, strings.Join(packages, " "))
+}
+
+func brewBootstrapCommand(executable string, packages []string) string {
+	if len(packages) == 0 {
+		packages, _ = basePackagesForPreset("homebrew")
+	}
+	return fmt.Sprintf(`"%s" install %s`, executable, strings.Join(packages, " "))
+}
+
+func spackBootstrapCommand(executable, prefix string, packages []string) string {
+	if len(packages) == 0 {
+		packages, _ = basePackagesForPreset("spack")
+	}
+	return fmt.Sprintf(`"%s" view symlink "%s" %s`, executable, prefix, strings.Join(packages, " "))
 }

@@ -44,6 +44,21 @@ type toolchainBootstrapReport struct {
 	TemplateCheckCommand string             `json:"template_check_command"`
 }
 
+type toolchainPackageGroup = toolchainenv.PackageGroup
+
+type toolchainPackagePlan = toolchainenv.PackagePlan
+
+type toolchainPlanReport struct {
+	Candidate       toolchainDetection         `json:"candidate"`
+	DependencyPlan  runner.ToolchainPlanReport `json:"dependency_plan"`
+	Phase           string                     `json:"phase"`
+	PackagePlan     toolchainPackagePlan       `json:"package_plan"`
+	PlannedPackages []string                   `json:"planned_packages"`
+	SetupCommand    string                     `json:"setup_command"`
+	InitCommand     string                     `json:"init_command"`
+	DoctorCommand   string                     `json:"doctor_command"`
+}
+
 var (
 	cliValidateVersionSelector = rmanager.ValidateVersionSelector
 	cliResolveVersionOrPath    = rmanager.ResolveVersionOrPath
@@ -51,8 +66,15 @@ var (
 	cliCurrentManagedRscript   = rmanager.CurrentManagedRscript
 	cliInstallRWithOptions     = rmanager.InstallWithOptions
 	cliDoctor                  = runner.Doctor
+	cliPlanToolchain           = runner.PlanToolchain
 	cliUserHomeDir             = os.UserHomeDir
 	cliStat                    = os.Stat
+	cliDescribeToolchainPreset = toolchainenv.DescribePreset
+	cliRecommendedToolchain    = toolchainenv.RecommendedCandidate
+	cliBootstrapToolchain      = toolchainenv.BootstrapWithPackages
+	cliBootstrapCandidate      = toolchainenv.BootstrapCandidate
+	cliBuildToolchainPackages  = toolchainenv.BuildPackagePlan
+	cliToolchainSetupCommand   = toolchainenv.SetupCommandForCandidate
 )
 
 func (s *stringList) String() string {
@@ -171,7 +193,7 @@ func runCommand(args []string) error {
 
 func toolchainCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: rs toolchain <template|detect|bootstrap> ...")
+		return errors.New("usage: rs toolchain <template|detect|bootstrap|plan|init> ...")
 	}
 
 	switch args[0] {
@@ -181,6 +203,10 @@ func toolchainCommand(args []string) error {
 		return toolchainDetectCommand(args[1:])
 	case "bootstrap":
 		return toolchainBootstrapCommand(args[1:])
+	case "plan":
+		return toolchainPlanCommand(args[1:])
+	case "init":
+		return toolchainInitCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown toolchain subcommand %q\n\n%s", args[0], usageText())
 	}
@@ -370,6 +396,177 @@ func toolchainBootstrapCommand(args []string) error {
 	fmt.Fprintf(os.Stdout, "[next] initialize project defaults: %s\n", report.InitCommand)
 	fmt.Fprintf(os.Stdout, "[next] validate toolchain configuration: %s\n", report.DoctorCommand)
 	return nil
+}
+
+func toolchainPlanCommand(args []string) error {
+	fs := flag.NewFlagSet("toolchain plan", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	jsonOutput := fs.Bool("json", false, "print the toolchain plan as JSON")
+	preset := fs.String("preset", "auto", "toolchain preset to plan for: auto, enva, micromamba, mamba, conda, homebrew, or spack")
+	phase := fs.String("phase", "full", "package phase to plan: base or full")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: rs toolchain plan [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] [--json] path/to/script.R")
+	}
+
+	report, err := buildToolchainPlanReport(fs.Arg(0), *preset, *phase)
+	if err != nil {
+		return err
+	}
+
+	if *jsonOutput {
+		data, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal toolchain plan report: %w", err)
+		}
+		fmt.Fprintln(os.Stdout, string(data))
+		return nil
+	}
+
+	fmt.Fprintf(os.Stdout, "[plan] script: %s\n", report.DependencyPlan.Script)
+	if report.DependencyPlan.ProjectConfig != "" {
+		fmt.Fprintf(os.Stdout, "[plan] project config: %s\n", report.DependencyPlan.ProjectConfig)
+	}
+	fmt.Fprintf(os.Stdout, "[plan] preset: %s\n", report.Candidate.Preset)
+	fmt.Fprintf(os.Stdout, "[plan] phase: %s\n", report.Phase)
+	fmt.Fprintf(os.Stdout, "[plan] detected packages: %s\n", renderListOrNone(report.DependencyPlan.DetectedDeps))
+	fmt.Fprintf(os.Stdout, "[plan] cran packages: %s\n", renderListOrNone(report.DependencyPlan.CRANDeps))
+	fmt.Fprintf(os.Stdout, "[plan] bioconductor packages: %s\n", renderListOrNone(report.DependencyPlan.BiocDeps))
+	fmt.Fprintf(os.Stdout, "[plan] base toolchain packages: %s\n", renderListOrNone(report.PackagePlan.BasePackages))
+	if len(report.PackagePlan.Groups) == 0 {
+		fmt.Fprintln(os.Stdout, "[plan] resolved system package groups: <none>")
+	} else {
+		for _, group := range report.PackagePlan.Groups {
+			fmt.Fprintf(os.Stdout, "[plan] system package group %s: %s\n", group.Category, strings.Join(group.Packages, ", "))
+		}
+	}
+	fmt.Fprintf(os.Stdout, "[plan] planned packages for phase %s: %s\n", report.Phase, renderListOrNone(report.PlannedPackages))
+	fmt.Fprintf(os.Stdout, "[next] prepare rootless toolchain env: %s\n", report.SetupCommand)
+	fmt.Fprintf(os.Stdout, "[next] initialize project defaults: %s\n", report.InitCommand)
+	fmt.Fprintf(os.Stdout, "[next] validate toolchain configuration: %s\n", report.DoctorCommand)
+	return nil
+}
+
+func toolchainInitCommand(args []string) error {
+	fs := flag.NewFlagSet("toolchain init", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+
+	preset := fs.String("preset", "auto", "toolchain preset to initialize: auto, enva, micromamba, mamba, conda, homebrew, or spack")
+	phase := fs.String("phase", "full", "package phase to initialize: base or full")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: rs toolchain init [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] path/to/script.R")
+	}
+
+	scriptPath, err := filepath.Abs(fs.Arg(0))
+	if err != nil {
+		return fmt.Errorf("resolve script path: %w", err)
+	}
+	report, err := buildToolchainPlanReport(scriptPath, *preset, *phase)
+	if err != nil {
+		return err
+	}
+	home, err := cliUserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory for toolchain init: %w", err)
+	}
+	candidate, err := cliBootstrapToolchain(report.Candidate.Preset, home, os.Environ(), report.PlannedPackages, os.Stdout, os.Stderr)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "[init] preset: %s\n", candidate.Preset)
+	fmt.Fprintf(os.Stdout, "[init] phase: %s\n", report.Phase)
+	fmt.Fprintf(os.Stdout, "[init] installed toolchain packages: %s\n", renderListOrNone(report.PlannedPackages))
+	fmt.Fprintf(os.Stdout, "[init] toolchain prefixes: %s\n", renderListOrNone(candidate.ToolchainPrefixes))
+	fmt.Fprintf(os.Stdout, "[init] pkg-config path: %s\n", renderListOrNone(candidate.PkgConfigPath))
+	fmt.Fprintf(os.Stdout, "[next] initialize project defaults: %s\n", candidate.SuggestedInitCommand)
+	fmt.Fprintf(os.Stdout, "[next] validate toolchain configuration: %s\n", report.DoctorCommand)
+	return nil
+}
+
+func buildToolchainPlanReport(scriptArg, preset, phase string) (toolchainPlanReport, error) {
+	scriptPath, err := filepath.Abs(scriptArg)
+	if err != nil {
+		return toolchainPlanReport{}, fmt.Errorf("resolve script path: %w", err)
+	}
+	home, err := cliUserHomeDir()
+	if err != nil {
+		return toolchainPlanReport{}, fmt.Errorf("resolve home directory for toolchain plan: %w", err)
+	}
+	candidate, err := resolveToolchainPlanningCandidate(home, preset)
+	if err != nil {
+		return toolchainPlanReport{}, err
+	}
+	dependencyPlan, err := cliPlanToolchain(runner.ToolchainPlanOptions{
+		ScriptPath: scriptPath,
+		Progress:   os.Stderr,
+	})
+	if err != nil {
+		return toolchainPlanReport{}, err
+	}
+	categories := make([]string, 0, len(dependencyPlan.SystemHintDetails))
+	for _, detail := range dependencyPlan.SystemHintDetails {
+		categories = append(categories, detail.Category)
+	}
+	packagePlan, err := cliBuildToolchainPackages(candidate.Preset, categories)
+	if err != nil {
+		return toolchainPlanReport{}, err
+	}
+	normalizedPhase, err := normalizeToolchainPhase(phase)
+	if err != nil {
+		return toolchainPlanReport{}, err
+	}
+	plannedPackages, err := packagePlan.PackagesForPhase(normalizedPhase)
+	if err != nil {
+		return toolchainPlanReport{}, err
+	}
+	return toolchainPlanReport{
+		Candidate:       *candidate,
+		DependencyPlan:  dependencyPlan,
+		Phase:           normalizedPhase,
+		PackagePlan:     packagePlan,
+		PlannedPackages: plannedPackages,
+		SetupCommand:    cliToolchainSetupCommand(*candidate, plannedPackages),
+		InitCommand:     candidate.SuggestedInitCommand,
+		DoctorCommand:   fmt.Sprintf("rs doctor --toolchain-only %s", scriptPath),
+	}, nil
+}
+
+func resolveToolchainPlanningCandidate(home, preset string) (*toolchainenv.Candidate, error) {
+	normalized := strings.TrimSpace(strings.ToLower(preset))
+	if normalized == "" || normalized == "auto" {
+		if candidate, err := cliBootstrapCandidate("auto", home, os.Environ()); err == nil {
+			return candidate, nil
+		}
+		if candidate, err := cliRecommendedToolchain(home); err == nil && candidate != nil {
+			return candidate, nil
+		}
+		return cliDescribeToolchainPreset("enva", home)
+	}
+	return cliDescribeToolchainPreset(normalized, home)
+}
+
+func normalizeToolchainPhase(value string) (string, error) {
+	switch normalized := strings.TrimSpace(strings.ToLower(value)); normalized {
+	case "", "full":
+		return "full", nil
+	case "base":
+		return "base", nil
+	default:
+		return "", fmt.Errorf("unsupported --phase %q; supported phases: base, full", value)
+	}
+}
+
+func renderListOrNone(values []string) string {
+	if len(values) == 0 {
+		return "<none>"
+	}
+	return strings.Join(values, ", ")
 }
 
 func initCommand(args []string) error {
@@ -1643,6 +1840,8 @@ Usage:
   rs toolchain template <preset|auto> [--format toml|env] [--check]
   rs toolchain detect [--json]
   rs toolchain bootstrap <preset|auto> [--json]
+  rs toolchain plan [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] [--json] path/to/script.R
+  rs toolchain init [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] path/to/script.R
   rs doctor --toolchain-only [path/to/script.R|path/to/project]
 
 Commands:
@@ -1661,7 +1860,7 @@ Commands:
   sync   alias for lock
   check  validate the current environment against the lock file
   doctor inspect local prerequisites, source configuration, and lockfile presence
-  toolchain print, discover, or bootstrap rootless toolchain templates without writing rs.toml
+  toolchain print, discover, plan, or bootstrap rootless toolchain environments without writing rs.toml
 
 Flags for "init":
   --repo <url>              default CRAN mirror to write into rs.toml
@@ -1690,6 +1889,15 @@ Flags for "toolchain detect":
 
 Flags for "toolchain bootstrap":
   --json                    print the bootstrap plan as JSON
+
+Flags for "toolchain plan":
+  --preset <id>             choose auto, enva, micromamba, mamba, conda, homebrew, or spack
+  --phase <kind>            choose base or full package planning
+  --json                    print the toolchain plan as JSON
+
+Flags for "toolchain init":
+  --preset <id>             choose auto, enva, micromamba, mamba, conda, homebrew, or spack
+  --phase <kind>            choose base or full package initialization
 
 Flags for "add":
   --bioc                    add packages to bioc_packages instead of packages

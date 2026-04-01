@@ -206,26 +206,29 @@ func (e ReportedError) Unwrap() error {
 }
 
 type ResolvedEnvironment struct {
-	ScriptPath        string
-	ScriptArgs        []string
-	Repo              string
-	CacheRoot         string
-	LibraryPath       string
-	BootstrapPath     string
-	LockfilePath      string
-	Interpreter       string
-	Runtime           RuntimeMetadata
-	DetectedDeps      []string
-	CRANDeps          []string
-	BiocDeps          []string
-	SourceDeps        map[string]project.SourceSpec
-	ToolchainPrefixes []string
-	PkgConfigPath     []string
-	ProjectConfig     project.Config
-	ScriptConfig      project.ResolvedScriptConfig
-	Verbose           bool
-	Stdout            io.Writer
-	Stderr            io.Writer
+	ScriptPath                      string
+	ScriptArgs                      []string
+	Repo                            string
+	CacheRoot                       string
+	LibraryPath                     string
+	BootstrapPath                   string
+	LockfilePath                    string
+	Interpreter                     string
+	Runtime                         RuntimeMetadata
+	DetectedDeps                    []string
+	CRANDeps                        []string
+	BiocDeps                        []string
+	SourceDeps                      map[string]project.SourceSpec
+	ToolchainPrefixes               []string
+	PkgConfigPath                   []string
+	ProjectConfig                   project.Config
+	ScriptConfig                    project.ResolvedScriptConfig
+	BootstrappedToolchain           bool
+	BootstrappedToolchainPhase      string
+	BootstrappedToolchainCategories []string
+	Verbose                         bool
+	Stdout                          io.Writer
+	Stderr                          io.Writer
 }
 
 type RuntimeMetadata struct {
@@ -236,6 +239,16 @@ type RuntimeMetadata struct {
 	OS              string
 	PackageType     string
 	InterpreterKind string
+}
+
+type toolchainBootstrapState struct {
+	Preset            string   `json:"preset"`
+	Phase             string   `json:"phase"`
+	Categories        []string `json:"categories"`
+	Packages          []string `json:"packages"`
+	ToolchainPrefixes []string `json:"toolchain_prefixes"`
+	PkgConfigPath     []string `json:"pkg_config_path"`
+	GeneratedAt       string   `json:"generated_at"`
 }
 
 type sourceMetadata struct {
@@ -280,6 +293,30 @@ var resolveCurrentManagedRscript = rmanager.CurrentManagedRscript
 var resolveSelectedRscript = resolveConfiguredInterpreterPath
 var bootstrapToolchainPreset = func(stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
 	return toolchainenv.Bootstrap("auto", "", os.Environ(), stdout, stderr)
+}
+var bootstrapToolchainPresetForCategories = func(categories []string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+	return bootstrapToolchainPresetForPhase(categories, "full", stdout, stderr)
+}
+var bootstrapToolchainPresetForPhase = func(categories []string, phase string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+	if len(categories) == 0 {
+		return bootstrapToolchainPreset(stdout, stderr)
+	}
+	candidate, err := toolchainenv.BootstrapCandidate("auto", "", os.Environ())
+	if err != nil {
+		return nil, err
+	}
+	plan, err := toolchainenv.BuildPackagePlan(candidate.Preset, categories)
+	if err != nil {
+		return nil, err
+	}
+	packages, err := plan.PackagesForPhase(phase)
+	if err != nil {
+		return nil, err
+	}
+	if stderr != nil {
+		fmt.Fprintf(stderr, "[rs] rootless bootstrap phase %s packages: %s\n", phase, summarizeBootstrapPackages(packages))
+	}
+	return toolchainenv.BootstrapWithPackages(candidate.Preset, "", os.Environ(), packages, stdout, stderr)
 }
 
 var ensureManagedRscript = func(selected string, stderr io.Writer) (string, error) {
@@ -815,6 +852,34 @@ type SystemHintDetail struct {
 	Message  string   `json:"message"`
 }
 
+type ToolchainPlanOptions struct {
+	ScriptPath    string
+	ExtraDeps     []string
+	ExtraBiocDeps []string
+	ExcludeDeps   []string
+	Repo          string
+	CacheDir      string
+	RscriptPath   string
+	Progress      io.Writer
+}
+
+type ToolchainPlanReport struct {
+	Script            string             `json:"script"`
+	ProjectConfig     string             `json:"project_config,omitempty"`
+	Repo              string             `json:"repo"`
+	CacheRoot         string             `json:"cache_root"`
+	Lockfile          string             `json:"lockfile"`
+	ManagedLibrary    string             `json:"managed_library"`
+	DetectedDeps      []string           `json:"detected_packages"`
+	CRANDeps          []string           `json:"cran_packages"`
+	BiocDeps          []string           `json:"bioc_packages"`
+	ExcludedDeps      []string           `json:"excluded_packages"`
+	CustomSources     []string           `json:"custom_sources"`
+	ToolchainPrefixes []string           `json:"toolchain_prefixes"`
+	PkgConfigPath     []string           `json:"pkg_config_path"`
+	SystemHintDetails []SystemHintDetail `json:"system_hint_details"`
+}
+
 type NextStepDetail struct {
 	Category string `json:"category"`
 	Kind     string `json:"kind"`
@@ -895,6 +960,46 @@ func Run(opts RunOptions) error {
 	}
 
 	return nil
+}
+
+func PlanToolchain(opts ToolchainPlanOptions) (ToolchainPlanReport, error) {
+	progress := opts.Progress
+	if progress == nil {
+		progress = io.Discard
+	}
+	plan, err := resolveDependencyPlanWithProgress(
+		opts.ScriptPath,
+		opts.ExtraDeps,
+		opts.ExtraBiocDeps,
+		opts.ExcludeDeps,
+		opts.Repo,
+		opts.CacheDir,
+		opts.RscriptPath,
+		progress,
+	)
+	if err != nil {
+		return ToolchainPlanReport{}, err
+	}
+	customSources := make([]string, 0, len(plan.SourceDeps))
+	for _, name := range sourceDepNames(plan.SourceDeps) {
+		customSources = append(customSources, name)
+	}
+	return ToolchainPlanReport{
+		Script:            plan.ScriptPath,
+		ProjectConfig:     plan.ProjectPath,
+		Repo:              plan.Repo,
+		CacheRoot:         plan.CacheRoot,
+		Lockfile:          plan.LockfilePath,
+		ManagedLibrary:    plan.LibraryPath,
+		DetectedDeps:      copyStrings(plan.DetectedDeps),
+		CRANDeps:          copyStrings(plan.CRANDeps),
+		BiocDeps:          copyStrings(plan.BiocDeps),
+		ExcludedDeps:      copyStrings(plan.ExcludedDeps),
+		CustomSources:     customSources,
+		ToolchainPrefixes: copyStrings(plan.ToolchainPrefixes),
+		PkgConfigPath:     copyStrings(plan.PkgConfigPath),
+		SystemHintDetails: copySystemHintDetails(collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps)),
+	}, nil
 }
 
 func Shell(opts ShellOptions) error {
@@ -3788,9 +3893,42 @@ func ensureInstalledNative(env ResolvedEnvironment) error {
 		return err
 	}
 	if err := nativeInstall(req); err != nil {
+		if upgraded, retryErr := maybeUpgradeBootstrappedToolchainAndRetry(&env, err); upgraded {
+			if retryErr == nil {
+				return nil
+			}
+			return wrapExternalInterpreterInstallError(retryErr, env.Runtime)
+		}
 		return wrapExternalInterpreterInstallError(err, env.Runtime)
 	}
 	return nil
+}
+
+func maybeUpgradeBootstrappedToolchainAndRetry(env *ResolvedEnvironment, installErr error) (bool, error) {
+	if env == nil || !env.BootstrappedToolchain {
+		return false, nil
+	}
+	if env.BootstrappedToolchainPhase != "base" || len(env.BootstrappedToolchainCategories) == 0 {
+		return false, nil
+	}
+	if env.Stderr != nil {
+		fmt.Fprintln(env.Stderr, "[rs] package install failed after base rootless bootstrap; retrying with full system dependency bootstrap")
+	}
+	candidate, err := bootstrapToolchainPresetForPhase(env.BootstrappedToolchainCategories, "full", env.Stdout, env.Stderr)
+	if err != nil {
+		return true, err
+	}
+	if candidate != nil {
+		env.ToolchainPrefixes = append([]string(nil), candidate.ToolchainPrefixes...)
+		env.PkgConfigPath = append([]string(nil), candidate.PkgConfigPath...)
+	}
+	env.BootstrappedToolchainPhase = "full"
+	recordToolchainBootstrapState(env.CacheRoot, candidate, "full", env.BootstrappedToolchainCategories, env.Stderr)
+	req, err := installerRequestFromEnvironment(*env, env.Stdout, env.Stderr)
+	if err != nil {
+		return true, err
+	}
+	return true, nativeInstall(req)
 }
 
 func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.Writer) (installer.Request, error) {
@@ -4338,13 +4476,20 @@ func maybeBootstrapResolvedEnvironment(env *ResolvedEnvironment) error {
 	if env == nil {
 		return nil
 	}
-	candidate, err := maybeBootstrapToolchain(env.ToolchainPrefixes, env.PkgConfigPath, env.Stdout, env.Stderr)
+	categories := systemHintCategories(collectSystemDependencyHintDetails(env.CRANDeps, env.BiocDeps, env.SourceDeps))
+	candidate, bootstrapped, err := maybeBootstrapToolchain(env.ToolchainPrefixes, env.PkgConfigPath, categories, "base", env.Stdout, env.Stderr)
 	if err != nil {
 		return err
 	}
 	if candidate != nil && len(env.ToolchainPrefixes) == 0 && len(env.PkgConfigPath) == 0 {
 		env.ToolchainPrefixes = append([]string(nil), candidate.ToolchainPrefixes...)
 		env.PkgConfigPath = append([]string(nil), candidate.PkgConfigPath...)
+		env.BootstrappedToolchain = bootstrapped
+		env.BootstrappedToolchainPhase = "base"
+		env.BootstrappedToolchainCategories = append([]string(nil), categories...)
+		if bootstrapped {
+			recordToolchainBootstrapState(env.CacheRoot, candidate, "base", categories, env.Stderr)
+		}
 	}
 	return nil
 }
@@ -4353,7 +4498,8 @@ func maybeBootstrapPlanToolchain(plan *dependencyPlan, stdout, stderr io.Writer)
 	if plan == nil {
 		return nil
 	}
-	candidate, err := maybeBootstrapToolchain(plan.ToolchainPrefixes, plan.PkgConfigPath, stdout, stderr)
+	categories := systemHintCategories(collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps))
+	candidate, _, err := maybeBootstrapToolchain(plan.ToolchainPrefixes, plan.PkgConfigPath, categories, "base", stdout, stderr)
 	if err != nil {
 		return err
 	}
@@ -4364,18 +4510,109 @@ func maybeBootstrapPlanToolchain(plan *dependencyPlan, stdout, stderr io.Writer)
 	return nil
 }
 
-func maybeBootstrapToolchain(prefixes, pkgConfig []string, stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
+func maybeBootstrapToolchain(prefixes, pkgConfig, categories []string, phase string, stdout, stderr io.Writer) (*toolchainenv.Candidate, bool, error) {
 	if len(toolchainenv.PrefixesFromEnv(os.Environ())) > 0 || len(toolchainenv.PkgConfigPathsFromEnv(os.Environ())) > 0 || len(prefixes) > 0 || len(pkgConfig) > 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 	recommended, err := toolchainenv.RecommendedCandidate("")
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if recommended != nil && recommended.Complete {
-		return recommended, nil
+		return recommended, false, nil
 	}
-	return bootstrapToolchainPreset(stdout, stderr)
+	candidate, err := bootstrapToolchainPresetForPhase(categories, phase, stdout, stderr)
+	return candidate, true, err
+}
+
+func systemHintCategories(details []SystemHintDetail) []string {
+	if len(details) == 0 {
+		return nil
+	}
+	categories := make([]string, 0, len(details))
+	seen := map[string]struct{}{}
+	for _, detail := range details {
+		category := strings.TrimSpace(detail.Category)
+		if category == "" {
+			continue
+		}
+		if _, ok := seen[category]; ok {
+			continue
+		}
+		seen[category] = struct{}{}
+		categories = append(categories, category)
+	}
+	return categories
+}
+
+func summarizeBootstrapPackages(packages []string) string {
+	if len(packages) == 0 {
+		return "<none>"
+	}
+	if len(packages) <= 8 {
+		return strings.Join(packages, ", ")
+	}
+	return fmt.Sprintf("%s ... (%d total)", strings.Join(packages[:8], ", "), len(packages))
+}
+
+func toolchainBootstrapStatePath(cacheRoot string) string {
+	cacheRoot = strings.TrimSpace(cacheRoot)
+	if cacheRoot == "" {
+		return ""
+	}
+	return filepath.Join(cacheRoot, "toolchain", "bootstrap-state.json")
+}
+
+func recordToolchainBootstrapState(cacheRoot string, candidate *toolchainenv.Candidate, phase string, categories []string, stderr io.Writer) {
+	statePath := toolchainBootstrapStatePath(cacheRoot)
+	if statePath == "" || candidate == nil {
+		return
+	}
+	plan, err := toolchainenv.BuildPackagePlan(candidate.Preset, categories)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "[rs] warning: could not build toolchain bootstrap state package plan: %v\n", err)
+		}
+		return
+	}
+	packages, err := plan.PackagesForPhase(phase)
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "[rs] warning: could not build toolchain bootstrap state package phase %s: %v\n", phase, err)
+		}
+		return
+	}
+	state := toolchainBootstrapState{
+		Preset:            candidate.Preset,
+		Phase:             phase,
+		Categories:        append([]string(nil), categories...),
+		Packages:          packages,
+		ToolchainPrefixes: append([]string(nil), candidate.ToolchainPrefixes...),
+		PkgConfigPath:     append([]string(nil), candidate.PkgConfigPath...),
+		GeneratedAt:       time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "[rs] warning: could not marshal toolchain bootstrap state: %v\n", err)
+		}
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "[rs] warning: could not create toolchain bootstrap state dir: %v\n", err)
+		}
+		return
+	}
+	if err := os.WriteFile(statePath, data, 0o644); err != nil {
+		if stderr != nil {
+			fmt.Fprintf(stderr, "[rs] warning: could not write toolchain bootstrap state: %v\n", err)
+		}
+		return
+	}
+	if stderr != nil {
+		fmt.Fprintf(stderr, "[rs] wrote toolchain bootstrap state: %s\n", statePath)
+	}
 }
 
 func installBackend() string {
