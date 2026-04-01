@@ -351,20 +351,16 @@ if (identical(tolower(Sys.getenv("RS_BOOTSTRAP_AUTORUN", "true")), "true")) {
 }`
 
 func writeBootstrap(cacheRoot string) (string, error) {
-	tmpDir := filepath.Join(cacheRoot, "tmp")
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+	bootstrapDir := filepath.Join(cacheRoot, "bootstrap")
+	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
 		return "", fmt.Errorf("create bootstrap dir: %w", err)
 	}
-
-	file, err := os.CreateTemp(tmpDir, "rs-profile-*.R")
-	if err != nil {
-		return "", fmt.Errorf("create bootstrap profile: %w", err)
+	path := filepath.Join(bootstrapDir, "rs-profile.R")
+	if data, err := os.ReadFile(path); err == nil && string(data) == bootstrapSource {
+		return path, nil
 	}
-	defer file.Close()
-
-	if _, err := file.WriteString(bootstrapSource); err != nil {
+	if err := os.WriteFile(path, []byte(bootstrapSource), 0o644); err != nil {
 		return "", fmt.Errorf("write bootstrap profile: %w", err)
 	}
-
-	return file.Name(), nil
+	return path, nil
 }

@@ -108,6 +108,10 @@ type nativeInstaller struct {
 	requirements      map[string][]constraintRequest
 	selectedVersions  map[string]string
 	buildToolsChecked bool
+	prefetchedMu      sync.RWMutex
+	prefetchedRepo    map[string]string
+	descriptionMu     sync.RWMutex
+	descriptionCache  map[string]description
 }
 
 func (i *nativeInstaller) stage(label string) {
@@ -267,9 +271,14 @@ func Install(req Request) error {
 	if err := inst.seedPlannedPackagesFromCache(); err != nil {
 		return err
 	}
+	if err := inst.prefetchPlannedPackages(); err != nil {
+		return err
+	}
 
 	if inst.canParallelInstallPurePackages() {
-		for _, layer := range installPlanLayers(inst.planned, inst.order) {
+		layers := installPlanLayers(inst.planned, inst.order)
+		for idx, layer := range layers {
+			progresscmd.Stage(inst.stderr, fmt.Sprintf("installing dependency layer %d/%d", idx+1, len(layers)))
 			pure := make([]string, 0, len(layer))
 			compiled := make([]string, 0, len(layer))
 			for _, name := range layer {
@@ -306,7 +315,8 @@ func Install(req Request) error {
 		return nil
 	}
 
-	for _, name := range inst.order {
+	for idx, name := range inst.order {
+		progresscmd.Stage(inst.stderr, fmt.Sprintf("installing package %d/%d", idx+1, len(inst.order)))
 		installed, err := inst.installPlannedPackage(name)
 		if err != nil {
 			return err
@@ -749,6 +759,157 @@ func (i *nativeInstaller) installPlannedPackage(name string) (bool, error) {
 	return true, nil
 }
 
+func (i *nativeInstaller) prefetchPlannedPackages() error {
+	if len(i.planned) == 0 {
+		return nil
+	}
+	type prefetchStats struct {
+		reusedCache int
+		downloaded  int
+		hydrated    int
+	}
+	stats := prefetchStats{}
+	records := make([]repoRecord, 0, len(i.planned))
+	seen := map[string]struct{}{}
+	for _, name := range i.order {
+		pkg, ok := i.planned[name]
+		if !ok || pkg.Repo == nil || i.isPlannedPackageInstalled(pkg) {
+			continue
+		}
+		rawURL := strings.TrimSpace(pkg.Repo.TarballURL)
+		if rawURL == "" {
+			continue
+		}
+		if _, ok := seen[rawURL]; ok {
+			continue
+		}
+		seen[rawURL] = struct{}{}
+		records = append(records, *pkg.Repo)
+	}
+	if len(records) == 0 {
+		return nil
+	}
+
+	progresscmd.Stage(i.stderr, fmt.Sprintf("prefetching %d package artifact(s)", len(records)))
+	if len(records) == 1 {
+		if _, ok := i.repoDownloadReadyPath(records[0]); ok {
+			stats.reusedCache++
+		}
+		if _, err := i.ensureRepoPackageDownloaded(records[0]); err != nil {
+			return err
+		}
+		if stats.reusedCache == 0 {
+			stats.downloaded++
+		}
+		for _, name := range i.order {
+			pkg, ok := i.planned[name]
+			needsHydrate := ok && pkg.Repo != nil && !pkg.Repo.DepsLoaded
+			if err := i.hydratePrefetchedRepoRecord(name); err != nil {
+				return fmt.Errorf("hydrate prefetched metadata for %s: %w", name, err)
+			}
+			if needsHydrate {
+				stats.hydrated++
+			}
+		}
+		progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache, stats.hydrated))
+		return nil
+	}
+
+	type prefetchResult struct {
+		name   string
+		reused bool
+		err    error
+	}
+
+	workers := len(records)
+	if workers > 4 {
+		workers = 4
+	}
+	jobs := make(chan repoRecord)
+	results := make(chan prefetchResult, len(records))
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for record := range jobs {
+				_, reused := i.repoDownloadReadyPath(record)
+				_, err := i.ensureRepoPackageDownloaded(record)
+				results <- prefetchResult{name: record.Name, reused: reused, err: err}
+			}
+		}()
+	}
+
+	for _, record := range records {
+		jobs <- record
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	for result := range results {
+		if result.err != nil {
+			return fmt.Errorf("prefetch %s: %w", result.name, result.err)
+		}
+		if result.reused {
+			stats.reusedCache++
+			continue
+		}
+		stats.downloaded++
+	}
+	for _, name := range i.order {
+		pkg, ok := i.planned[name]
+		needsHydrate := ok && pkg.Repo != nil && !pkg.Repo.DepsLoaded
+		if err := i.hydratePrefetchedRepoRecord(name); err != nil {
+			return fmt.Errorf("hydrate prefetched metadata for %s: %w", name, err)
+		}
+		if needsHydrate {
+			stats.hydrated++
+		}
+	}
+	progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache, stats.hydrated))
+	return nil
+}
+
+func formatPrefetchSummary(total, downloaded, reusedCache, hydrated int) string {
+	parts := []string{fmt.Sprintf("prefetched %d package artifact(s)", total)}
+	if downloaded > 0 {
+		parts = append(parts, fmt.Sprintf("downloaded %d", downloaded))
+	}
+	if reusedCache > 0 {
+		parts = append(parts, fmt.Sprintf("reused %d cached", reusedCache))
+	}
+	if hydrated > 0 {
+		parts = append(parts, fmt.Sprintf("hydrated metadata for %d", hydrated))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (i *nativeInstaller) hydratePrefetchedRepoRecord(name string) error {
+	pkg, ok := i.planned[name]
+	if !ok || pkg.Repo == nil || pkg.Repo.DepsLoaded {
+		return nil
+	}
+	target, err := i.ensureRepoPackageDownloaded(*pkg.Repo)
+	if err != nil {
+		return err
+	}
+	desc, err := i.readDescriptionFromCachedPath(target)
+	if err != nil {
+		return err
+	}
+	record := *pkg.Repo
+	record.Dependencies = desc.Dependencies
+	record.NeedsCompilation = desc.NeedsCompilation
+	record.DepsLoaded = true
+	pkg.Repo = &record
+	pkg.Deps = desc.Dependencies
+	i.planned[name] = pkg
+	i.replaceRepoCandidate(name, record)
+	return nil
+}
+
 func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) {
 	if len(names) == 0 {
 		return nil, nil
@@ -858,23 +1019,29 @@ func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {
 		requirements:      map[string][]constraintRequest{},
 		cranArchiveLoaded: map[string]bool{},
 		selectedVersions:  map[string]string{},
+		prefetchedRepo:    map[string]string{},
 	}
 	if err := os.MkdirAll(inst.downloadRoot, 0o755); err != nil {
 		return nil, fmt.Errorf("create download cache dir: %w", err)
 	}
 
-	if req.Runtime.RVersion == "" {
-		version, err := inspectRVersion(req.Interpreter, req.WorkDir, stderr)
+	rBinary, siblingFound := resolveSiblingRBinary(req.Interpreter)
+	if req.Runtime.RVersion == "" || !siblingFound {
+		inspectedBinary, version, err := inspectRRuntime(req.Interpreter, req.WorkDir, stderr)
 		if err != nil {
 			return nil, err
 		}
-		inst.req.Runtime.RVersion = version
+		if strings.TrimSpace(rBinary) == "" {
+			rBinary = inspectedBinary
+		}
+		if req.Runtime.RVersion == "" {
+			inst.req.Runtime.RVersion = version
+		}
 	}
-
-	inst.rBinary, err = resolveRBinary(req.Interpreter, req.WorkDir, stderr)
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(rBinary) == "" {
+		return nil, fmt.Errorf("resolve R binary: empty result")
 	}
+	inst.rBinary = rBinary
 	if len(inst.req.Environment) == 0 {
 		inst.req.Environment = os.Environ()
 	}
@@ -1292,14 +1459,33 @@ func (i *nativeInstaller) populateRepoRecordDependencies(record *repoRecord) err
 	if record == nil || record.DepsLoaded {
 		return nil
 	}
-	desc, err := readDescriptionFromTarballURL(i.httpClient, record.TarballURL)
+	desc, err := i.readRepoRecordDescription(*record)
 	if err != nil {
 		return err
 	}
 	record.Dependencies = desc.Dependencies
+	record.NeedsCompilation = desc.NeedsCompilation
 	record.DepsLoaded = true
 	i.replaceRepoCandidate(record.Name, *record)
 	return nil
+}
+
+func (i *nativeInstaller) readRepoRecordDescription(record repoRecord) (description, error) {
+	if cached := i.repoDownloadPath(record); cached != "" {
+		if info, err := os.Stat(cached); err == nil && !info.IsDir() && info.Size() > 0 {
+			return i.readDescriptionFromCachedPath(cached)
+		}
+	}
+	key := "url:" + strings.TrimSpace(record.TarballURL)
+	if desc, ok := i.cachedDescription(key); ok {
+		return desc, nil
+	}
+	desc, err := readDescriptionFromTarballURL(i.httpClient, record.TarballURL)
+	if err != nil {
+		return description{}, err
+	}
+	i.storeCachedDescription(key, desc)
+	return desc, nil
 }
 
 func (i *nativeInstaller) replaceRepoCandidate(name string, record repoRecord) {
@@ -1493,24 +1679,29 @@ func (i *nativeInstaller) prepareSource(spec project.SourceSpec) (preparedSource
 
 func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 	fmt.Fprintf(i.stdout, "[rs] installing %s package %s %s via native backend\n", record.Source, record.Name, record.Version)
+	if strings.HasSuffix(strings.ToLower(record.TarballURL), ".tar.gz") && record.NeedsCompilation {
+		if err := i.ensurePackageBuildTools(record.Name); err != nil {
+			return err
+		}
+	}
+	target, err := i.ensureRepoPackageDownloaded(record)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", record.Name, err)
+	}
 	if strings.HasSuffix(strings.ToLower(record.TarballURL), ".tar.gz") {
 		needsCompilation := record.NeedsCompilation
 		if !record.DepsLoaded {
-			desc, err := readDescriptionFromTarballURL(i.httpClient, record.TarballURL)
+			desc, err := i.readDescriptionFromCachedPath(target)
 			if err != nil {
 				return fmt.Errorf("inspect %s source package: %w", record.Name, err)
 			}
 			needsCompilation = desc.NeedsCompilation
 		}
-		if needsCompilation {
+		if needsCompilation && !record.NeedsCompilation {
 			if err := i.ensurePackageBuildTools(record.Name); err != nil {
 				return err
 			}
 		}
-	}
-	target, err := i.download(record.TarballURL, repoDownloadName(record))
-	if err != nil {
-		return fmt.Errorf("download %s: %w", record.Name, err)
 	}
 	if err := i.runRCommandInstall(record.Name, target); err != nil {
 		return fmt.Errorf("install %s from %s: %w", record.Name, record.Source, err)
@@ -1519,6 +1710,62 @@ func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 		return err
 	}
 	return nil
+}
+
+func (i *nativeInstaller) ensureRepoPackageDownloaded(record repoRecord) (string, error) {
+	rawURL := strings.TrimSpace(record.TarballURL)
+	if rawURL == "" {
+		return "", fmt.Errorf("package %s has no download URL", record.Name)
+	}
+
+	if target, ok := i.repoDownloadReadyPath(record); ok {
+		return target, nil
+	}
+
+	target, err := i.download(rawURL, repoDownloadName(record))
+	if err != nil {
+		return "", err
+	}
+
+	i.prefetchedMu.Lock()
+	i.prefetchedRepo[rawURL] = target
+	i.prefetchedMu.Unlock()
+	return target, nil
+}
+
+func (i *nativeInstaller) repoDownloadReadyPath(record repoRecord) (string, bool) {
+	rawURL := strings.TrimSpace(record.TarballURL)
+	if rawURL == "" {
+		return "", false
+	}
+
+	i.prefetchedMu.RLock()
+	target, ok := i.prefetchedRepo[rawURL]
+	i.prefetchedMu.RUnlock()
+	if ok {
+		if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 {
+			return target, true
+		}
+	}
+
+	target = i.repoDownloadPath(record)
+	if strings.TrimSpace(target) == "" {
+		return "", false
+	}
+	if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 {
+		if err := validateCachedDownload(target); err == nil {
+			return target, true
+		}
+	}
+	return "", false
+}
+
+func (i *nativeInstaller) repoDownloadPath(record repoRecord) string {
+	rawURL := strings.TrimSpace(record.TarballURL)
+	if rawURL == "" || strings.TrimSpace(i.downloadRoot) == "" {
+		return ""
+	}
+	return filepath.Join(i.downloadRoot, downloadCacheName(rawURL, repoDownloadName(record)))
 }
 
 func repoDownloadName(record repoRecord) string {
@@ -1531,6 +1778,41 @@ func repoDownloadName(record repoRecord) string {
 		ext = ".tgz"
 	}
 	return fmt.Sprintf("%s_%s%s", record.Name, record.Version, ext)
+}
+
+func (i *nativeInstaller) readDescriptionFromCachedPath(path string) (description, error) {
+	key := "path:" + path
+	if desc, ok := i.cachedDescription(key); ok {
+		return desc, nil
+	}
+	desc, err := readDescriptionFromPath(path)
+	if err != nil {
+		return description{}, err
+	}
+	i.storeCachedDescription(key, desc)
+	return desc, nil
+}
+
+func (i *nativeInstaller) cachedDescription(key string) (description, bool) {
+	if strings.TrimSpace(key) == "" {
+		return description{}, false
+	}
+	i.descriptionMu.RLock()
+	desc, ok := i.descriptionCache[key]
+	i.descriptionMu.RUnlock()
+	return desc, ok
+}
+
+func (i *nativeInstaller) storeCachedDescription(key string, desc description) {
+	if strings.TrimSpace(key) == "" {
+		return
+	}
+	i.descriptionMu.Lock()
+	if i.descriptionCache == nil {
+		i.descriptionCache = map[string]description{}
+	}
+	i.descriptionCache[key] = desc
+	i.descriptionMu.Unlock()
 }
 
 func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
@@ -2888,44 +3170,46 @@ func parseDescription(data []byte) description {
 	}
 }
 
-func resolveRBinary(interpreter, workDir string, stderr io.Writer) (string, error) {
+func resolveSiblingRBinary(interpreter string) (string, bool) {
 	candidates := []string{
 		filepath.Join(filepath.Dir(interpreter), "R"),
 		filepath.Join(filepath.Dir(interpreter), "R.exe"),
 	}
 	for _, candidate := range candidates {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
+			return candidate, true
 		}
 	}
+	return "", false
+}
 
+func inspectRRuntime(interpreter, workDir string, stderr io.Writer) (string, string, error) {
 	binaryName := "R"
 	if installerGOOS == "windows" {
 		binaryName = "R.exe"
 	}
-	cmd := exec.Command(interpreter, "-e", fmt.Sprintf(`cat(file.path(R.home("bin"), %q))`, binaryName))
+	cmd := exec.Command(interpreter, "-e", fmt.Sprintf(`cat(file.path(R.home("bin"), %q)); cat("\n"); cat(as.character(getRversion()))`, binaryName))
 	cmd.Dir = workDir
 	if stderr != nil {
 		cmd.Stderr = stderr
 	}
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("resolve R binary: %w", err)
+		return "", "", fmt.Errorf("inspect R runtime: %w", err)
 	}
-	return strings.TrimSpace(string(output)), nil
-}
-
-func inspectRVersion(interpreter, workDir string, stderr io.Writer) (string, error) {
-	cmd := exec.Command(interpreter, "-e", `cat(as.character(getRversion()))`)
-	cmd.Dir = workDir
-	if stderr != nil {
-		cmd.Stderr = stderr
+	lines := strings.Split(strings.ReplaceAll(strings.TrimSpace(string(output)), "\r\n", "\n"), "\n")
+	if len(lines) < 2 {
+		return "", "", fmt.Errorf("inspect R runtime: unexpected output %q", strings.TrimSpace(string(output)))
 	}
-	output, err := cmd.Output()
-	if err != nil {
-		return "", fmt.Errorf("inspect R version: %w", err)
+	rBinary := strings.TrimSpace(lines[0])
+	version := strings.TrimSpace(lines[len(lines)-1])
+	if rBinary == "" {
+		return "", "", fmt.Errorf("inspect R runtime: missing R binary path")
 	}
-	return strings.TrimSpace(string(output)), nil
+	if version == "" {
+		return "", "", fmt.Errorf("inspect R runtime: missing R version")
+	}
+	return rBinary, version, nil
 }
 
 func biocMainRepositoryURL(rVersion string) string {

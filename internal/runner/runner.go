@@ -225,6 +225,8 @@ type ResolvedEnvironment struct {
 	PkgConfigPath                   []string
 	ProjectConfig                   project.Config
 	ScriptConfig                    project.ResolvedScriptConfig
+	SystemHintDetails               []SystemHintDetail
+	SystemHintCategories            []string
 	BootstrappedToolchain           bool
 	BootstrappedToolchainPhase      string
 	BootstrappedToolchainCategories []string
@@ -672,27 +674,29 @@ type validationContext struct {
 }
 
 type dependencyPlan struct {
-	ScriptPath        string
-	ProjectPath       string
-	ScriptKey         string
-	RequestedR        string
-	RequestedRVersion string
-	RscriptPath       string
-	RscriptIssue      string
-	Repo              string
-	CacheRoot         string
-	LockfilePath      string
-	LibraryPath       string
-	DetectedDeps      []string
-	CRANDeps          []string
-	BiocDeps          []string
-	IncludedCRAN      []string
-	IncludedBioc      []string
-	ExcludedDeps      []string
-	SourceDeps        map[string]project.SourceSpec
-	ToolchainPrefixes []string
-	PkgConfigPath     []string
-	Runtime           RuntimeMetadata
+	ScriptPath           string
+	ProjectPath          string
+	ScriptKey            string
+	RequestedR           string
+	RequestedRVersion    string
+	RscriptPath          string
+	RscriptIssue         string
+	Repo                 string
+	CacheRoot            string
+	LockfilePath         string
+	LibraryPath          string
+	DetectedDeps         []string
+	CRANDeps             []string
+	BiocDeps             []string
+	IncludedCRAN         []string
+	IncludedBioc         []string
+	ExcludedDeps         []string
+	SourceDeps           map[string]project.SourceSpec
+	ToolchainPrefixes    []string
+	PkgConfigPath        []string
+	SystemHintDetails    []SystemHintDetail
+	SystemHintCategories []string
+	Runtime              RuntimeMetadata
 }
 
 type ListReport struct {
@@ -963,7 +967,6 @@ func Run(opts RunOptions) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(env.BootstrapPath)
 	if opts.BootstrapToolchain {
 		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
 			return err
@@ -1051,7 +1054,7 @@ func PlanToolchain(opts ToolchainPlanOptions) (ToolchainPlanReport, error) {
 		CustomSources:     customSources,
 		ToolchainPrefixes: copyStrings(plan.ToolchainPrefixes),
 		PkgConfigPath:     copyStrings(plan.PkgConfigPath),
-		SystemHintDetails: copySystemHintDetails(collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps)),
+		SystemHintDetails: copySystemHintDetails(plan.SystemHintDetails),
 	}, nil
 }
 
@@ -1074,7 +1077,6 @@ func Shell(opts ShellOptions) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(env.BootstrapPath)
 	if opts.BootstrapToolchain {
 		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
 			return err
@@ -1152,7 +1154,6 @@ func Exec(opts ExecOptions) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(env.BootstrapPath)
 	if opts.BootstrapToolchain {
 		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
 			return err
@@ -1219,7 +1220,6 @@ func Sync(opts SyncOptions) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(env.BootstrapPath)
 	if opts.BootstrapToolchain {
 		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
 			return err
@@ -1637,7 +1637,6 @@ func Check(opts CheckOptions) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(env.BootstrapPath)
 	if opts.BootstrapToolchain {
 		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
 			return err
@@ -1708,7 +1707,7 @@ func Doctor(opts DoctorOptions) error {
 	var warnings []string
 	var installFailureDiagnostics []InstallFailureDiagnostic
 	toolchainPreview := toolchainenv.BuildPreview(plan.ToolchainPrefixes, plan.PkgConfigPath)
-	systemHintDetails := collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps)
+	systemHintDetails := copySystemHintDetails(plan.SystemHintDetails)
 	if opts.ToolchainOnly {
 		systemHintDetails = []SystemHintDetail{}
 	}
@@ -2049,6 +2048,8 @@ func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDe
 	sourceDeps := selectSourceDeps(scriptCfg.Sources, cranDeps, biocDeps)
 	cranDeps = filterManagedDeps(cranDeps, sourceDeps, biocDeps)
 	biocDeps = filterBiocDeps(biocDeps, sourceDeps)
+	systemHintDetails := collectSystemDependencyHintDetails(cranDeps, biocDeps, sourceDeps)
+	systemHintCategories := systemHintCategories(systemHintDetails)
 
 	cacheRoot := predictedCacheRoot(firstNonEmpty(cacheDirOverride, scriptCfg.CacheDir))
 	lockfilePath := scriptCfg.Lockfile
@@ -2062,25 +2063,27 @@ func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDe
 	libraryPath := predictedLibraryPath(cacheRoot, scriptPath, cranDeps, biocDeps, sourceDeps, repo, runtime)
 
 	return dependencyPlan{
-		ScriptPath:        scriptPath,
-		ProjectPath:       projectCfg.Path,
-		ScriptKey:         scriptCfg.ScriptKey,
-		RequestedR:        selection.Requested,
-		RequestedRVersion: selection.RequestedVer,
-		RscriptPath:       selection.Interpreter,
-		RscriptIssue:      errorString(selection.Issue),
-		Repo:              repo,
-		CacheRoot:         cacheRoot,
-		LockfilePath:      lockfilePath,
-		LibraryPath:       libraryPath,
-		DetectedDeps:      detectedDeps,
-		CRANDeps:          cranDeps,
-		BiocDeps:          biocDeps,
-		ExcludedDeps:      copyStrings(excludeDeps),
-		SourceDeps:        sourceDeps,
-		ToolchainPrefixes: copyStrings(scriptCfg.ToolchainPrefixes),
-		PkgConfigPath:     copyStrings(scriptCfg.PkgConfigPath),
-		Runtime:           runtime,
+		ScriptPath:           scriptPath,
+		ProjectPath:          projectCfg.Path,
+		ScriptKey:            scriptCfg.ScriptKey,
+		RequestedR:           selection.Requested,
+		RequestedRVersion:    selection.RequestedVer,
+		RscriptPath:          selection.Interpreter,
+		RscriptIssue:         errorString(selection.Issue),
+		Repo:                 repo,
+		CacheRoot:            cacheRoot,
+		LockfilePath:         lockfilePath,
+		LibraryPath:          libraryPath,
+		DetectedDeps:         detectedDeps,
+		CRANDeps:             cranDeps,
+		BiocDeps:             biocDeps,
+		ExcludedDeps:         copyStrings(excludeDeps),
+		SourceDeps:           sourceDeps,
+		ToolchainPrefixes:    copyStrings(scriptCfg.ToolchainPrefixes),
+		PkgConfigPath:        copyStrings(scriptCfg.PkgConfigPath),
+		SystemHintDetails:    copySystemHintDetails(systemHintDetails),
+		SystemHintCategories: copyStrings(systemHintCategories),
+		Runtime:              runtime,
 	}, nil
 }
 
@@ -4250,6 +4253,8 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 	}
 	cranDeps = filterManagedDeps(cranDeps, sourceDeps, biocDeps)
 	biocDeps = filterBiocDeps(biocDeps, sourceDeps)
+	systemHintDetails := collectSystemDependencyHintDetails(cranDeps, biocDeps, sourceDeps)
+	systemHintCategories := systemHintCategories(systemHintDetails)
 
 	cacheOverride := firstNonEmpty(opts.CacheDir, scriptCfg.CacheDir)
 	cacheRoot, err := resolveCacheRoot(cacheOverride)
@@ -4280,26 +4285,28 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 	}
 
 	env := ResolvedEnvironment{
-		ScriptPath:        opts.ScriptPath,
-		ScriptArgs:        opts.ScriptArgs,
-		Repo:              repo,
-		CacheRoot:         cacheRoot,
-		LibraryPath:       libPath,
-		BootstrapPath:     bootstrapPath,
-		LockfilePath:      lockfilePath,
-		Interpreter:       interpreter,
-		Runtime:           runtime,
-		DetectedDeps:      detectedDeps,
-		CRANDeps:          cranDeps,
-		BiocDeps:          biocDeps,
-		SourceDeps:        sourceDeps,
-		ToolchainPrefixes: append([]string(nil), scriptCfg.ToolchainPrefixes...),
-		PkgConfigPath:     append([]string(nil), scriptCfg.PkgConfigPath...),
-		ProjectConfig:     projectCfg,
-		ScriptConfig:      scriptCfg,
-		Verbose:           opts.Verbose,
-		Stdout:            opts.Stdout,
-		Stderr:            opts.Stderr,
+		ScriptPath:           opts.ScriptPath,
+		ScriptArgs:           opts.ScriptArgs,
+		Repo:                 repo,
+		CacheRoot:            cacheRoot,
+		LibraryPath:          libPath,
+		BootstrapPath:        bootstrapPath,
+		LockfilePath:         lockfilePath,
+		Interpreter:          interpreter,
+		Runtime:              runtime,
+		DetectedDeps:         detectedDeps,
+		CRANDeps:             cranDeps,
+		BiocDeps:             biocDeps,
+		SourceDeps:           sourceDeps,
+		ToolchainPrefixes:    append([]string(nil), scriptCfg.ToolchainPrefixes...),
+		PkgConfigPath:        append([]string(nil), scriptCfg.PkgConfigPath...),
+		ProjectConfig:        projectCfg,
+		ScriptConfig:         scriptCfg,
+		SystemHintDetails:    copySystemHintDetails(systemHintDetails),
+		SystemHintCategories: copyStrings(systemHintCategories),
+		Verbose:              opts.Verbose,
+		Stdout:               opts.Stdout,
+		Stderr:               opts.Stderr,
 	}
 
 	if opts.Verbose {
@@ -4601,7 +4608,7 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 			os.Environ(),
 			effectivePrefixes,
 			effectivePkgConfig,
-			nativeFixupPlanForDependencies(effectivePrefixes, effectivePkgConfig, env.CRANDeps, env.BiocDeps, sourceDeps),
+			nativeFixupPlanForDependencies(effectivePrefixes, effectivePkgConfig, env.CRANDeps, env.BiocDeps, sourceDeps, env.SystemHintCategories),
 		),
 		Runtime: installer.Runtime{
 			Interpreter:         runtime.Interpreter,
@@ -5113,7 +5120,7 @@ func runtimeEnv(env ResolvedEnvironment, installEnabled bool) []string {
 		os.Environ(),
 		effectivePrefixes,
 		effectivePkgConfig,
-		nativeFixupPlanForDependencies(effectivePrefixes, effectivePkgConfig, env.CRANDeps, env.BiocDeps, env.SourceDeps),
+		nativeFixupPlanForDependencies(effectivePrefixes, effectivePkgConfig, env.CRANDeps, env.BiocDeps, env.SourceDeps, env.SystemHintCategories),
 	)
 	return append(base,
 		"R_PROFILE_USER="+env.BootstrapPath,
@@ -5133,8 +5140,10 @@ func effectiveToolchainConfig(prefixes, pkgConfig []string) ([]string, []string,
 	return toolchainenv.MergeWithDetected(prefixes, pkgConfig, "")
 }
 
-func nativeFixupPlanForDependencies(prefixes, pkgConfig, cranDeps, biocDeps []string, sourceDeps map[string]project.SourceSpec) toolchainenv.NativeFixupPlan {
-	categories := systemHintCategories(collectSystemDependencyHintDetails(cranDeps, biocDeps, sourceDeps))
+func nativeFixupPlanForDependencies(prefixes, pkgConfig, cranDeps, biocDeps []string, sourceDeps map[string]project.SourceSpec, categories []string) toolchainenv.NativeFixupPlan {
+	if len(categories) == 0 {
+		categories = systemHintCategories(collectSystemDependencyHintDetails(cranDeps, biocDeps, sourceDeps))
+	}
 	return toolchainenv.BuildNativeFixupPlanWithEnv(os.Environ(), prefixes, pkgConfig, categories)
 }
 
@@ -5142,7 +5151,10 @@ func maybeBootstrapResolvedEnvironment(env *ResolvedEnvironment) error {
 	if env == nil {
 		return nil
 	}
-	categories := systemHintCategories(collectSystemDependencyHintDetails(env.CRANDeps, env.BiocDeps, env.SourceDeps))
+	categories := copyStrings(env.SystemHintCategories)
+	if len(categories) == 0 {
+		categories = systemHintCategories(collectSystemDependencyHintDetails(env.CRANDeps, env.BiocDeps, env.SourceDeps))
+	}
 	candidate, bootstrapped, err := maybeBootstrapToolchain(env.ToolchainPrefixes, env.PkgConfigPath, categories, "base", env.Stdout, env.Stderr)
 	if err != nil {
 		return err
@@ -5164,7 +5176,10 @@ func maybeBootstrapPlanToolchain(plan *dependencyPlan, stdout, stderr io.Writer)
 	if plan == nil {
 		return nil
 	}
-	categories := systemHintCategories(collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps))
+	categories := copyStrings(plan.SystemHintCategories)
+	if len(categories) == 0 {
+		categories = systemHintCategories(collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps))
+	}
 	candidate, _, err := maybeBootstrapToolchain(plan.ToolchainPrefixes, plan.PkgConfigPath, categories, "base", stdout, stderr)
 	if err != nil {
 		return err

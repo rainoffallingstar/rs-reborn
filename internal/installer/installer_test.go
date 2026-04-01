@@ -976,6 +976,292 @@ func TestDownloadRemovesCorruptCachedTarballAndRedownloads(t *testing.T) {
 	}
 }
 
+func TestInstallRepoPackageReusesPrefetchedDownload(t *testing.T) {
+	dir := t.TempDir()
+	var hits int
+	archive := testTarGzBytes(t, map[string]string{
+		"cli/DESCRIPTION": "Package: cli\nVersion: 3.6.5\n",
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+
+	rLog := filepath.Join(dir, "r-args.txt")
+	rBinary := writeTestCommand(
+		t,
+		dir,
+		"R",
+		fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", rLog),
+		fmt.Sprintf("@echo off\r\n> %q echo %%*\r\n", rLog),
+	)
+
+	inst := nativeInstaller{
+		tempRoot:       filepath.Join(dir, "tmp"),
+		downloadRoot:   filepath.Join(dir, "downloads"),
+		metaDir:        filepath.Join(dir, "meta"),
+		stdout:         io.Discard,
+		stderr:         io.Discard,
+		httpClient:     server.Client(),
+		rBinary:        rBinary,
+		prefetchedRepo: map[string]string{},
+		req: Request{
+			WorkDir:     dir,
+			CacheRoot:   filepath.Join(dir, "cache"),
+			LibraryPath: filepath.Join(dir, "lib"),
+			Environment: []string{"PATH=" + dir},
+		},
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot, inst.metaDir, inst.req.LibraryPath, inst.req.CacheRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+
+	record := repoRecord{
+		Name:       "cli",
+		Version:    "3.6.5",
+		Source:     sourceCRAN,
+		TarballURL: server.URL + "/cli_3.6.5.tar.gz",
+		DepsLoaded: true,
+	}
+	inst.planned = map[string]plannedPackage{
+		"cli": {
+			Name:    "cli",
+			Version: "3.6.5",
+			Source:  sourceCRAN,
+			Repo:    &record,
+		},
+	}
+	inst.order = []string{"cli"}
+	inst.installedPackages = map[string]installedPackage{}
+
+	if err := inst.prefetchPlannedPackages(); err != nil {
+		t.Fatalf("prefetchPlannedPackages() error = %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("prefetch hits = %d, want 1", hits)
+	}
+	prefetched := inst.prefetchedRepo[record.TarballURL]
+	if strings.TrimSpace(prefetched) == "" {
+		t.Fatalf("prefetchedRepo missing %s", record.TarballURL)
+	}
+
+	if err := inst.installRepoPackage(record); err != nil {
+		t.Fatalf("installRepoPackage() error = %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("installRepoPackage() should reuse prefetched file, hits = %d, want 1", hits)
+	}
+	data, err := os.ReadFile(rLog)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", rLog, err)
+	}
+	if !strings.Contains(string(data), prefetched) {
+		t.Fatalf("R install args = %q, want prefetched target %q", string(data), prefetched)
+	}
+}
+
+func TestInstallRepoPackageReadsDescriptionFromDownloadedArtifact(t *testing.T) {
+	dir := t.TempDir()
+	var packageHits int
+	archive := testTarGzBytes(t, map[string]string{
+		"cli/DESCRIPTION": "Package: cli\nVersion: 3.6.5\nNeedsCompilation: yes\n",
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		packageHits++
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+
+	rLog := filepath.Join(dir, "r-args.txt")
+	rBinary := writeTestCommand(
+		t,
+		dir,
+		"R",
+		fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", rLog),
+		fmt.Sprintf("@echo off\r\n> %q echo %%*\r\n", rLog),
+	)
+	makeName := "make"
+	if runtime.GOOS == "windows" {
+		makeName += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(dir, makeName), []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", makeName, err)
+	}
+
+	inst := nativeInstaller{
+		tempRoot:       filepath.Join(dir, "tmp"),
+		downloadRoot:   filepath.Join(dir, "downloads"),
+		metaDir:        filepath.Join(dir, "meta"),
+		stdout:         io.Discard,
+		stderr:         io.Discard,
+		httpClient:     server.Client(),
+		rBinary:        rBinary,
+		prefetchedRepo: map[string]string{},
+		req: Request{
+			WorkDir:     dir,
+			CacheRoot:   filepath.Join(dir, "cache"),
+			LibraryPath: filepath.Join(dir, "lib"),
+			Environment: []string{"PATH=" + dir},
+		},
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot, inst.metaDir, inst.req.LibraryPath, inst.req.CacheRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+
+	record := repoRecord{
+		Name:       "cli",
+		Version:    "3.6.5",
+		Source:     sourceCRAN,
+		TarballURL: server.URL + "/cli_3.6.5.tar.gz",
+		DepsLoaded: false,
+	}
+	if err := inst.installRepoPackage(record); err != nil {
+		t.Fatalf("installRepoPackage() error = %v", err)
+	}
+	if packageHits != 1 {
+		t.Fatalf("package HTTP hits = %d, want 1 download-only hit", packageHits)
+	}
+	if _, err := os.Stat(rLog); err != nil {
+		t.Fatalf("expected R install command to run: %v", err)
+	}
+}
+
+func TestPrefetchPlannedPackagesHydratesRepoMetadataFromDownloadedArtifact(t *testing.T) {
+	dir := t.TempDir()
+	archive := testTarGzBytes(t, map[string]string{
+		"pkg/DESCRIPTION": "Package: pkg\nVersion: 1.0.0\nImports: cli\nNeedsCompilation: yes\n",
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+
+	record := repoRecord{
+		Name:       "pkg",
+		Version:    "1.0.0",
+		Source:     sourceCRAN,
+		TarballURL: server.URL + "/pkg_1.0.0.tar.gz",
+		DepsLoaded: false,
+	}
+	inst := nativeInstaller{
+		tempRoot:       filepath.Join(dir, "tmp"),
+		downloadRoot:   filepath.Join(dir, "downloads"),
+		stderr:         io.Discard,
+		httpClient:     server.Client(),
+		prefetchedRepo: map[string]string{},
+		planned: map[string]plannedPackage{
+			"pkg": {
+				Name:    "pkg",
+				Version: "1.0.0",
+				Source:  sourceCRAN,
+				Repo:    &record,
+			},
+		},
+		order: []string{"pkg"},
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+
+	if err := inst.prefetchPlannedPackages(); err != nil {
+		t.Fatalf("prefetchPlannedPackages() error = %v", err)
+	}
+	got := inst.planned["pkg"]
+	if got.Repo == nil || !got.Repo.DepsLoaded {
+		t.Fatalf("planned repo not hydrated: %#v", got.Repo)
+	}
+	if !got.Repo.NeedsCompilation {
+		t.Fatalf("NeedsCompilation = false, want true")
+	}
+	if !reflect.DeepEqual(got.Deps, []packageRequirement{{Name: "cli"}}) {
+		t.Fatalf("Deps = %v, want cli dependency", got.Deps)
+	}
+}
+
+func TestPrefetchPlannedPackagesReportsSummary(t *testing.T) {
+	dir := t.TempDir()
+	cachedArchive := testTarGzBytes(t, map[string]string{
+		"cached/DESCRIPTION": "Package: cached\nVersion: 1.0.0\nNeedsCompilation: no\n",
+	})
+	downloadedArchive := testTarGzBytes(t, map[string]string{
+		"fresh/DESCRIPTION": "Package: fresh\nVersion: 2.0.0\nImports: cli\nNeedsCompilation: yes\n",
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(downloadedArchive)
+	}))
+	defer server.Close()
+
+	cachedRecord := repoRecord{
+		Name:       "cached",
+		Version:    "1.0.0",
+		Source:     sourceCRAN,
+		TarballURL: "https://example.test/src/contrib/cached_1.0.0.tar.gz",
+		DepsLoaded: false,
+	}
+	freshRecord := repoRecord{
+		Name:       "fresh",
+		Version:    "2.0.0",
+		Source:     sourceCRAN,
+		TarballURL: server.URL + "/fresh_2.0.0.tar.gz",
+		DepsLoaded: false,
+	}
+
+	stderr := &bytes.Buffer{}
+	inst := nativeInstaller{
+		tempRoot:       filepath.Join(dir, "tmp"),
+		downloadRoot:   filepath.Join(dir, "downloads"),
+		stderr:         stderr,
+		httpClient:     server.Client(),
+		prefetchedRepo: map[string]string{},
+		planned: map[string]plannedPackage{
+			"cached": {
+				Name:    "cached",
+				Version: "1.0.0",
+				Source:  sourceCRAN,
+				Repo:    &cachedRecord,
+			},
+			"fresh": {
+				Name:    "fresh",
+				Version: "2.0.0",
+				Source:  sourceCRAN,
+				Repo:    &freshRecord,
+			},
+		},
+		order: []string{"cached", "fresh"},
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	cachedPath := inst.repoDownloadPath(cachedRecord)
+	if err := os.MkdirAll(filepath.Dir(cachedPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", filepath.Dir(cachedPath), err)
+	}
+	if err := os.WriteFile(cachedPath, cachedArchive, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", cachedPath, err)
+	}
+
+	if err := inst.prefetchPlannedPackages(); err != nil {
+		t.Fatalf("prefetchPlannedPackages() error = %v", err)
+	}
+
+	log := stderr.String()
+	if !strings.Contains(log, "prefetching 2 package artifact(s)") {
+		t.Fatalf("prefetch log = %q, want prefetch stage", log)
+	}
+	if !strings.Contains(log, "prefetched 2 package artifact(s), downloaded 1, reused 1 cached, hydrated metadata for 2") {
+		t.Fatalf("prefetch log = %q, want summary counts", log)
+	}
+}
+
 func TestFetchPackagesFileRetriesBodyReadTimeout(t *testing.T) {
 	packages := "Package: cli\nVersion: 3.6.5\n\n"
 	var buf bytes.Buffer

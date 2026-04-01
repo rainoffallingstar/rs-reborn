@@ -289,6 +289,29 @@ func TestBootstrapSourceIncludesInstallerBackends(t *testing.T) {
 	}
 }
 
+func TestWriteBootstrapReusesCachedProfile(t *testing.T) {
+	cacheRoot := t.TempDir()
+
+	first, err := writeBootstrap(cacheRoot)
+	if err != nil {
+		t.Fatalf("writeBootstrap(first) error = %v", err)
+	}
+	second, err := writeBootstrap(cacheRoot)
+	if err != nil {
+		t.Fatalf("writeBootstrap(second) error = %v", err)
+	}
+	if first != second {
+		t.Fatalf("writeBootstrap() path = %q then %q, want stable cached profile", first, second)
+	}
+	data, err := os.ReadFile(first)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", first, err)
+	}
+	if string(data) != bootstrapSource {
+		t.Fatalf("bootstrap profile content mismatch")
+	}
+}
+
 func TestEnsureInstalledUsesNativeBackend(t *testing.T) {
 	oldNative := nativeInstall
 	oldBootstrap := bootstrapInstall
