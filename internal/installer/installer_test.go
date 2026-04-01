@@ -756,6 +756,37 @@ func TestSeedPlannedPackagesFromStoreReusesMatchingStoredPackage(t *testing.T) {
 	}
 }
 
+func TestLoadInstalledPackageFromLibraryReadsSourceMetadata(t *testing.T) {
+	library := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(library, "cli"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(cli) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(library, ".rs-source-meta"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(meta) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(library, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	metaLine := "github\tgithub\towner/repo\tmain\tdeadbeef\tpkg\tfingerprint\tfile_sha256\n"
+	if err := os.WriteFile(filepath.Join(library, ".rs-source-meta", "cli.tsv"), []byte(metaLine), 0o644); err != nil {
+		t.Fatalf("WriteFile(cli.tsv) error = %v", err)
+	}
+
+	pkg, ok, err := loadInstalledPackageFromLibrary(library, "cli")
+	if err != nil {
+		t.Fatalf("loadInstalledPackageFromLibrary() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("loadInstalledPackageFromLibrary() ok = false, want true")
+	}
+	if pkg.Name != "cli" || pkg.Version != "3.6.5" || pkg.Source != sourceGitHub {
+		t.Fatalf("pkg = %#v", pkg)
+	}
+	if pkg.Location != "owner/repo" || pkg.Commit != "deadbeef" || pkg.FingerprintKind != localKindFileSHA256 {
+		t.Fatalf("pkg metadata = %#v", pkg)
+	}
+}
+
 func TestSyncPlannedPackageToStoreMaterializesStoreEntry(t *testing.T) {
 	cacheRoot := t.TempDir()
 	libraryPath := filepath.Join(cacheRoot, "lib", "aaaaaaaaaaaaaaaa")

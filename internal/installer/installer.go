@@ -355,11 +355,10 @@ func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
 		if strings.TrimSpace(storeLibrary) == "" {
 			continue
 		}
-		installed, err := loadInstalledPackagesFromLibrary(storeLibrary)
+		installedPkg, ok, err := loadInstalledPackageFromLibrary(storeLibrary, name)
 		if err != nil {
 			return err
 		}
-		installedPkg, ok := installed[name]
 		if !ok || !plannedPackageMatchesInstalled(pkg, installedPkg) {
 			continue
 		}
@@ -393,7 +392,17 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 	}
 
 	currentLibrary := filepath.Clean(i.req.LibraryPath)
+	remaining := map[string]plannedPackage{}
+	for name, pkg := range i.planned {
+		if i.isPlannedPackageInstalled(pkg) {
+			continue
+		}
+		remaining[name] = pkg
+	}
 	for _, entry := range entries {
+		if len(remaining) == 0 {
+			break
+		}
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
 		}
@@ -408,10 +417,7 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 		if len(installed) == 0 {
 			continue
 		}
-		for name, pkg := range i.planned {
-			if i.isPlannedPackageInstalled(pkg) {
-				continue
-			}
+		for name, pkg := range remaining {
 			installedPkg, ok := installed[name]
 			if !ok || !plannedPackageMatchesInstalled(pkg, installedPkg) {
 				continue
@@ -426,6 +432,7 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 			if err := i.syncPlannedPackageToStore(name); err != nil {
 				return err
 			}
+			delete(remaining, name)
 			progresscmd.Stage(i.stderr, "reusing cached "+name+" from "+entry.Name())
 		}
 	}
@@ -2296,38 +2303,59 @@ func loadInstalledPackagesFromLibrary(libraryPath string) (map[string]installedP
 			}
 			return nil, fmt.Errorf("read installed DESCRIPTION for %s: %w", entry.Name(), err)
 		}
-		fields := map[string]string{}
-		for _, record := range parseDCF(data) {
-			for key, value := range record {
-				fields[key] = value
-			}
-			break
-		}
-		pkg := installedPackage{
-			Name:    entry.Name(),
-			Version: fields["Version"],
-		}
-		switch repository := fields["Repository"]; {
-		case strings.EqualFold(repository, "CRAN"):
-			pkg.Source = sourceCRAN
-		case strings.Contains(strings.ToLower(repository), "bioconductor"):
-			pkg.Source = sourceBioconductor
-		}
-		if meta, ok := metaByName[entry.Name()]; ok {
-			if meta.Source != "" {
-				pkg.Source = meta.Source
-			}
-			pkg.Host = meta.Host
-			pkg.Location = meta.Location
-			pkg.Ref = meta.Ref
-			pkg.Commit = meta.Commit
-			pkg.Subdir = meta.Subdir
-			pkg.Fingerprint = meta.Fingerprint
-			pkg.FingerprintKind = meta.FingerprintKind
-		}
-		installed[entry.Name()] = pkg
+		installed[entry.Name()] = installedPackageFromDescription(entry.Name(), data, metaByName[entry.Name()])
 	}
 	return installed, nil
+}
+
+func loadInstalledPackageFromLibrary(libraryPath, pkg string) (installedPackage, bool, error) {
+	if strings.TrimSpace(libraryPath) == "" || strings.TrimSpace(pkg) == "" {
+		return installedPackage{}, false, nil
+	}
+	descPath := filepath.Join(libraryPath, pkg, "DESCRIPTION")
+	data, err := os.ReadFile(descPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return installedPackage{}, false, nil
+	}
+	if err != nil {
+		return installedPackage{}, false, fmt.Errorf("read installed DESCRIPTION for %s: %w", pkg, err)
+	}
+	meta, err := readInstalledSourceMetadataForPackage(filepath.Join(libraryPath, ".rs-source-meta"), pkg)
+	if err != nil {
+		return installedPackage{}, false, err
+	}
+	return installedPackageFromDescription(pkg, data, meta), true, nil
+}
+
+func installedPackageFromDescription(name string, data []byte, meta installedPackage) installedPackage {
+	fields := map[string]string{}
+	for _, record := range parseDCF(data) {
+		for key, value := range record {
+			fields[key] = value
+		}
+		break
+	}
+	pkg := installedPackage{
+		Name:    name,
+		Version: fields["Version"],
+	}
+	switch repository := fields["Repository"]; {
+	case strings.EqualFold(repository, "CRAN"):
+		pkg.Source = sourceCRAN
+	case strings.Contains(strings.ToLower(repository), "bioconductor"):
+		pkg.Source = sourceBioconductor
+	}
+	if meta.Source != "" {
+		pkg.Source = meta.Source
+	}
+	pkg.Host = meta.Host
+	pkg.Location = meta.Location
+	pkg.Ref = meta.Ref
+	pkg.Commit = meta.Commit
+	pkg.Subdir = meta.Subdir
+	pkg.Fingerprint = meta.Fingerprint
+	pkg.FingerprintKind = meta.FingerprintKind
+	return pkg
 }
 
 func copyInstalledPackage(sourceLibrary, targetLibrary, pkg string) error {
@@ -4158,34 +4186,56 @@ func readInstalledSourceMetadata(metaDir string) (map[string]installedPackage, e
 		if err != nil {
 			return nil, fmt.Errorf("read source metadata file: %w", err)
 		}
-		line := strings.TrimSpace(string(data))
-		if line == "" {
+		decoded := decodeInstalledSourceMetadata(name, data)
+		if decoded.Name == "" {
 			continue
 		}
-		fields := strings.Split(line, "\t")
-		for len(fields) < 8 {
-			fields = append(fields, "")
-		}
-		decode := func(value string) string {
-			decoded, err := neturl.QueryUnescape(value)
-			if err != nil {
-				return value
-			}
-			return decoded
-		}
-		metaByName[name] = installedPackage{
-			Name:            name,
-			Source:          decode(fields[0]),
-			Host:            decode(fields[1]),
-			Location:        decode(fields[2]),
-			Ref:             decode(fields[3]),
-			Commit:          decode(fields[4]),
-			Subdir:          decode(fields[5]),
-			Fingerprint:     decode(fields[6]),
-			FingerprintKind: decode(fields[7]),
-		}
+		metaByName[name] = decoded
 	}
 	return metaByName, nil
+}
+
+func readInstalledSourceMetadataForPackage(metaDir, pkg string) (installedPackage, error) {
+	if strings.TrimSpace(metaDir) == "" || strings.TrimSpace(pkg) == "" {
+		return installedPackage{}, nil
+	}
+	data, err := os.ReadFile(filepath.Join(metaDir, pkg+".tsv"))
+	if errors.Is(err, os.ErrNotExist) {
+		return installedPackage{}, nil
+	}
+	if err != nil {
+		return installedPackage{}, fmt.Errorf("read source metadata file: %w", err)
+	}
+	return decodeInstalledSourceMetadata(pkg, data), nil
+}
+
+func decodeInstalledSourceMetadata(name string, data []byte) installedPackage {
+	line := strings.TrimSpace(string(data))
+	if line == "" {
+		return installedPackage{}
+	}
+	fields := strings.Split(line, "\t")
+	for len(fields) < 8 {
+		fields = append(fields, "")
+	}
+	decode := func(value string) string {
+		decoded, err := neturl.QueryUnescape(value)
+		if err != nil {
+			return value
+		}
+		return decoded
+	}
+	return installedPackage{
+		Name:            name,
+		Source:          decode(fields[0]),
+		Host:            decode(fields[1]),
+		Location:        decode(fields[2]),
+		Ref:             decode(fields[3]),
+		Commit:          decode(fields[4]),
+		Subdir:          decode(fields[5]),
+		Fingerprint:     decode(fields[6]),
+		FingerprintKind: decode(fields[7]),
+	}
 }
 
 func mergeDeps(groups ...[]string) []string {
