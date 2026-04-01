@@ -933,6 +933,13 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 	}
 
 	progresscmd.Stage(i.stderr, fmt.Sprintf("prefetching %d package artifact(s)", len(records)))
+	hydrationTargets := make([]string, 0, len(i.order))
+	for _, name := range i.order {
+		pkg, ok := i.planned[name]
+		if ok && pkg.Repo != nil && !pkg.Repo.DepsLoaded {
+			hydrationTargets = append(hydrationTargets, name)
+		}
+	}
 	if len(records) == 1 {
 		if _, ok := i.repoDownloadReadyPath(records[0]); ok {
 			stats.reusedCache++
@@ -943,16 +950,10 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 		if stats.reusedCache == 0 {
 			stats.downloaded++
 		}
-		for _, name := range i.order {
-			pkg, ok := i.planned[name]
-			needsHydrate := ok && pkg.Repo != nil && !pkg.Repo.DepsLoaded
-			if err := i.hydratePrefetchedRepoRecord(name); err != nil {
-				return fmt.Errorf("hydrate prefetched metadata for %s: %w", name, err)
-			}
-			if needsHydrate {
-				stats.hydrated++
-			}
+		if err := i.hydratePrefetchedRepoRecords(hydrationTargets); err != nil {
+			return err
 		}
+		stats.hydrated = len(hydrationTargets)
 		progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache, stats.hydrated))
 		return nil
 	}
@@ -997,16 +998,10 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 		}
 		stats.downloaded++
 	}
-	for _, name := range i.order {
-		pkg, ok := i.planned[name]
-		needsHydrate := ok && pkg.Repo != nil && !pkg.Repo.DepsLoaded
-		if err := i.hydratePrefetchedRepoRecord(name); err != nil {
-			return fmt.Errorf("hydrate prefetched metadata for %s: %w", name, err)
-		}
-		if needsHydrate {
-			stats.hydrated++
-		}
+	if err := i.hydratePrefetchedRepoRecords(hydrationTargets); err != nil {
+		return err
 	}
+	stats.hydrated = len(hydrationTargets)
 	progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache, stats.hydrated))
 	return nil
 }
@@ -1037,6 +1032,87 @@ func (i *nativeInstaller) hydratePrefetchedRepoRecord(name string) error {
 	desc, err := i.readDescriptionFromCachedPath(target)
 	if err != nil {
 		return err
+	}
+	return i.applyPrefetchedRepoDescription(name, desc)
+}
+
+func (i *nativeInstaller) hydratePrefetchedRepoRecords(names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	if len(names) == 1 {
+		if err := i.hydratePrefetchedRepoRecord(names[0]); err != nil {
+			return fmt.Errorf("hydrate prefetched metadata for %s: %w", names[0], err)
+		}
+		return nil
+	}
+
+	type hydrationResult struct {
+		name string
+		desc description
+		err  error
+	}
+	workers := parallelWorkerLimit(len(names))
+	jobs := make(chan string)
+	results := make(chan hydrationResult, len(names))
+
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for name := range jobs {
+				desc, err := i.loadPrefetchedRepoDescription(name)
+				results <- hydrationResult{name: name, desc: desc, err: err}
+			}
+		}()
+	}
+	for _, name := range names {
+		jobs <- name
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	byName := make(map[string]hydrationResult, len(names))
+	for result := range results {
+		byName[result.name] = result
+	}
+	for _, name := range names {
+		result, ok := byName[name]
+		if !ok {
+			return fmt.Errorf("hydrate prefetched metadata for %s: missing worker result", name)
+		}
+		if result.err != nil {
+			return fmt.Errorf("hydrate prefetched metadata for %s: %w", name, result.err)
+		}
+		if err := i.applyPrefetchedRepoDescription(name, result.desc); err != nil {
+			return fmt.Errorf("hydrate prefetched metadata for %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func (i *nativeInstaller) loadPrefetchedRepoDescription(name string) (description, error) {
+	pkg, ok := i.planned[name]
+	if !ok || pkg.Repo == nil || pkg.Repo.DepsLoaded {
+		return description{}, nil
+	}
+	target, ok := i.repoDownloadReadyPath(*pkg.Repo)
+	if !ok {
+		var err error
+		target, err = i.ensureRepoPackageDownloaded(*pkg.Repo)
+		if err != nil {
+			return description{}, err
+		}
+	}
+	return i.readDescriptionFromCachedPath(target)
+}
+
+func (i *nativeInstaller) applyPrefetchedRepoDescription(name string, desc description) error {
+	pkg, ok := i.planned[name]
+	if !ok || pkg.Repo == nil || pkg.Repo.DepsLoaded {
+		return nil
 	}
 	record := *pkg.Repo
 	record.Dependencies = desc.Dependencies
