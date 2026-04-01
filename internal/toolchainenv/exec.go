@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+func isEnvaManagedPrefix(prefix string) bool {
+	cleaned := strings.ToLower(filepath.ToSlash(strings.TrimSpace(prefix)))
+	return strings.Contains(cleaned, "/rattler/envs/")
+}
+
 // WrapCommand prefers a manager-native execution path for known rootless
 // toolchain environments, then falls back to the original command.
 func WrapCommand(name string, args []string, env []string) (string, []string, []string, bool, error) {
@@ -19,6 +24,9 @@ func WrapCommand(name string, args []string, env []string) (string, []string, []
 
 	switch candidate.Preset {
 	case "enva":
+		if !isEnvaManagedPrefix(candidate.ToolchainPrefixes[0]) {
+			return name, append([]string(nil), args...), env, false, nil
+		}
 		runner, err := FindInPath("enva", env)
 		if err != nil {
 			return name, append([]string(nil), args...), env, false, nil
@@ -120,6 +128,8 @@ func heuristicCandidateFromEnvironment(env []string) *Candidate {
 		ExistingPrefixes:      existingTemplatePaths(prefixes),
 		ExistingPkgConfigPath: existingTemplatePaths(pkgConfig),
 		SuggestedInitCommand:  explicitInitCommand(prefixes, pkgConfig),
+		SuggestedSetupCommand: suggestedSetupCommand(preset, prefixes),
+		SuggestedSetupNote:    suggestedSetupNote(preset, prefixes),
 	}
 	candidate.Complete = len(candidate.ExistingPrefixes) == len(prefixes) && len(candidate.ExistingPkgConfigPath) == len(pkgConfig)
 	return candidate

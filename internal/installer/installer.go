@@ -2325,7 +2325,7 @@ func ensureLinuxSourceBuildTools(pkg string, env []string) error {
 				"package %s requires Linux source build tools, but the detected C/C++ toolchain could not compile a test program\nnext step: verify the active compiler toolchain can link executables (for example with `%s`)\nnext step: %s\nprobe: %s",
 				pkg,
 				strings.TrimSpace(toolchainProbeExample(env)),
-				rootlessToolchainAdvice(),
+				rootlessToolchainAdvice(env),
 				err,
 			)
 		}
@@ -2338,14 +2338,14 @@ func ensureLinuxSourceBuildTools(pkg string, env []string) error {
 			pkg,
 			strings.Join(missing, ", "),
 			advice,
-			rootlessToolchainAdvice(),
+			rootlessToolchainAdvice(env),
 		)
 	}
 	return fmt.Errorf(
 		"package %s requires Linux source build tools, but required compilers are missing: %s\nnext step: %s",
 		pkg,
 		strings.Join(missing, ", "),
-		rootlessToolchainAdvice(),
+		rootlessToolchainAdvice(env),
 	)
 }
 
@@ -2435,6 +2435,9 @@ func toolchainProbeExample(env []string) string {
 	}
 	switch candidate.Preset {
 	case "enva":
+		if len(candidate.ToolchainPrefixes) > 0 && !toolchainenvIsManagedEnvaPrefix(candidate.ToolchainPrefixes[0]) {
+			return fmt.Sprintf(`"%s" smoke.cpp -o smoke`, filepath.Join(candidate.ToolchainPrefixes[0], "bin", compiler))
+		}
 		return fmt.Sprintf(`enva run rs-sysdeps -- %s smoke.cpp -o smoke`, compiler)
 	case "micromamba", "mamba", "conda":
 		if len(candidate.ToolchainPrefixes) > 0 {
@@ -2474,13 +2477,22 @@ func linuxSourceBuildAdvice() string {
 	}
 }
 
-func rootlessToolchainAdvice() string {
+func rootlessToolchainAdvice(env []string) string {
 	base := "if you cannot install system packages, provide a user-local toolchain prefix with enva, Homebrew-in-home, micromamba, mamba, conda, or Spack, then expose it via RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH or rs.toml; start with `rs toolchain detect`, `rs toolchain template auto`, and `rs doctor --toolchain-only`"
-	candidate, err := toolchainenv.RecommendedCandidate("")
+	candidate, err := toolchainenv.CandidateFromEnvironment(env)
+	if err == nil && candidate != nil {
+		return fmt.Sprintf("%s; detected recommended preset on this machine: %s; setup follow-up: `%s`; project follow-up: `%s`", base, candidate.Preset, candidate.SuggestedSetupCommand, candidate.SuggestedInitCommand)
+	}
+	candidate, err = toolchainenv.RecommendedCandidate("")
 	if err != nil || candidate == nil {
 		return base
 	}
 	return fmt.Sprintf("%s; detected recommended preset on this machine: %s; setup follow-up: `%s`; project follow-up: `%s`", base, candidate.Preset, candidate.SuggestedSetupCommand, candidate.SuggestedInitCommand)
+}
+
+func toolchainenvIsManagedEnvaPrefix(prefix string) bool {
+	cleaned := strings.ToLower(filepath.ToSlash(strings.TrimSpace(prefix)))
+	return strings.Contains(cleaned, "/rattler/envs/")
 }
 
 func detectInstallerLinuxDistro() (string, error) {

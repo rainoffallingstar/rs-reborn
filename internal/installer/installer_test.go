@@ -907,7 +907,7 @@ func TestRootlessToolchainAdviceIncludesDetectedPresetRecommendation(t *testing.
 		}
 	}
 
-	advice := rootlessToolchainAdvice()
+	advice := rootlessToolchainAdvice(nil)
 	if !strings.Contains(advice, "detected recommended preset on this machine: homebrew") {
 		t.Fatalf("rootlessToolchainAdvice() = %q", advice)
 	}
@@ -916,6 +916,71 @@ func TestRootlessToolchainAdviceIncludesDetectedPresetRecommendation(t *testing.
 	}
 	if !strings.Contains(advice, "rs init --toolchain-preset homebrew") {
 		t.Fatalf("rootlessToolchainAdvice() = %q", advice)
+	}
+}
+
+func TestRootlessToolchainAdvicePrefersActiveAdoptedEnvaEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", binDir, err)
+	}
+	writeTestCommand(t, binDir, "enva", "#!/bin/sh\nexit 0\n", "@echo off\r\nexit /b 0\r\n")
+
+	actualPrefix := filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")
+	for _, path := range []string{
+		actualPrefix,
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+
+	env := toolchainenv.Apply([]string{"PATH=" + binDir}, []string{actualPrefix}, []string{
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+	})
+	advice := rootlessToolchainAdvice(env)
+	if !strings.Contains(advice, "detected recommended preset on this machine: enva") {
+		t.Fatalf("rootlessToolchainAdvice(env) = %q", advice)
+	}
+	if !strings.Contains(advice, actualPrefix) {
+		t.Fatalf("rootlessToolchainAdvice(env) = %q", advice)
+	}
+}
+
+func TestToolchainProbeExampleUsesDirectCompilerForAdoptedEnvaEnvironment(t *testing.T) {
+	oldGOOS := installerGOOS
+	t.Cleanup(func() {
+		installerGOOS = oldGOOS
+	})
+	installerGOOS = "linux"
+
+	dir := t.TempDir()
+	actualPrefix := filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", binDir, err)
+	}
+	writeTestCommand(t, binDir, "enva", "#!/bin/sh\nexit 0\n", "@echo off\r\nexit /b 0\r\n")
+	compilerDir := filepath.Join(actualPrefix, "bin")
+	if err := os.MkdirAll(compilerDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", compilerDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(compilerDir, "x86_64-conda-linux-gnu-c++"), []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(compiler) error = %v", err)
+	}
+	env := toolchainenv.Apply([]string{"PATH=" + binDir + string(os.PathListSeparator) + "/usr/bin"}, []string{actualPrefix}, []string{
+		filepath.Join(actualPrefix, "lib", "pkgconfig"),
+		filepath.Join(actualPrefix, "share", "pkgconfig"),
+	})
+	got := toolchainProbeExample(env)
+	want := `"` + filepath.Join(actualPrefix, "bin", "x86_64-conda-linux-gnu-c++") + `" smoke.cpp -o smoke`
+	if got != want {
+		t.Fatalf("toolchainProbeExample() = %q, want %q", got, want)
 	}
 }
 

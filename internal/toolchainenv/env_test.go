@@ -670,6 +670,34 @@ func TestWrapCommandUsesEnvaRunForManagedToolchain(t *testing.T) {
 	}
 }
 
+func TestWrapCommandDoesNotUseEnvaRunForAdoptedCondaStylePrefix(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	writeToolExecutable(t, binDir, "enva")
+
+	prefixes := []string{filepath.Join(dir, "MyMiniconda", "envs", "rs-sysdeps")}
+	pkgConfig := []string{
+		filepath.Join(prefixes[0], "lib", "pkgconfig"),
+		filepath.Join(prefixes[0], "share", "pkgconfig"),
+	}
+	env := Apply([]string{"PATH=" + binDir}, prefixes, pkgConfig)
+
+	name, args, wrappedEnv, wrapped, err := WrapCommand("x86_64-conda-linux-gnu-c++", []string{"smoke.cpp", "-o", "smoke"}, env)
+	if err != nil {
+		t.Fatalf("WrapCommand() error = %v", err)
+	}
+	if wrapped {
+		t.Fatalf("WrapCommand() wrapped = true, want false (name=%q args=%v env=%v)", name, args, wrappedEnv)
+	}
+	if name != "x86_64-conda-linux-gnu-c++" {
+		t.Fatalf("name = %q", name)
+	}
+	if !reflect.DeepEqual(args, []string{"smoke.cpp", "-o", "smoke"}) {
+		t.Fatalf("args = %v", args)
+	}
+}
+
 func TestWrapCommandUsesMicromambaRunForManagedToolchain(t *testing.T) {
 	dir := t.TempDir()
 	setTestHomeDir(t, dir)
