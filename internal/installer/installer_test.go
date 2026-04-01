@@ -814,6 +814,35 @@ func TestFindReusablePackagesInLibraryUsesPointLookupsForSmallRemainder(t *testi
 	}
 }
 
+func TestFindReusablePackagesInLibraryIgnoresBrokenUnrelatedPackageDirs(t *testing.T) {
+	library := t.TempDir()
+	for _, path := range []string{
+		filepath.Join(library, "cli"),
+		filepath.Join(library, "broken"),
+		filepath.Join(library, ".rs-source-meta"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(library, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(cli DESCRIPTION) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(library, "broken", "DESCRIPTION"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(broken DESCRIPTION dir) error = %v", err)
+	}
+
+	got, err := findReusablePackagesInLibrary(library, map[string]plannedPackage{
+		"cli": {Name: "cli", Version: "3.6.5", Source: sourceCRAN},
+	})
+	if err != nil {
+		t.Fatalf("findReusablePackagesInLibrary() error = %v", err)
+	}
+	if len(got) != 1 || got["cli"].Version != "3.6.5" {
+		t.Fatalf("findReusablePackagesInLibrary() = %#v, want only cli", got)
+	}
+}
+
 func TestParallelWorkerLimitBoundsToCPUAndItemCount(t *testing.T) {
 	original := runtime.GOMAXPROCS(0)
 	runtime.GOMAXPROCS(6)

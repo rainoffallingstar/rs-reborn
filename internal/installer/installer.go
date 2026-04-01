@@ -502,21 +502,38 @@ func findReusablePackagesInLibrary(libraryPath string, remaining map[string]plan
 	if len(remaining) == 0 {
 		return map[string]installedPackage{}, nil
 	}
-	// Point lookups avoid scanning large sibling libraries when only a few packages remain.
-	if len(remaining) <= 12 {
-		matches := map[string]installedPackage{}
-		for name := range remaining {
-			pkg, ok, err := loadInstalledPackageFromLibrary(libraryPath, name)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				matches[name] = pkg
-			}
-		}
-		return matches, nil
+	entries, err := os.ReadDir(libraryPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]installedPackage{}, nil
 	}
-	return loadInstalledPackagesFromLibrary(libraryPath)
+	if err != nil {
+		return nil, fmt.Errorf("read managed library: %w", err)
+	}
+
+	candidates := make([]string, 0, len(remaining))
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		if _, ok := remaining[entry.Name()]; ok {
+			candidates = append(candidates, entry.Name())
+		}
+	}
+	if len(candidates) == 0 {
+		return map[string]installedPackage{}, nil
+	}
+
+	matches := make(map[string]installedPackage, len(candidates))
+	for _, name := range candidates {
+		pkg, ok, err := loadInstalledPackageFromLibrary(libraryPath, name)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			matches[name] = pkg
+		}
+	}
+	return matches, nil
 }
 
 func (i *nativeInstaller) syncPlannedPackageToStore(name string) error {
