@@ -306,9 +306,10 @@ func Install(req Request) error {
 			if err != nil {
 				return err
 			}
-			if err := inst.recordPlannedPackagesInstalled(installed); err != nil {
+			if err := inst.markPlannedPackagesInstalled(installed); err != nil {
 				return err
 			}
+			pureSyncErrs := inst.startSyncPlannedPackagesToStore(installed)
 			compiledInstalled := make([]string, 0, len(compiled))
 			for _, name := range compiled {
 				installed, err := inst.installPlannedPackage(name)
@@ -316,10 +317,16 @@ func Install(req Request) error {
 					return err
 				}
 				if installed {
+					if err := inst.markPlannedPackageInstalled(name); err != nil {
+						return err
+					}
 					compiledInstalled = append(compiledInstalled, name)
 				}
 			}
-			if err := inst.recordPlannedPackagesInstalled(compiledInstalled); err != nil {
+			if err := waitSyncPlannedPackagesToStore(pureSyncErrs); err != nil {
+				return err
+			}
+			if err := inst.syncPlannedPackagesToStore(compiledInstalled); err != nil {
 				return err
 			}
 		}
@@ -343,13 +350,17 @@ func Install(req Request) error {
 }
 
 func (i *nativeInstaller) recordPlannedPackageInstalled(name string) error {
-	if err := i.markPlannedPackageInstalled(name); err != nil {
-		return err
-	}
-	return i.syncPlannedPackageToStore(name)
+	return i.recordPlannedPackagesInstalled([]string{name})
 }
 
 func (i *nativeInstaller) recordPlannedPackagesInstalled(names []string) error {
+	if err := i.markPlannedPackagesInstalled(names); err != nil {
+		return err
+	}
+	return i.syncPlannedPackagesToStore(names)
+}
+
+func (i *nativeInstaller) markPlannedPackagesInstalled(names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
@@ -357,6 +368,13 @@ func (i *nativeInstaller) recordPlannedPackagesInstalled(names []string) error {
 		if err := i.markPlannedPackageInstalled(name); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (i *nativeInstaller) syncPlannedPackagesToStore(names []string) error {
+	if len(names) == 0 {
+		return nil
 	}
 	if len(names) == 1 {
 		return i.syncPlannedPackageToStore(names[0])
@@ -397,6 +415,24 @@ func (i *nativeInstaller) recordPlannedPackagesInstalled(names []string) error {
 		}
 	}
 	return nil
+}
+
+func (i *nativeInstaller) startSyncPlannedPackagesToStore(names []string) <-chan error {
+	if len(names) == 0 {
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- i.syncPlannedPackagesToStore(names)
+	}()
+	return done
+}
+
+func waitSyncPlannedPackagesToStore(done <-chan error) error {
+	if done == nil {
+		return nil
+	}
+	return <-done
 }
 
 func (i *nativeInstaller) markPlannedPackageInstalled(name string) error {
