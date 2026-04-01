@@ -2552,9 +2552,23 @@ func loadInstalledPackagesByNameFromLibrary(libraryPath string, names []string) 
 	if strings.TrimSpace(libraryPath) == "" || len(names) == 0 {
 		return map[string]installedPackage{}, nil
 	}
-	metaByName, err := readInstalledSourceMetadata(filepath.Join(libraryPath, ".rs-source-meta"))
-	if err != nil {
-		return nil, err
+	metaByName := map[string]installedPackage{}
+	if len(names) <= 12 {
+		for _, name := range names {
+			meta, err := readInstalledSourceMetadataForPackage(filepath.Join(libraryPath, ".rs-source-meta"), name)
+			if err != nil {
+				return nil, err
+			}
+			if meta.Name != "" {
+				metaByName[name] = meta
+			}
+		}
+	} else {
+		var err error
+		metaByName, err = readInstalledSourceMetadata(filepath.Join(libraryPath, ".rs-source-meta"))
+		if err != nil {
+			return nil, err
+		}
 	}
 	installed := make(map[string]installedPackage, len(names))
 	for _, name := range names {
