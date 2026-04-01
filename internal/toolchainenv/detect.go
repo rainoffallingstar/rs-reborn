@@ -235,6 +235,7 @@ func bootstrapCandidateWithPackages(name, home string, env, packages []string) (
 		return nil, err
 	}
 	for _, candidate := range candidates {
+		candidate = candidateWithBootstrapEnv(candidate, env)
 		command, ok := bootstrapCommandForCandidatePackages(candidate, env, packages)
 		if !ok {
 			continue
@@ -246,6 +247,27 @@ func bootstrapCandidateWithPackages(name, home string, env, packages []string) (
 		return nil, fmt.Errorf("could not auto-bootstrap a rootless toolchain on this machine; no supported auto-bootstrap manager command is callable. Try `rs toolchain detect`, `rs toolchain bootstrap enva`, `rs toolchain bootstrap homebrew`, or `rs toolchain bootstrap spack`")
 	}
 	return nil, fmt.Errorf("toolchain preset %s is not callable on this machine; install or expose the matching manager first, or try `rs toolchain detect`", name)
+}
+
+func candidateWithBootstrapEnv(candidate Candidate, env []string) Candidate {
+	if candidate.Preset != "enva" {
+		return candidate
+	}
+	actualPrefixes, actualPkgConfig := discoverBootstrappedPaths(candidate, env)
+	if len(actualPrefixes) == 0 {
+		return candidate
+	}
+	originalPrefixes := append([]string(nil), candidate.ToolchainPrefixes...)
+	originalPkgConfig := append([]string(nil), candidate.PkgConfigPath...)
+	candidate.ToolchainPrefixes = actualPrefixes
+	candidate.PkgConfigPath = actualPkgConfig
+	candidate.ExistingPrefixes = existingTemplatePaths(actualPrefixes)
+	candidate.ExistingPkgConfigPath = existingTemplatePaths(actualPkgConfig)
+	candidate.Complete = len(candidate.ExistingPrefixes) == len(actualPrefixes) && len(candidate.ExistingPkgConfigPath) == len(actualPkgConfig)
+	if !slices.Equal(originalPrefixes, actualPrefixes) || !slices.Equal(originalPkgConfig, actualPkgConfig) {
+		candidate.SuggestedInitCommand = explicitInitCommand(actualPrefixes, actualPkgConfig)
+	}
+	return candidate
 }
 
 func candidateForPreset(name, home string) (Candidate, error) {

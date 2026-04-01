@@ -26,7 +26,7 @@ try {
     }
     $buildDate = "2099-01-01T00:00:00Z"
     $ldflags = "-s -w -X github.com/rainoffallingstar/rs-reborn/internal/cli.cliVersion=$Tag -X github.com/rainoffallingstar/rs-reborn/internal/cli.cliCommit=$commit -X github.com/rainoffallingstar/rs-reborn/internal/cli.cliBuildDate=$buildDate"
-    go build -trimpath -ldflags=$ldflags -o (Join-Path $StagingDir "rs.exe") ./cmd/rs
+    & go build -trimpath "-ldflags=$ldflags" -o (Join-Path $StagingDir "rs.exe") ./cmd/rs
     Compress-Archive -Path (Join-Path $StagingDir "rs.exe") -DestinationPath (Join-Path $DistDir $Asset) -Force
     $hash = (Get-FileHash -LiteralPath (Join-Path $DistDir $Asset) -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath (Join-Path $DistDir "SHA256SUMS") -Value "$hash  $Asset"
