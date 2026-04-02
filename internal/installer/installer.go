@@ -366,7 +366,7 @@ func install(req Request, waitForStoreSync bool) (func() error, error) {
 			if syncDone := inst.startSyncPlannedPackagesToStore(installed); syncDone != nil {
 				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
 			}
-			compiledInstalled, err := inst.installPackageBatchWithWorkers(compiled, compiledBatchWorkerLimit(len(compiled)))
+			compiledInstalled, err := inst.installCompiledPackageBatch(compiled)
 			if err != nil {
 				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
 				return nil, err
@@ -1057,9 +1057,6 @@ func (i *nativeInstaller) canParallelInstallPurePackages() bool {
 	if installerGOOS == "windows" {
 		return false
 	}
-	if writerIsTTY(i.stderr) {
-		return false
-	}
 	return true
 }
 
@@ -1391,6 +1388,14 @@ func (i *nativeInstaller) applyPrefetchedRepoDescription(name string, desc descr
 }
 
 func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) {
+	return i.installPackageBatchWithFallbackWorkers(names, i.batchFallbackWorkerLimit(len(names)))
+}
+
+func (i *nativeInstaller) installCompiledPackageBatch(names []string) ([]string, error) {
+	return i.installPackageBatchWithFallbackWorkers(names, i.compiledBatchFallbackWorkerLimit(len(names)))
+}
+
+func (i *nativeInstaller) installPackageBatchWithFallbackWorkers(names []string, fallbackWorkers int) ([]string, error) {
 	if len(names) > 1 {
 		batchable, remainder := i.splitBatchInstallableRepoPackages(names)
 		if len(batchable) > 1 {
@@ -1401,7 +1406,7 @@ func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) 
 			if len(remainder) == 0 {
 				return batchInstalled, nil
 			}
-			restInstalled, err := i.installPackageBatch(remainder)
+			restInstalled, err := i.installPackageBatchWithFallbackWorkers(remainder, fallbackWorkers)
 			if err != nil {
 				return nil, err
 			}
@@ -1421,7 +1426,7 @@ func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) 
 			return installed, nil
 		}
 	}
-	return i.installPackageBatchWithWorkers(names, parallelWorkerLimit(len(names)))
+	return i.installPackageBatchWithWorkers(names, fallbackWorkers)
 }
 
 func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers int) ([]string, error) {
@@ -1494,6 +1499,26 @@ func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers
 
 func compiledBatchWorkerLimit(items int) int {
 	return parallelWorkerLimitCap(items, 2)
+}
+
+func (i *nativeInstaller) batchFallbackWorkerLimit(items int) int {
+	if writerIsTTY(i.stderr) {
+		if items <= 0 {
+			return 0
+		}
+		return 1
+	}
+	return parallelWorkerLimit(items)
+}
+
+func (i *nativeInstaller) compiledBatchFallbackWorkerLimit(items int) int {
+	if writerIsTTY(i.stderr) {
+		if items <= 0 {
+			return 0
+		}
+		return 1
+	}
+	return compiledBatchWorkerLimit(items)
 }
 
 func parallelWorkerLimit(items int) int {

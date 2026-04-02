@@ -721,6 +721,94 @@ func TestSplitBatchInstallableRepoPackagesKeepsBatchableSubset(t *testing.T) {
 	}
 }
 
+func TestInstallCompiledPackageBatchBatchesOrdinaryCompiledPackages(t *testing.T) {
+	dir := t.TempDir()
+	archive := testTarGzBytes(t, map[string]string{
+		"pkg/DESCRIPTION": "Package: pkg\nVersion: 1.0.0\nNeedsCompilation: yes\n",
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+
+	rLog := filepath.Join(dir, "r-args.txt")
+	rBinary := writeTestCommand(
+		t,
+		dir,
+		"R",
+		fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\n", rLog),
+		fmt.Sprintf("@echo off\r\n> %q echo %%*\r\n", rLog),
+	)
+
+	inst := nativeInstaller{
+		tempRoot:       filepath.Join(dir, "tmp"),
+		downloadRoot:   filepath.Join(dir, "downloads"),
+		metaDir:        filepath.Join(dir, "meta"),
+		stdout:         io.Discard,
+		stderr:         io.Discard,
+		httpClient:     server.Client(),
+		rBinary:        rBinary,
+		prefetchedRepo: map[string]string{},
+		req: Request{
+			WorkDir:     dir,
+			CacheRoot:   filepath.Join(dir, "cache"),
+			LibraryPath: filepath.Join(dir, "lib"),
+			Environment: []string{"PATH=" + dir},
+		},
+		planned: map[string]plannedPackage{
+			"digest": {
+				Name:    "digest",
+				Version: "1.0.0",
+				Source:  sourceCRAN,
+				Repo: &repoRecord{
+					Name:             "digest",
+					Version:          "1.0.0",
+					Source:           sourceCRAN,
+					TarballURL:       server.URL + "/digest_1.0.0.tar.gz",
+					NeedsCompilation: true,
+					DepsLoaded:       true,
+				},
+			},
+			"fs": {
+				Name:    "fs",
+				Version: "1.0.0",
+				Source:  sourceCRAN,
+				Repo: &repoRecord{
+					Name:             "fs",
+					Version:          "1.0.0",
+					Source:           sourceCRAN,
+					TarballURL:       server.URL + "/fs_1.0.0.tar.gz",
+					NeedsCompilation: true,
+					DepsLoaded:       true,
+				},
+			},
+		},
+		installedPackages: map[string]installedPackage{},
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot, inst.metaDir, inst.req.LibraryPath, inst.req.CacheRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+
+	installed, err := inst.installCompiledPackageBatch([]string{"digest", "fs"})
+	if err != nil {
+		t.Fatalf("installCompiledPackageBatch() error = %v", err)
+	}
+	if !reflect.DeepEqual(installed, []string{"digest", "fs"}) {
+		t.Fatalf("installCompiledPackageBatch() installed = %v", installed)
+	}
+
+	data, err := os.ReadFile(rLog)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", rLog, err)
+	}
+	args := string(data)
+	if !strings.Contains(args, "digest_1.0.0.tar.gz") || !strings.Contains(args, "fs_1.0.0.tar.gz") {
+		t.Fatalf("R install args = %q, want both compiled tarballs", args)
+	}
+}
+
 func TestPrepareInstallTargetPatchesEncodingMakevarsInTarball(t *testing.T) {
 	dir := t.TempDir()
 	prefix := filepath.Join(dir, "prefix")
