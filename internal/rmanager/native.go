@@ -49,6 +49,10 @@ const versionsIndexURL = "https://cdn.posit.co/r/versions.json"
 type installationMetadata struct {
 	ID          string    `json:"id"`
 	Version     string    `json:"version"`
+	Platform    string    `json:"platform,omitempty"`
+	Arch        string    `json:"arch,omitempty"`
+	OS          string    `json:"os,omitempty"`
+	PackageType string    `json:"package_type,omitempty"`
 	Selector    string    `json:"selector,omitempty"`
 	Name        string    `json:"name"`
 	Path        string    `json:"path"`
@@ -174,6 +178,15 @@ func nativeInstallWithOptions(opts InstallOptions) error {
 		Source:      "native",
 		InstalledAt: time.Now().UTC(),
 	}
+	runtimeMeta, err := inspectRscriptMetadata(meta.RscriptPath)
+	if err != nil {
+		return fmt.Errorf("inspect managed R runtime: %w", err)
+	}
+	meta.Version = firstNonEmpty(runtimeMeta.Version, meta.Version)
+	meta.Platform = runtimeMeta.Platform
+	meta.Arch = runtimeMeta.Arch
+	meta.OS = runtimeMeta.OS
+	meta.PackageType = runtimeMeta.PackageType
 	if err := writeInstallationMetadata(metaPath, meta); err != nil {
 		return err
 	}
@@ -713,6 +726,10 @@ func discoverManagedInstallations() ([]Installation, error) {
 		installs = append(installs, Installation{
 			Name:        meta.Name,
 			Version:     meta.Version,
+			Platform:    meta.Platform,
+			Arch:        meta.Arch,
+			OS:          meta.OS,
+			PackageType: meta.PackageType,
 			RscriptPath: meta.RscriptPath,
 			RPath:       meta.RPath,
 			Managed:     true,
@@ -815,6 +832,48 @@ func currentManagedRscript() (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no current managed R installation is configured")
+}
+
+func lookupManagedInstallation(rscriptPath string) (Installation, bool, error) {
+	rscriptPath = strings.TrimSpace(rscriptPath)
+	if rscriptPath == "" {
+		return Installation{}, false, nil
+	}
+	root, err := managedRoot()
+	if err != nil {
+		return Installation{}, false, err
+	}
+	targetRoot := rRootFromRscriptPath(rscriptPath)
+	if !pathHasPrefix(targetRoot, filepath.Join(root, "versions")) {
+		return Installation{}, false, nil
+	}
+	metaPath := filepath.Join(root, "metadata", filepath.Base(targetRoot)+".json")
+	data, err := nativeReadFile(metaPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return Installation{}, false, nil
+	}
+	if err != nil {
+		return Installation{}, false, fmt.Errorf("read managed R metadata: %w", err)
+	}
+	var meta installationMetadata
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return Installation{}, false, fmt.Errorf("parse managed R metadata: %w", err)
+	}
+	if !samePath(meta.RscriptPath, rscriptPath) && !samePath(meta.Path, targetRoot) {
+		return Installation{}, false, nil
+	}
+	return Installation{
+		Name:        meta.Name,
+		Version:     meta.Version,
+		Platform:    meta.Platform,
+		Arch:        meta.Arch,
+		OS:          meta.OS,
+		PackageType: meta.PackageType,
+		RscriptPath: meta.RscriptPath,
+		RPath:       meta.RPath,
+		Managed:     true,
+		Source:      meta.Source,
+	}, true, nil
 }
 
 func windowsRegistryRscriptCandidates() ([]string, error) {
@@ -1936,6 +1995,22 @@ func samePath(left, right string) bool {
 	return left == right
 }
 
+func pathHasPrefix(path, prefix string) bool {
+	if path == "" || prefix == "" {
+		return false
+	}
+	path = filepath.Clean(path)
+	prefix = filepath.Clean(prefix)
+	if samePath(path, prefix) {
+		return true
+	}
+	prefix = prefix + string(filepath.Separator)
+	if nativeGOOS == "windows" {
+		return strings.HasPrefix(strings.ToLower(path), strings.ToLower(prefix))
+	}
+	return strings.HasPrefix(path, prefix)
+}
+
 func instRRoot(inst Installation) string {
 	return rRootFromRscriptPath(inst.RscriptPath)
 }
@@ -1966,6 +2041,47 @@ func inspectRscriptVersion(path string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+type rscriptRuntimeMetadata struct {
+	Version     string
+	Platform    string
+	Arch        string
+	OS          string
+	PackageType string
+}
+
+func inspectRscriptMetadata(path string) (rscriptRuntimeMetadata, error) {
+	cmd := nativeCommand(path, "-e", `cat("version\t", as.character(getRversion()), "\n", sep = ""); cat("platform\t", R.version$platform, "\n", sep = ""); cat("arch\t", R.version$arch, "\n", sep = ""); cat("os\t", R.version$os, "\n", sep = ""); cat("pkg_type\t", getOption("pkgType"), "\n", sep = "")`)
+	output, err := cmd.Output()
+	if err != nil {
+		return rscriptRuntimeMetadata{}, err
+	}
+	meta := rscriptRuntimeMetadata{}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch key {
+		case "version":
+			meta.Version = value
+		case "platform":
+			meta.Platform = value
+		case "arch":
+			meta.Arch = value
+		case "os":
+			meta.OS = value
+		case "pkg_type":
+			meta.PackageType = value
+		}
+	}
+	return meta, nil
 }
 
 func sanityCheckManagedR(targetDir string) error {

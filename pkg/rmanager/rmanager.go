@@ -46,6 +46,10 @@ func CurrentManagedRscript() (string, error) {
 	return internalrmanager.CurrentManagedRscript()
 }
 
+func LookupManagedInstallation(rscriptPath string) (Installation, bool, error) {
+	return internalrmanager.LookupManagedInstallation(rscriptPath)
+}
+
 func EnsureInstalledRscript(spec string, stdout, stderr io.Writer) (string, error) {
 	return internalrmanager.EnsureInstalledRscript(spec, stdout, stderr)
 }

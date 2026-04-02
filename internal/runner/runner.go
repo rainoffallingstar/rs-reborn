@@ -308,7 +308,9 @@ var nativeValidatePlan = func(req installer.Request) error {
 
 var resolveManagedRscript = rmanager.ResolveVersionOrPath
 var resolveCurrentManagedRscript = rmanager.CurrentManagedRscript
+var lookupManagedInstallation = rmanager.LookupManagedInstallation
 var resolveSelectedRscript = resolveConfiguredInterpreterPath
+var inspectRuntime = inspectRuntimeWithInterpreter
 var bootstrapToolchainPreset = func(stdout, stderr io.Writer) (*toolchainenv.Candidate, error) {
 	return toolchainenv.Bootstrap("auto", "", os.Environ(), stdout, stderr)
 }
@@ -4179,16 +4181,42 @@ func resolveInterpreterSelection(override, configuredPath, configuredVersion, wo
 	}
 	result.Interpreter = interpreter
 
-	runtime, err := inspectRuntimeWithInterpreter(interpreter, workDir, stderr)
+	runtime, ok, err := managedRuntimeMetadata(interpreter)
 	if err != nil {
 		result.Issue = err
 		return result
+	}
+	if !ok {
+		runtime, err = inspectRuntime(interpreter, workDir, stderr)
+		if err != nil {
+			result.Issue = err
+			return result
+		}
 	}
 	result.Runtime = runtime
 	if requestedVersion != "" && !rmanager.VersionMatchesSpec(requestedVersion, runtime.RVersion) {
 		result.Issue = fmt.Errorf("configured r_version %q does not match selected interpreter runtime %s", requestedVersion, runtime.RVersion)
 	}
 	return result
+}
+
+func managedRuntimeMetadata(interpreter string) (RuntimeMetadata, bool, error) {
+	inst, ok, err := lookupManagedInstallation(interpreter)
+	if err != nil {
+		return RuntimeMetadata{}, false, err
+	}
+	if !ok || strings.TrimSpace(inst.Version) == "" || strings.TrimSpace(inst.Platform) == "" || strings.TrimSpace(inst.OS) == "" {
+		return RuntimeMetadata{}, false, nil
+	}
+	return RuntimeMetadata{
+		Interpreter:     interpreter,
+		RVersion:        inst.Version,
+		Platform:        inst.Platform,
+		Arch:            inst.Arch,
+		OS:              inst.OS,
+		PackageType:     inst.PackageType,
+		InterpreterKind: "managed",
+	}, true, nil
 }
 
 func resolveRShellPath(rscriptPath string) (string, error) {

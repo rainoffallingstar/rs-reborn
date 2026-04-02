@@ -1000,6 +1000,47 @@ func TestResolveConfiguredInterpreterPathUsesVersionResolverForVersionSpecs(t *t
 	}
 }
 
+func TestResolveInterpreterSelectionUsesManagedMetadataWithoutInspect(t *testing.T) {
+	oldResolve := resolveSelectedRscript
+	oldLookup := lookupManagedInstallation
+	oldInspect := inspectRuntime
+	t.Cleanup(func() {
+		resolveSelectedRscript = oldResolve
+		lookupManagedInstallation = oldLookup
+		inspectRuntime = oldInspect
+	})
+
+	const rscriptPath = "/tmp/managed/4.5.3/bin/Rscript"
+	resolveSelectedRscript = func(override, configValue string) (string, error) {
+		return rscriptPath, nil
+	}
+	lookupManagedInstallation = func(path string) (rmanager.Installation, bool, error) {
+		if path != rscriptPath {
+			t.Fatalf("path = %q, want %q", path, rscriptPath)
+		}
+		return rmanager.Installation{
+			Version:     "4.5.3",
+			Platform:    "x86_64-pc-linux-gnu",
+			Arch:        "x86_64",
+			OS:          "linux-gnu",
+			PackageType: "source",
+			Managed:     true,
+		}, true, nil
+	}
+	inspectRuntime = func(interpreter, workDir string, stderr io.Writer) (RuntimeMetadata, error) {
+		t.Fatalf("inspectRuntime() called unexpectedly for managed metadata hit")
+		return RuntimeMetadata{}, nil
+	}
+
+	selection := resolveInterpreterSelection("", "", "4.5", t.TempDir(), io.Discard, false)
+	if selection.Issue != nil {
+		t.Fatalf("selection.Issue = %v", selection.Issue)
+	}
+	if selection.Runtime.RVersion != "4.5.3" || selection.Runtime.InterpreterKind != "managed" {
+		t.Fatalf("selection.Runtime = %#v", selection.Runtime)
+	}
+}
+
 func TestResolveInterpreterSelectionRejectsRscriptVersionMismatch(t *testing.T) {
 	dir := t.TempDir()
 	rscriptPath := writeFakeRscriptWithVersion(t, dir, "4.5.1")

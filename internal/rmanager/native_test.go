@@ -2,6 +2,7 @@ package rmanager
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -284,6 +285,50 @@ func TestCurrentManagedRscriptReturnsCurrentManagedInstall(t *testing.T) {
 	}
 	if got != currentPath {
 		t.Fatalf("CurrentManagedRscript() = %q, want %q", got, currentPath)
+	}
+}
+
+func TestLookupManagedInstallationUsesStoredRuntimeMetadata(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv(managerRootEnv, root)
+
+	targetDir := filepath.Join(root, "versions", "4.5.3-"+runtime.GOOS+"-"+runtime.GOARCH)
+	rscriptPath := writeFakeManagedRscript(t, targetDir, "4.5.3")
+	metaDir := filepath.Join(root, "metadata")
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(metadata) error = %v", err)
+	}
+	meta := installationMetadata{
+		ID:          filepath.Base(targetDir),
+		Version:     "4.5.3",
+		Platform:    "x86_64-pc-linux-gnu",
+		Arch:        "x86_64",
+		OS:          "linux-gnu",
+		PackageType: "source",
+		Name:        "4.5.3",
+		Path:        targetDir,
+		RscriptPath: rscriptPath,
+		RPath:       managedRExecutablePath(targetDir),
+		Managed:     true,
+		Source:      "native",
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatalf("Marshal(metadata) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(metaDir, meta.ID+".json"), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile(metadata) error = %v", err)
+	}
+
+	got, ok, err := LookupManagedInstallation(rscriptPath)
+	if err != nil {
+		t.Fatalf("LookupManagedInstallation() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("LookupManagedInstallation() ok = false, want true")
+	}
+	if got.Version != "4.5.3" || got.Platform != "x86_64-pc-linux-gnu" || got.PackageType != "source" || !got.Managed {
+		t.Fatalf("LookupManagedInstallation() = %#v", got)
 	}
 }
 

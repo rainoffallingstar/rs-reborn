@@ -29,6 +29,10 @@ type InstallOptions struct {
 type Installation struct {
 	Name        string
 	Version     string
+	Platform    string
+	Arch        string
+	OS          string
+	PackageType string
 	RscriptPath string
 	RPath       string
 	Managed     bool
@@ -78,6 +82,10 @@ func ResolveVersionSelector(spec string) (string, error) {
 
 func CurrentManagedRscript() (string, error) {
 	return currentManagedRscript()
+}
+
+func LookupManagedInstallation(rscriptPath string) (Installation, bool, error) {
+	return lookupManagedInstallation(rscriptPath)
 }
 
 func EnsureInstalledRscript(spec string, stdout, stderr io.Writer) (string, error) {
