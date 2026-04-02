@@ -860,7 +860,7 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 		dir,
 		"R",
 		fmt.Sprintf("#!/bin/sh\nlog=%q/$(date +%%s%%N)-$$.txt\nprintf '%%s\\n' \"$@\" > \"$log\"\n", logDir),
-		fmt.Sprintf("@echo off\r\nset \"LOGFILE=%s\\%%RANDOM%%-%%RANDOM%%.txt\"\r\n> \"%%LOGFILE%%\" echo %%*\r\n", logDir),
+		fmt.Sprintf("@echo off\r\npowershell -NoProfile -Command \"$path = Join-Path '%s' ([guid]::NewGuid().ToString() + '.txt'); Set-Content -LiteralPath $path -Value '%%*'\" >NUL\r\n", filepath.ToSlash(logDir)),
 	)
 
 	inst := nativeInstaller{

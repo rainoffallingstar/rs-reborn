@@ -44,7 +44,7 @@ const (
 	localKindMissing        = "missing"
 	localKindError          = "unavailable"
 	defaultHTTPTimeout      = 90 * time.Second
-	httpRetryAttempts       = 3
+	httpRetryAttempts       = 5
 	repoIndexCacheTTL       = 30 * time.Minute
 	PackageStoreStateFile   = ".rs-store-state.json"
 	nonTTYInstallStartMin   = 20 * time.Second
