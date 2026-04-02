@@ -14,6 +14,7 @@ import (
 const defaultTailLines = 120
 
 var progressIsTTY = isTTY
+var progressHeartbeatInterval = 15 * time.Second
 
 type lockedBuffer struct {
 	mu  sync.Mutex
@@ -99,17 +100,26 @@ func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct
 		<-stop
 		return
 	}
+	start := time.Now()
 	if !progressIsTTY(w) {
 		fmt.Fprintf(w, "[rs] %s...\n", label)
-		<-stop
-		return
+		ticker := time.NewTicker(progressHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				fmt.Fprintf(w, "[rs] %s (%s elapsed)\n", label, formatElapsed(time.Since(start)))
+			}
+		}
 	}
 	frames := []string{"|", "/", "-", "\\"}
 	ticker := time.NewTicker(120 * time.Millisecond)
 	defer ticker.Stop()
 	idx := 0
 	for {
-		writeTTYLine(w, fmt.Sprintf("[rs] %s %s", label, frames[idx%len(frames)]))
+		writeTTYLine(w, fmt.Sprintf("[rs] %s %s %s", label, frames[idx%len(frames)], formatElapsed(time.Since(start))))
 		idx++
 		select {
 		case <-stop:
@@ -192,10 +202,19 @@ func (w *progressWriter) animate(stop <-chan struct{}, done chan<- struct{}) {
 		<-stop
 		return
 	}
+	start := time.Now()
 	if !progressIsTTY(w.progress) {
 		fmt.Fprintf(w.progress, "[rs] %s...\n", w.label)
-		<-stop
-		return
+		ticker := time.NewTicker(progressHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				fmt.Fprintf(w.progress, "[rs] %s (%s elapsed)\n", w.label, formatElapsed(time.Since(start)))
+			}
+		}
 	}
 	frames := []string{"|", "/", "-", "\\"}
 	ticker := time.NewTicker(120 * time.Millisecond)
@@ -210,7 +229,7 @@ func (w *progressWriter) animate(stop <-chan struct{}, done chan<- struct{}) {
 		if total > 0 {
 			status = fmt.Sprintf("%s/%s", humanBytes(written), humanBytes(total))
 		}
-		writeTTYLine(w.progress, fmt.Sprintf("[rs] %s %s %s", w.label, frames[idx%len(frames)], status))
+		writeTTYLine(w.progress, fmt.Sprintf("[rs] %s %s %s %s", w.label, frames[idx%len(frames)], status, formatElapsed(time.Since(start))))
 		idx++
 		select {
 		case <-stop:
@@ -251,4 +270,22 @@ func humanBytes(n int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+func formatElapsed(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+	if d < time.Hour {
+		minutes := int(d / time.Minute)
+		seconds := int((d % time.Minute) / time.Second)
+		return fmt.Sprintf("%dm%02ds", minutes, seconds)
+	}
+	hours := int(d / time.Hour)
+	minutes := int((d % time.Hour) / time.Minute)
+	return fmt.Sprintf("%dh%02dm", hours, minutes)
 }

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunSuppressesSuccessfulCommandOutput(t *testing.T) {
@@ -85,6 +86,46 @@ func TestWriteSuccessClearsTTYLineBeforeDone(t *testing.T) {
 	writeSuccess(&buf, "downloading file")
 	if !strings.Contains(buf.String(), "\033[2K[rs] downloading file done\n") {
 		t.Fatalf("writeSuccess() output = %q", buf.String())
+	}
+}
+
+func TestAnimateEmitsHeartbeatForNonTTY(t *testing.T) {
+	oldInterval := progressHeartbeatInterval
+	t.Cleanup(func() {
+		progressHeartbeatInterval = oldInterval
+	})
+	progressHeartbeatInterval = 10 * time.Millisecond
+
+	var buf bytes.Buffer
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go animate(&buf, "compiling package", stop, done)
+	time.Sleep(25 * time.Millisecond)
+	close(stop)
+	<-done
+
+	out := buf.String()
+	if !strings.Contains(out, "[rs] compiling package...") {
+		t.Fatalf("animate() output = %q, want start line", out)
+	}
+	if !strings.Contains(out, "elapsed") {
+		t.Fatalf("animate() output = %q, want heartbeat line", out)
+	}
+}
+
+func TestFormatElapsed(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{d: 8 * time.Second, want: "8s"},
+		{d: 72 * time.Second, want: "1m12s"},
+		{d: 2*time.Hour + 5*time.Minute, want: "2h05m"},
+	}
+	for _, tc := range cases {
+		if got := formatElapsed(tc.d); got != tc.want {
+			t.Fatalf("formatElapsed(%v) = %q, want %q", tc.d, got, tc.want)
+		}
 	}
 }
 
