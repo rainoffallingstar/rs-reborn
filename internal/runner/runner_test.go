@@ -672,6 +672,85 @@ func TestRuntimeEnvAutoDetectsToolchainWhenUnset(t *testing.T) {
 	}
 }
 
+func TestRuntimeEnvAddsStableTimezoneWhenUnset(t *testing.T) {
+	oldDetect := detectRuntimeTimezone
+	t.Cleanup(func() {
+		detectRuntimeTimezone = oldDetect
+	})
+	detectRuntimeTimezone = func() string { return "Asia/Shanghai" }
+
+	oldTZ, hadTZ := os.LookupEnv("TZ")
+	if err := os.Unsetenv("TZ"); err != nil {
+		t.Fatalf("Unsetenv(TZ) error = %v", err)
+	}
+	t.Cleanup(func() {
+		if hadTZ {
+			_ = os.Setenv("TZ", oldTZ)
+			return
+		}
+		_ = os.Unsetenv("TZ")
+	})
+
+	env := runtimeEnv(ResolvedEnvironment{
+		BootstrapPath: "/tmp/bootstrap.R",
+		LibraryPath:   "/tmp/lib",
+		Repo:          "https://cloud.r-project.org",
+	}, true)
+
+	if got := envValueForTest(env, "TZ"); got != "Asia/Shanghai" {
+		t.Fatalf("TZ = %q, want Asia/Shanghai", got)
+	}
+}
+
+func TestRuntimeEnvPreservesExistingTimezone(t *testing.T) {
+	oldDetect := detectRuntimeTimezone
+	t.Cleanup(func() {
+		detectRuntimeTimezone = oldDetect
+	})
+	detectRuntimeTimezone = func() string { return "Asia/Shanghai" }
+
+	t.Setenv("TZ", "Europe/Berlin")
+
+	env := runtimeEnv(ResolvedEnvironment{
+		BootstrapPath: "/tmp/bootstrap.R",
+		LibraryPath:   "/tmp/lib",
+		Repo:          "https://cloud.r-project.org",
+	}, true)
+
+	if got := envValueForTest(env, "TZ"); got != "Europe/Berlin" {
+		t.Fatalf("TZ = %q, want Europe/Berlin", got)
+	}
+}
+
+func TestNormalizeRuntimeTimezoneIdentifierMapsWindowsID(t *testing.T) {
+	if got := normalizeRuntimeTimezoneIdentifier("China Standard Time\r\n"); got != "Asia/Shanghai" {
+		t.Fatalf("normalizeRuntimeTimezoneIdentifier() = %q, want Asia/Shanghai", got)
+	}
+	if got := normalizeRuntimeTimezoneIdentifier("Pacific Standard Time"); got != "America/Los_Angeles" {
+		t.Fatalf("normalizeRuntimeTimezoneIdentifier() = %q, want America/Los_Angeles", got)
+	}
+}
+
+func TestRuntimeTimezoneFromWindowsUsesTzutil(t *testing.T) {
+	oldCommand := runtimeTimezoneCommandOutput
+	t.Cleanup(func() {
+		runtimeTimezoneCommandOutput = oldCommand
+	})
+	runtimeTimezoneCommandOutput = func(name string, args ...string) ([]byte, error) {
+		if name != "tzutil" {
+			t.Fatalf("runtimeTimezoneCommandOutput name = %q, want tzutil", name)
+		}
+		if !reflect.DeepEqual(args, []string{"/g"}) {
+			t.Fatalf("runtimeTimezoneCommandOutput args = %v, want [/g]", args)
+		}
+		return []byte("China Standard Time\r\n"), nil
+	}
+
+	if got := runtimeTimezoneFromWindows(); got != "Asia/Shanghai" {
+		t.Fatalf("runtimeTimezoneFromWindows() = %q, want Asia/Shanghai", got)
+	}
+}
+
 func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 	prefix := testCommandPath("/opt/demo")
 	pkgConfig := filepath.Join(prefix, "custom-pkgconfig")
