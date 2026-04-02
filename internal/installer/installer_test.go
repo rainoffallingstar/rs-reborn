@@ -625,7 +625,7 @@ func TestBuildInstallCommandAddsPackageSpecificEncodingFixups(t *testing.T) {
 	}
 }
 
-func TestCanBatchInstallRepoPackagesRejectsCompiledAndSpecialFixupPackages(t *testing.T) {
+func TestCanBatchInstallRepoPackagesRejectsSpecialFixupPackagesOnly(t *testing.T) {
 	inst := nativeInstaller{
 		planned: map[string]plannedPackage{
 			"cli": {
@@ -637,11 +637,11 @@ func TestCanBatchInstallRepoPackagesRejectsCompiledAndSpecialFixupPackages(t *te
 					NeedsCompilation: false,
 				},
 			},
-			"xml2": {
-				Name:   "xml2",
+			"digest": {
+				Name:   "digest",
 				Source: sourceCRAN,
 				Repo: &repoRecord{
-					Name:             "xml2",
+					Name:             "digest",
 					Source:           sourceCRAN,
 					NeedsCompilation: true,
 				},
@@ -661,8 +661,8 @@ func TestCanBatchInstallRepoPackagesRejectsCompiledAndSpecialFixupPackages(t *te
 	if inst.canBatchInstallRepoPackages([]string{"cli"}) {
 		t.Fatalf("single package should not trigger batch install")
 	}
-	if inst.canBatchInstallRepoPackages([]string{"cli", "xml2"}) {
-		t.Fatalf("compiled package should prevent batch install")
+	if !inst.canBatchInstallRepoPackages([]string{"cli", "digest"}) {
+		t.Fatalf("ordinary compiled package should still allow batch install")
 	}
 	if inst.canBatchInstallRepoPackages([]string{"cli", "haven"}) {
 		t.Fatalf("package requiring native fixups should prevent batch install")

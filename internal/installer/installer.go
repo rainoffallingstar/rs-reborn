@@ -1392,6 +1392,15 @@ func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers
 	if len(names) == 0 {
 		return nil, nil
 	}
+	if len(names) > 1 && i.canBatchInstallRepoPackages(names) {
+		installed, err := i.installRepoPackageBatch(names)
+		if err != nil {
+			return nil, err
+		}
+		if len(installed) > 0 {
+			return installed, nil
+		}
+	}
 	if len(names) == 1 {
 		installed, err := i.installPlannedPackageWithJobs(names[0], 0)
 		if err != nil || !installed {
@@ -2242,7 +2251,7 @@ func (i *nativeInstaller) canBatchInstallRepoPackages(names []string) bool {
 		if pkg.Source != sourceCRAN && pkg.Source != sourceBioconductor {
 			return false
 		}
-		if pkg.Repo == nil || pkg.Repo.NeedsCompilation {
+		if pkg.Repo == nil {
 			return false
 		}
 		if len(toolchainenv.NativeCategoriesForPackages([]string{name})) > 0 {
@@ -2264,6 +2273,21 @@ func (i *nativeInstaller) installRepoPackageBatch(names []string) ([]string, err
 		target, err := i.ensureRepoPackageDownloaded(*pkg.Repo)
 		if err != nil {
 			return nil, fmt.Errorf("download %s: %w", name, err)
+		}
+		if strings.HasSuffix(strings.ToLower(pkg.Repo.TarballURL), ".tar.gz") {
+			needsCompilation := pkg.Repo.NeedsCompilation
+			if !pkg.Repo.DepsLoaded {
+				desc, err := i.readDescriptionFromCachedPath(target)
+				if err != nil {
+					return nil, fmt.Errorf("inspect %s source package: %w", name, err)
+				}
+				needsCompilation = desc.NeedsCompilation
+			}
+			if needsCompilation {
+				if err := i.ensurePackageBuildToolsReady(name); err != nil {
+					return nil, err
+				}
+			}
 		}
 		targets = append(targets, target)
 		installed = append(installed, name)
