@@ -722,6 +722,14 @@ func TestSplitBatchInstallableRepoPackagesKeepsBatchableSubset(t *testing.T) {
 }
 
 func TestInstallCompiledPackageBatchBatchesOrdinaryCompiledPackages(t *testing.T) {
+	original := installerEnsureBuildTools
+	t.Cleanup(func() {
+		installerEnsureBuildTools = original
+	})
+	installerEnsureBuildTools = func(pkg string, env []string) error {
+		return nil
+	}
+
 	dir := t.TempDir()
 	archive := testTarGzBytes(t, map[string]string{
 		"pkg/DESCRIPTION": "Package: pkg\nVersion: 1.0.0\nNeedsCompilation: yes\n",
