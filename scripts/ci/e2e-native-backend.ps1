@@ -45,7 +45,7 @@ cat(jsonlite::toJSON(list(value = "native-backend", bioc = as.character(packageV
     if (-not $lockSucceeded) {
         throw "rs lock failed:`n$lockText"
     }
-    if ($lockText -notmatch "native backend") {
+    if ($lockText -notmatch "native package install completed") {
         throw "expected native backend install output:`n$lockText"
     }
     if ($lockText -match "falling back to legacy") {

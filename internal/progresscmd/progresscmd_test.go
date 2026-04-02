@@ -75,7 +75,9 @@ func TestRunWithOptionsSuppressesFastNonTTYStartWhenDelayed(t *testing.T) {
 	cmd := timedShellCommand(20)
 
 	if err := RunWithOptions(cmd, "testing success", &progress, &errors, RunOptions{
-		NonTTYStartDelay: 200 * time.Millisecond,
+		// PowerShell process startup on Windows can take a few hundred milliseconds
+		// even when the payload command is effectively instant.
+		NonTTYStartDelay: time.Second,
 	}); err != nil {
 		t.Fatalf("RunWithOptions() error = %v", err)
 	}

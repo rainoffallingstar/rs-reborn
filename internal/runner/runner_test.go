@@ -873,22 +873,32 @@ func TestPrintEnvironmentPreviewsLargePackageLists(t *testing.T) {
 
 func TestPrintEnvironmentPreviewsLongToolchainLists(t *testing.T) {
 	var stderr bytes.Buffer
+	p1 := filepath.Clean("/p1")
+	p2 := filepath.Clean("/p2")
+	p3 := filepath.Clean("/p3")
+	p4 := filepath.Clean("/p4")
+	p5 := filepath.Clean("/p5")
+	pc1 := filepath.Clean("/pc1")
+	pc2 := filepath.Clean("/pc2")
+	pc3 := filepath.Clean("/pc3")
+	pc4 := filepath.Clean("/pc4")
+	pc5 := filepath.Clean("/pc5")
 	env := ResolvedEnvironment{
 		ScriptPath:        "/tmp/analysis.R",
 		Interpreter:       "/tmp/Rscript",
 		LibraryPath:       "/tmp/lib",
 		LockfilePath:      "/tmp/rs.lock.json",
-		ToolchainPrefixes: []string{"/p1", "/p2", "/p3", "/p4", "/p5"},
-		PkgConfigPath:     []string{"/pc1", "/pc2", "/pc3", "/pc4", "/pc5"},
+		ToolchainPrefixes: []string{p1, p2, p3, p4, p5},
+		PkgConfigPath:     []string{pc1, pc2, pc3, pc4, pc5},
 		Stderr:            &stderr,
 	}
 
 	printEnvironment(env)
 	out := stderr.String()
-	if !strings.Contains(out, "[rs] toolchain prefixes: /p1, /p2, /p3, /p4, +1 more") {
+	if !strings.Contains(out, "[rs] toolchain prefixes: "+strings.Join([]string{p1, p2, p3, p4}, ", ")+", +1 more") {
 		t.Fatalf("printEnvironment() toolchain prefix preview = %q", out)
 	}
-	if !strings.Contains(out, "[rs] pkg-config path: /pc1, /pc2, /pc3, /pc4, +1 more") {
+	if !strings.Contains(out, "[rs] pkg-config path: "+strings.Join([]string{pc1, pc2, pc3, pc4}, ", ")+", +1 more") {
 		t.Fatalf("printEnvironment() pkg-config preview = %q", out)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")

@@ -67,6 +67,21 @@ func writeTestCommand(t *testing.T, dir, name, unixScript, windowsScript string)
 	return path
 }
 
+func testEnvironmentWithPath(path string) []string {
+	if runtime.GOOS != "windows" {
+		return []string{"PATH=" + path}
+	}
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(strings.ToUpper(entry), "PATH=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env, "PATH="+path)
+	return env
+}
+
 func TestParseDependenciesDropsRAndVersionConstraints(t *testing.T) {
 	got := parseDependencies(
 		"R (>= 4.3), cli (>= 3.0), jsonlite",
@@ -861,7 +876,7 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 			WorkDir:     dir,
 			CacheRoot:   filepath.Join(dir, "cache"),
 			LibraryPath: filepath.Join(dir, "lib"),
-			Environment: []string{"PATH=" + dir},
+			Environment: testEnvironmentWithPath(dir),
 		},
 		planned:           map[string]plannedPackage{},
 		installedPackages: map[string]installedPackage{},

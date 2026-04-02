@@ -29,7 +29,7 @@ echo "==> initialize project and verify auto backend resolves through native ins
 
 echo "==> lock through auto/native backend"
 "$RS_BIN" lock "$SCRIPT_PATH" 2>&1 | tee "$TMP_DIR/lock.txt"
-grep -q 'native backend' "$TMP_DIR/lock.txt"
+grep -q 'native package install completed' "$TMP_DIR/lock.txt"
 if grep -q 'falling back to legacy' "$TMP_DIR/lock.txt"; then
   echo "unexpected legacy fallback while RS_INSTALL_BACKEND=auto"
   exit 1
