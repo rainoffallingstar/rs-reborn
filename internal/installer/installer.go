@@ -2426,6 +2426,7 @@ func (i *nativeInstaller) installRepoPackageBatches(names []string, workers int)
 
 	type batchResult struct {
 		index     int
+		library   string
 		installed []string
 		err       error
 	}
@@ -2438,8 +2439,19 @@ func (i *nativeInstaller) installRepoPackageBatches(names []string, workers int)
 		wg.Add(1)
 		go func(index int, group []string) {
 			defer wg.Done()
-			installed, err := i.installRepoPackageBatchWithJobs(group, jobsPerBatch, true)
-			results <- batchResult{index: index, installed: installed, err: err}
+			batchLibrary, err := os.MkdirTemp(i.tempRoot, "batch-lib-*")
+			if err != nil {
+				results <- batchResult{index: index, err: err}
+				return
+			}
+			installed, err := i.installRepoPackageBatchIntoLibraryWithJobs(
+				group,
+				batchLibrary,
+				[]string{batchLibrary, i.req.LibraryPath},
+				jobsPerBatch,
+				true,
+			)
+			results <- batchResult{index: index, library: batchLibrary, installed: installed, err: err}
 		}(idx, append([]string(nil), chunk...))
 	}
 	wg.Wait()
@@ -2456,10 +2468,27 @@ func (i *nativeInstaller) installRepoPackageBatches(names []string, workers int)
 		if !ok {
 			return nil, fmt.Errorf("install batch did not return a result for chunk %d", idx)
 		}
+		if result.library != "" {
+			defer os.RemoveAll(result.library)
+		}
 		if result.err != nil {
 			return nil, result.err
 		}
 		for _, name := range result.installed {
+			if err := copyInstalledPackage(result.library, i.req.LibraryPath, name); err != nil {
+				return nil, err
+			}
+			if err := copyInstalledPackageMetadata(result.library, i.metaDir, name); err != nil {
+				return nil, err
+			}
+			installedPkg, ok, err := loadInstalledPackageFromLibrary(result.library, name)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, fmt.Errorf("load installed package %s from batch library: package missing after successful install", name)
+			}
+			i.installedPackages[name] = installedPkg
 			installedSet[name] = struct{}{}
 		}
 	}
@@ -2521,6 +2550,10 @@ func splitRepoBatchChunks(names []string, workers int) [][]string {
 }
 
 func (i *nativeInstaller) installRepoPackageBatchWithJobs(names []string, jobs int, quietProgress bool) ([]string, error) {
+	return i.installRepoPackageBatchIntoLibraryWithJobs(names, i.req.LibraryPath, []string{i.req.LibraryPath}, jobs, quietProgress)
+}
+
+func (i *nativeInstaller) installRepoPackageBatchIntoLibraryWithJobs(names []string, targetLibrary string, visibleLibraries []string, jobs int, quietProgress bool) ([]string, error) {
 	started := time.Now()
 	targets := make([]string, 0, len(names))
 	installed := make([]string, 0, len(names))
@@ -2554,7 +2587,10 @@ func (i *nativeInstaller) installRepoPackageBatchWithJobs(names []string, jobs i
 	if len(targets) == 0 {
 		return nil, nil
 	}
-	cmd, err := buildInstallCommandWithJobs(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, "", jobs, targets...)
+	if err := os.MkdirAll(targetLibrary, 0o755); err != nil {
+		return nil, err
+	}
+	cmd, err := buildInstallCommandWithJobsAndLibraries(i.rBinary, i.req.WorkDir, i.req.CacheRoot, targetLibrary, visibleLibraries, i.req.Environment, "", jobs, targets...)
 	if err != nil {
 		return nil, err
 	}
@@ -2569,9 +2605,11 @@ func (i *nativeInstaller) installRepoPackageBatchWithJobs(names []string, jobs i
 	}); err != nil {
 		return nil, err
 	}
-	for _, name := range installed {
-		if err := removeSourceMetadata(i.metaDir, name); err != nil {
-			return nil, err
+	if targetLibrary == i.req.LibraryPath {
+		for _, name := range installed {
+			if err := removeSourceMetadata(i.metaDir, name); err != nil {
+				return nil, err
+			}
 		}
 	}
 	i.recordInstallTiming(formatBatchInstallLabel(installed), time.Since(started))
@@ -2844,7 +2882,8 @@ func formatParallelInstallSummary(packageCount, workers int, mode string, names 
 	if packageCount <= 0 || workers <= 1 {
 		return ""
 	}
-	summary := fmt.Sprintf("installing %d package(s) across %d parallel %s", packageCount, workers, mode)
+	qualifier := "parallel "
+	summary := fmt.Sprintf("installing %d package(s) across %d %s%s", packageCount, workers, qualifier, mode)
 	if preview := previewInstallTargets(names, 6); preview != "" {
 		summary += ": " + preview
 	}
@@ -2979,7 +3018,11 @@ func buildInstallCommandTargets(rBinary, workDir, cacheRoot, libraryPath string,
 }
 
 func buildInstallCommandWithJobs(rBinary, workDir, cacheRoot, libraryPath string, env []string, packageName string, jobs int, targets ...string) (*exec.Cmd, error) {
-	installEnv := withInstallEnv(withPackageNativeFixups(withLibraryEnv(env, libraryPath), packageName), cacheRoot, jobs)
+	return buildInstallCommandWithJobsAndLibraries(rBinary, workDir, cacheRoot, libraryPath, []string{libraryPath}, env, packageName, jobs, targets...)
+}
+
+func buildInstallCommandWithJobsAndLibraries(rBinary, workDir, cacheRoot, libraryPath string, libraryPaths []string, env []string, packageName string, jobs int, targets ...string) (*exec.Cmd, error) {
+	installEnv := withInstallEnv(withPackageNativeFixups(withLibraryPathsEnv(env, libraryPaths...), packageName), cacheRoot, jobs)
 	args := []string{"CMD", "INSTALL", "-l", libraryPath}
 	args = append(args, targets...)
 	wrappedName, wrappedArgs, wrappedEnv, _, err := toolchainenv.WrapCommand(
@@ -5062,6 +5105,18 @@ func detectInstallerLinuxDistro() (string, error) {
 }
 
 func withLibraryEnv(env []string, libraryPath string) []string {
+	return withLibraryPathsEnv(env, libraryPath)
+}
+
+func withLibraryPathsEnv(env []string, libraryPaths ...string) []string {
+	paths := make([]string, 0, len(libraryPaths))
+	for _, libraryPath := range libraryPaths {
+		libraryPath = strings.TrimSpace(libraryPath)
+		if libraryPath == "" || slices.Contains(paths, libraryPath) {
+			continue
+		}
+		paths = append(paths, libraryPath)
+	}
 	filtered := make([]string, 0, len(env)+2)
 	for _, entry := range env {
 		if strings.HasPrefix(entry, "R_LIBS=") || strings.HasPrefix(entry, "R_LIBS_USER=") {
@@ -5069,7 +5124,11 @@ func withLibraryEnv(env []string, libraryPath string) []string {
 		}
 		filtered = append(filtered, entry)
 	}
-	filtered = append(filtered, "R_LIBS="+libraryPath, "R_LIBS_USER="+libraryPath)
+	if len(paths) == 0 {
+		return filtered
+	}
+	joined := strings.Join(paths, string(os.PathListSeparator))
+	filtered = append(filtered, "R_LIBS="+joined, "R_LIBS_USER="+joined)
 	return filtered
 }
 

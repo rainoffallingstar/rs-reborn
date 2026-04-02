@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -848,11 +849,51 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 	var (
 		invocationMu sync.Mutex
 		invocations  [][]string
+		activeCalls  int32
+		maxActive    int32
 	)
 	installerRunProgressCommand = func(cmd *exec.Cmd, label string, progress io.Writer, errors io.Writer, opts progresscmd.RunOptions) error {
+		current := atomic.AddInt32(&activeCalls, 1)
+		for {
+			seen := atomic.LoadInt32(&maxActive)
+			if current <= seen || atomic.CompareAndSwapInt32(&maxActive, seen, current) {
+				break
+			}
+		}
 		invocationMu.Lock()
 		invocations = append(invocations, append([]string(nil), cmd.Args...))
 		invocationMu.Unlock()
+		libraryPath := ""
+		targets := []string{}
+		for idx := 0; idx < len(cmd.Args); idx++ {
+			if cmd.Args[idx] == "-l" && idx+1 < len(cmd.Args) {
+				libraryPath = cmd.Args[idx+1]
+				idx++
+				continue
+			}
+			if strings.HasSuffix(cmd.Args[idx], ".tar.gz") {
+				targets = append(targets, cmd.Args[idx])
+			}
+		}
+		if libraryPath == "" {
+			return fmt.Errorf("test hook missing -l library path: %v", cmd.Args)
+		}
+		for _, target := range targets {
+			base := filepath.Base(target)
+			name := strings.TrimSuffix(base, ".tar.gz")
+			if cut := strings.LastIndex(name, "_"); cut >= 0 {
+				name = name[:cut]
+			}
+			pkgDir := filepath.Join(libraryPath, name)
+			if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(pkgDir, "DESCRIPTION"), []byte(fmt.Sprintf("Package: %s\nVersion: 1.0.0\n", name)), 0o644); err != nil {
+				return err
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		atomic.AddInt32(&activeCalls, -1)
 		return nil
 	}
 
@@ -919,6 +960,9 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 		if len(args) < 2 {
 			t.Fatalf("batch invocation args too short: %v", args)
 		}
+	}
+	if got := atomic.LoadInt32(&maxActive); got < 2 {
+		t.Fatalf("max concurrent batch invocations = %d, want at least 2", got)
 	}
 }
 
