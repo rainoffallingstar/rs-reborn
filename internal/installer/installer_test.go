@@ -669,6 +669,42 @@ func TestCanBatchInstallRepoPackagesRejectsSpecialFixupPackagesOnly(t *testing.T
 	}
 }
 
+func TestSplitBatchInstallableRepoPackagesKeepsBatchableSubset(t *testing.T) {
+	inst := nativeInstaller{
+		planned: map[string]plannedPackage{
+			"cli": {
+				Name:   "cli",
+				Source: sourceCRAN,
+				Repo:   &repoRecord{Name: "cli", Source: sourceCRAN},
+			},
+			"digest": {
+				Name:   "digest",
+				Source: sourceCRAN,
+				Repo:   &repoRecord{Name: "digest", Source: sourceCRAN, NeedsCompilation: true},
+			},
+			"haven": {
+				Name:   "haven",
+				Source: sourceCRAN,
+				Repo:   &repoRecord{Name: "haven", Source: sourceCRAN},
+			},
+			"glue": {
+				Name:   "glue",
+				Source: sourceCRAN,
+				Repo:   &repoRecord{Name: "glue", Source: sourceCRAN},
+			},
+		},
+		installedPackages: map[string]installedPackage{},
+	}
+
+	batchable, remainder := inst.splitBatchInstallableRepoPackages([]string{"cli", "haven", "digest", "glue"})
+	if !reflect.DeepEqual(batchable, []string{"cli", "digest", "glue"}) {
+		t.Fatalf("batchable = %v", batchable)
+	}
+	if !reflect.DeepEqual(remainder, []string{"haven"}) {
+		t.Fatalf("remainder = %v", remainder)
+	}
+}
+
 func TestPrepareInstallTargetPatchesEncodingMakevarsInTarball(t *testing.T) {
 	dir := t.TempDir()
 	prefix := filepath.Join(dir, "prefix")

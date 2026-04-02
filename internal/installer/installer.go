@@ -1357,12 +1357,33 @@ func (i *nativeInstaller) applyPrefetchedRepoDescription(name string, desc descr
 }
 
 func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) {
-	if len(names) > 1 && i.canBatchInstallRepoPackages(names) {
-		installed, err := i.installRepoPackageBatch(names)
-		if err != nil {
-			return nil, err
-		}
-		if len(installed) > 0 {
+	if len(names) > 1 {
+		batchable, remainder := i.splitBatchInstallableRepoPackages(names)
+		if len(batchable) > 1 {
+			batchInstalled, err := i.installRepoPackageBatch(batchable)
+			if err != nil {
+				return nil, err
+			}
+			if len(remainder) == 0 {
+				return batchInstalled, nil
+			}
+			restInstalled, err := i.installPackageBatch(remainder)
+			if err != nil {
+				return nil, err
+			}
+			installedSet := make(map[string]struct{}, len(batchInstalled)+len(restInstalled))
+			for _, name := range batchInstalled {
+				installedSet[name] = struct{}{}
+			}
+			for _, name := range restInstalled {
+				installedSet[name] = struct{}{}
+			}
+			installed := make([]string, 0, len(installedSet))
+			for _, name := range names {
+				if _, ok := installedSet[name]; ok {
+					installed = append(installed, name)
+				}
+			}
 			return installed, nil
 		}
 	}
@@ -1372,15 +1393,6 @@ func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) 
 func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers int) ([]string, error) {
 	if len(names) == 0 {
 		return nil, nil
-	}
-	if len(names) > 1 && i.canBatchInstallRepoPackages(names) {
-		installed, err := i.installRepoPackageBatch(names)
-		if err != nil {
-			return nil, err
-		}
-		if len(installed) > 0 {
-			return installed, nil
-		}
 	}
 	if len(names) == 1 {
 		installed, err := i.installPlannedPackageWithJobs(names[0], 0)
@@ -2225,19 +2237,45 @@ func (i *nativeInstaller) canBatchInstallRepoPackages(names []string) bool {
 		return false
 	}
 	for _, name := range names {
-		pkg, ok := i.planned[name]
-		if !ok || i.isPlannedPackageInstalled(pkg) {
+		if !i.isBatchInstallableRepoPackage(name) {
 			return false
 		}
-		if pkg.Source != sourceCRAN && pkg.Source != sourceBioconductor {
-			return false
+	}
+	return true
+}
+
+func (i *nativeInstaller) splitBatchInstallableRepoPackages(names []string) ([]string, []string) {
+	if len(names) == 0 {
+		return nil, nil
+	}
+	batchable := make([]string, 0, len(names))
+	remainder := make([]string, 0, len(names))
+	for _, name := range names {
+		if i.isBatchInstallableRepoPackage(name) {
+			batchable = append(batchable, name)
+			continue
 		}
-		if pkg.Repo == nil {
-			return false
-		}
-		if len(toolchainenv.NativeCategoriesForPackages([]string{name})) > 0 {
-			return false
-		}
+		remainder = append(remainder, name)
+	}
+	if len(batchable) < 2 {
+		return nil, names
+	}
+	return batchable, remainder
+}
+
+func (i *nativeInstaller) isBatchInstallableRepoPackage(name string) bool {
+	pkg, ok := i.planned[name]
+	if !ok || i.isPlannedPackageInstalled(pkg) {
+		return false
+	}
+	if pkg.Source != sourceCRAN && pkg.Source != sourceBioconductor {
+		return false
+	}
+	if pkg.Repo == nil {
+		return false
+	}
+	if len(toolchainenv.NativeCategoriesForPackages([]string{name})) > 0 {
+		return false
 	}
 	return true
 }
