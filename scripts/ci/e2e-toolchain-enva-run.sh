@@ -34,6 +34,10 @@ cat >"$MANAGED_RSCRIPT" <<'EOF'
 set -euo pipefail
 if [[ "${1:-}" == "-e" ]]; then
   expr="${2:-}"
+  if [[ "$expr" == *'cat(file.path(R.home("bin"), "R"))'* ]] || [[ "$expr" == *'cat(file.path(R.home("bin"), "R.exe"))'* ]]; then
+    printf '%s\n4.5.3' "$(dirname "$0")/R"
+    exit 0
+  fi
   if [[ "$expr" == *"cat(as.character(getRversion()))"* ]]; then
     printf '4.5.3'
     exit 0
@@ -56,6 +60,11 @@ printf 'pkg-config-path=%s\n' "$(command -v pkg-config || true)"
 printf 'script=%s\n' "${1:-}"
 EOF
 chmod +x "$MANAGED_RSCRIPT"
+cat >"$MANAGED_ROOT/bin/R" <<'EOF'
+#!/usr/bin/env bash
+printf 'managed-R-binary\n'
+EOF
+chmod +x "$MANAGED_ROOT/bin/R"
 printf '%s\n' "$MANAGED_ROOT" >"$RS_HOME_DIR/r/current"
 
 echo "==> preparing fake enva and micromamba executables"
