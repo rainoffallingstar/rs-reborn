@@ -15,6 +15,18 @@ const defaultTailLines = 120
 
 var progressIsTTY = isTTY
 var progressHeartbeatInterval = 15 * time.Second
+var ttyProgressSessionMu sync.Mutex
+
+type RunOptions struct {
+	SuppressTTYSuccess bool
+	NonTTYStartDelay   time.Duration
+	NonTTYHeartbeat    time.Duration
+}
+
+type CopyOptions struct {
+	NonTTYStartDelay time.Duration
+	NonTTYHeartbeat  time.Duration
+}
 
 type lockedBuffer struct {
 	mu  sync.Mutex
@@ -38,6 +50,11 @@ func Stage(w io.Writer, label string) {
 		return
 	}
 	if progressIsTTY(w) {
+		release, claimed := tryAcquireTTYProgressSession(w)
+		if !claimed {
+			return
+		}
+		defer release()
 		fmt.Fprintf(w, "[rs] %s\n", label)
 		return
 	}
@@ -45,11 +62,22 @@ func Stage(w io.Writer, label string) {
 }
 
 func Run(cmd *exec.Cmd, label string, progress io.Writer, errors io.Writer) error {
+	return RunWithOptions(cmd, label, progress, errors, RunOptions{})
+}
+
+func RunWithOptions(cmd *exec.Cmd, label string, progress io.Writer, errors io.Writer, opts RunOptions) error {
 	if progress == nil {
 		progress = io.Discard
 	}
 	if errors == nil {
 		errors = progress
+	}
+	animatedProgress := progress
+	releaseTTY, claimedTTY := tryAcquireTTYProgressSession(progress)
+	if claimedTTY {
+		defer releaseTTY()
+	} else if progressIsTTY(progress) {
+		animatedProgress = io.Discard
 	}
 
 	buffer := &lockedBuffer{}
@@ -58,7 +86,7 @@ func Run(cmd *exec.Cmd, label string, progress io.Writer, errors io.Writer) erro
 
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go animate(progress, label, stop, done)
+	go animate(animatedProgress, label, stop, done, opts)
 
 	err := cmd.Run()
 	close(stop)
@@ -68,18 +96,34 @@ func Run(cmd *exec.Cmd, label string, progress io.Writer, errors io.Writer) erro
 		writeFailure(errors, label, buffer.String())
 		return err
 	}
-	writeSuccess(progress, label)
+	if opts.SuppressTTYSuccess && progressIsTTY(animatedProgress) {
+		clearTTYLine(animatedProgress)
+		return nil
+	}
+	writeSuccess(animatedProgress, label)
 	return nil
 }
 
 func Copy(dst io.Writer, src io.Reader, size int64, label string, progress io.Writer) error {
+	return CopyWithOptions(dst, src, size, label, progress, CopyOptions{})
+}
+
+func CopyWithOptions(dst io.Writer, src io.Reader, size int64, label string, progress io.Writer, opts CopyOptions) error {
 	if progress == nil {
 		progress = io.Discard
 	}
+	animatedProgress := progress
+	releaseTTY, claimedTTY := tryAcquireTTYProgressSession(progress)
+	if claimedTTY {
+		defer releaseTTY()
+	} else if progressIsTTY(progress) {
+		animatedProgress = io.Discard
+	}
 	pw := &progressWriter{
 		label:    label,
-		progress: progress,
+		progress: animatedProgress,
 		total:    size,
+		opts:     opts,
 	}
 	stop := make(chan struct{})
 	done := make(chan struct{})
@@ -94,7 +138,7 @@ func Copy(dst io.Writer, src io.Reader, size int64, label string, progress io.Wr
 	return nil
 }
 
-func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct{}) {
+func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct{}, opts RunOptions) {
 	defer close(done)
 	if w == nil || w == io.Discard || label == "" {
 		<-stop
@@ -102,14 +146,41 @@ func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct
 	}
 	start := time.Now()
 	if !progressIsTTY(w) {
-		fmt.Fprintf(w, "[rs] %s...\n", label)
-		ticker := time.NewTicker(progressHeartbeatInterval)
-		defer ticker.Stop()
+		delay := opts.NonTTYStartDelay
+		heartbeat := nonTTYHeartbeatInterval(opts)
+		var delayTimer *time.Timer
+		var ticker *time.Ticker
+		defer func() {
+			if delayTimer != nil {
+				delayTimer.Stop()
+			}
+			if ticker != nil {
+				ticker.Stop()
+			}
+		}()
+		if delay > 0 {
+			delayTimer = time.NewTimer(delay)
+		} else {
+			fmt.Fprintf(w, "[rs] %s...\n", label)
+			ticker = time.NewTicker(heartbeat)
+		}
 		for {
+			var delayC <-chan time.Time
+			var tickerC <-chan time.Time
+			if delayTimer != nil {
+				delayC = delayTimer.C
+			}
+			if ticker != nil {
+				tickerC = ticker.C
+			}
 			select {
 			case <-stop:
 				return
-			case <-ticker.C:
+			case <-delayC:
+				fmt.Fprintf(w, "[rs] %s...\n", label)
+				ticker = time.NewTicker(heartbeat)
+				delayTimer = nil
+			case <-tickerC:
 				fmt.Fprintf(w, "[rs] %s (%s elapsed)\n", label, formatElapsed(time.Since(start)))
 			}
 		}
@@ -187,6 +258,7 @@ type progressWriter struct {
 	total    int64
 	label    string
 	progress io.Writer
+	opts     CopyOptions
 }
 
 func (w *progressWriter) Write(p []byte) (int, error) {
@@ -204,14 +276,41 @@ func (w *progressWriter) animate(stop <-chan struct{}, done chan<- struct{}) {
 	}
 	start := time.Now()
 	if !progressIsTTY(w.progress) {
-		fmt.Fprintf(w.progress, "[rs] %s...\n", w.label)
-		ticker := time.NewTicker(progressHeartbeatInterval)
-		defer ticker.Stop()
+		delay := w.opts.NonTTYStartDelay
+		heartbeat := copyNonTTYHeartbeatInterval(w.opts)
+		var delayTimer *time.Timer
+		var ticker *time.Ticker
+		defer func() {
+			if delayTimer != nil {
+				delayTimer.Stop()
+			}
+			if ticker != nil {
+				ticker.Stop()
+			}
+		}()
+		if delay > 0 {
+			delayTimer = time.NewTimer(delay)
+		} else {
+			fmt.Fprintf(w.progress, "[rs] %s...\n", w.label)
+			ticker = time.NewTicker(heartbeat)
+		}
 		for {
+			var delayC <-chan time.Time
+			var tickerC <-chan time.Time
+			if delayTimer != nil {
+				delayC = delayTimer.C
+			}
+			if ticker != nil {
+				tickerC = ticker.C
+			}
 			select {
 			case <-stop:
 				return
-			case <-ticker.C:
+			case <-delayC:
+				fmt.Fprintf(w.progress, "[rs] %s...\n", w.label)
+				ticker = time.NewTicker(heartbeat)
+				delayTimer = nil
+			case <-tickerC:
 				fmt.Fprintf(w.progress, "[rs] %s (%s elapsed)\n", w.label, formatElapsed(time.Since(start)))
 			}
 		}
@@ -257,6 +356,42 @@ func writeTTYLine(w io.Writer, line string) {
 
 func clearTTYLine(w io.Writer) {
 	fmt.Fprint(w, "\r\033[2K")
+}
+
+func acquireTTYProgressSession(w io.Writer) func() {
+	if w == nil || w == io.Discard || !progressIsTTY(w) {
+		return func() {}
+	}
+	ttyProgressSessionMu.Lock()
+	return func() {
+		ttyProgressSessionMu.Unlock()
+	}
+}
+
+func tryAcquireTTYProgressSession(w io.Writer) (func(), bool) {
+	if w == nil || w == io.Discard || !progressIsTTY(w) {
+		return func() {}, false
+	}
+	if !ttyProgressSessionMu.TryLock() {
+		return func() {}, false
+	}
+	return func() {
+		ttyProgressSessionMu.Unlock()
+	}, true
+}
+
+func nonTTYHeartbeatInterval(opts RunOptions) time.Duration {
+	if opts.NonTTYHeartbeat > 0 {
+		return opts.NonTTYHeartbeat
+	}
+	return progressHeartbeatInterval
+}
+
+func copyNonTTYHeartbeatInterval(opts CopyOptions) time.Duration {
+	if opts.NonTTYHeartbeat > 0 {
+		return opts.NonTTYHeartbeat
+	}
+	return progressHeartbeatInterval
 }
 
 func humanBytes(n int64) string {

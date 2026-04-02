@@ -802,6 +802,17 @@ func compactStrings(values []string) []string {
 	return out
 }
 
+func previewStrings(values []string, max int) string {
+	if len(values) == 0 {
+		return "<none>"
+	}
+	if max <= 0 || len(values) <= max {
+		return strings.Join(values, ", ")
+	}
+	head := append([]string(nil), values[:max]...)
+	return fmt.Sprintf("%s, +%d more", strings.Join(head, ", "), len(values)-max)
+}
+
 type DoctorError struct {
 	Issues []string
 	Code   int
@@ -1452,41 +1463,41 @@ func List(opts ListOptions) error {
 	if len(report.DetectedDeps) == 0 {
 		fmt.Fprintln(opts.Stdout, "detected packages: <none>")
 	} else {
-		fmt.Fprintf(opts.Stdout, "detected packages: %s\n", strings.Join(report.DetectedDeps, ", "))
+		fmt.Fprintf(opts.Stdout, "detected packages: %s\n", previewStrings(report.DetectedDeps, 8))
 	}
 	if len(report.CRANDeps) == 0 {
 		fmt.Fprintln(opts.Stdout, "cran packages: <none>")
 	} else {
-		fmt.Fprintf(opts.Stdout, "cran packages: %s\n", strings.Join(report.CRANDeps, ", "))
+		fmt.Fprintf(opts.Stdout, "cran packages: %s\n", previewStrings(report.CRANDeps, 8))
 	}
 	if len(report.BiocDeps) == 0 {
 		fmt.Fprintln(opts.Stdout, "bioconductor packages: <none>")
 	} else {
-		fmt.Fprintf(opts.Stdout, "bioconductor packages: %s\n", strings.Join(report.BiocDeps, ", "))
+		fmt.Fprintf(opts.Stdout, "bioconductor packages: %s\n", previewStrings(report.BiocDeps, 8))
 	}
 	if len(report.IncludedCRAN) == 0 && len(report.IncludedBioc) == 0 {
 		fmt.Fprintln(opts.Stdout, "included packages: <none>")
 	} else {
 		parts := []string{}
 		if len(report.IncludedCRAN) > 0 {
-			parts = append(parts, "CRAN="+strings.Join(report.IncludedCRAN, ", "))
+			parts = append(parts, "CRAN="+previewStrings(report.IncludedCRAN, 6))
 		}
 		if len(report.IncludedBioc) > 0 {
-			parts = append(parts, "Bioconductor="+strings.Join(report.IncludedBioc, ", "))
+			parts = append(parts, "Bioconductor="+previewStrings(report.IncludedBioc, 6))
 		}
 		fmt.Fprintf(opts.Stdout, "included packages: %s\n", strings.Join(parts, " | "))
 	}
 	if len(report.ExcludedDeps) == 0 {
 		fmt.Fprintln(opts.Stdout, "excluded packages: <none>")
 	} else {
-		fmt.Fprintf(opts.Stdout, "excluded packages: %s\n", strings.Join(report.ExcludedDeps, ", "))
+		fmt.Fprintf(opts.Stdout, "excluded packages: %s\n", previewStrings(report.ExcludedDeps, 8))
 	}
 	if len(report.CustomSources) == 0 {
 		fmt.Fprintln(opts.Stdout, "custom sources: <none>")
 		return nil
 	}
 
-	fmt.Fprintf(opts.Stdout, "custom sources: %s\n", strings.Join(sourceSummary(plan.SourceDeps), ", "))
+	fmt.Fprintf(opts.Stdout, "custom sources: %s\n", previewStrings(sourceSummary(plan.SourceDeps), 6))
 	for _, source := range report.CustomSources {
 		fmt.Fprintf(opts.Stdout, "source %s: type=%s", source.Package, source.Type)
 		switch source.Type {
@@ -2022,17 +2033,17 @@ func Doctor(opts DoctorOptions) error {
 			if len(plan.DetectedDeps) == 0 {
 				fmt.Fprintln(opts.Stdout, "[info] detected packages: <none>")
 			} else {
-				fmt.Fprintf(opts.Stdout, "[info] detected packages: %s\n", strings.Join(plan.DetectedDeps, ", "))
+				fmt.Fprintf(opts.Stdout, "[info] detected packages: %s\n", previewStrings(plan.DetectedDeps, 8))
 			}
 			if len(plan.CRANDeps) == 0 {
 				fmt.Fprintln(opts.Stdout, "[info] resolved CRAN packages: <none>")
 			} else {
-				fmt.Fprintf(opts.Stdout, "[info] resolved CRAN packages: %s\n", strings.Join(plan.CRANDeps, ", "))
+				fmt.Fprintf(opts.Stdout, "[info] resolved CRAN packages: %s\n", previewStrings(plan.CRANDeps, 8))
 			}
 			if len(plan.BiocDeps) == 0 {
 				fmt.Fprintln(opts.Stdout, "[info] resolved Bioconductor packages: <none>")
 			} else {
-				fmt.Fprintf(opts.Stdout, "[info] resolved Bioconductor packages: %s\n", strings.Join(plan.BiocDeps, ", "))
+				fmt.Fprintf(opts.Stdout, "[info] resolved Bioconductor packages: %s\n", previewStrings(plan.BiocDeps, 8))
 			}
 			if len(plan.ToolchainPrefixes) == 0 {
 				fmt.Fprintln(opts.Stdout, "[info] toolchain prefixes: <none>")
@@ -2051,7 +2062,7 @@ func Doctor(opts DoctorOptions) error {
 			if len(plan.SourceDeps) == 0 {
 				fmt.Fprintln(opts.Stdout, "[info] resolved custom sources: <none>")
 			} else {
-				fmt.Fprintf(opts.Stdout, "[info] resolved custom sources: %s\n", strings.Join(sourceSummary(plan.SourceDeps), ", "))
+				fmt.Fprintf(opts.Stdout, "[info] resolved custom sources: %s\n", previewStrings(sourceSummary(plan.SourceDeps), 6))
 				if opts.Verbose {
 					for _, name := range sourceDepNames(plan.SourceDeps) {
 						spec := plan.SourceDeps[name]
@@ -2197,25 +2208,23 @@ func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDe
 		return dependencyPlan{}, fmt.Errorf("%s is a directory, expected an R script", scriptPath)
 	}
 
-	progresscmd.Stage(progress, "discovering project config")
+	stageRunnerPreparation(progress)
 	projectCfg, _, err := project.Discover(filepath.Dir(scriptPath))
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("discover project config: %w", err)
 	}
-	progresscmd.Stage(progress, "resolving script configuration")
 	scriptCfg, err := projectCfg.ResolveForScript(scriptPath)
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("resolve script config: %w", err)
 	}
 
 	repo := firstNonEmpty(repoOverride, scriptCfg.Repo, "https://cloud.r-project.org")
-	progresscmd.Stage(progress, "scanning script dependencies")
 	selection := resolveInterpreterSelection(rscriptOverride, scriptCfg.Rscript, scriptCfg.RVersion, filepath.Dir(scriptPath), io.Discard, false)
 	detectedDeps, err := ScanScript(scriptPath)
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("scan script: %w", err)
 	}
-	progresscmd.Stage(progress, "resolving interpreter and managed library plan")
+	stageRunnerInterpreterResolution(progress, true)
 	cranDeps, biocDeps := resolveManagedPackageSets(detectedDeps, scriptCfg.Packages, scriptCfg.BiocPackages, extraDeps, extraBiocDeps, excludeDeps)
 	sourceDeps := selectSourceDeps(scriptCfg.Sources, cranDeps, biocDeps)
 	cranDeps = filterManagedDeps(cranDeps, sourceDeps, biocDeps)
@@ -4425,13 +4434,12 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		opts.Stderr = os.Stderr
 	}
 
-	progresscmd.Stage(opts.Stderr, "discovering project config")
+	stageRunnerPreparation(opts.Stderr)
 	projectCfg, _, err := project.Discover(filepath.Dir(opts.ScriptPath))
 	if err != nil {
 		return ResolvedEnvironment{}, fmt.Errorf("discover project config: %w", err)
 	}
 
-	progresscmd.Stage(opts.Stderr, "resolving script configuration")
 	scriptCfg, err := projectCfg.ResolveForScript(opts.ScriptPath)
 	if err != nil {
 		return ResolvedEnvironment{}, fmt.Errorf("resolve script config: %w", err)
@@ -4439,7 +4447,6 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 
 	repo := firstNonEmpty(opts.Repo, scriptCfg.Repo, "https://cloud.r-project.org")
 
-	progresscmd.Stage(opts.Stderr, "scanning script dependencies")
 	detectedDeps, err := ScanScript(opts.ScriptPath)
 	if err != nil {
 		return ResolvedEnvironment{}, fmt.Errorf("scan script: %w", err)
@@ -4465,7 +4472,7 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		lockfilePath = defaultLockfilePath(projectCfg.RootDir, opts.ScriptPath)
 	}
 
-	progresscmd.Stage(opts.Stderr, "resolving interpreter and managed library")
+	stageRunnerInterpreterResolution(opts.Stderr, false)
 	selection := resolveInterpreterSelection(opts.RscriptPath, scriptCfg.Rscript, scriptCfg.RVersion, filepath.Dir(opts.ScriptPath), opts.Stderr, opts.AutoInstallR)
 	if selection.Issue != nil {
 		return ResolvedEnvironment{}, selection.Issue
@@ -4512,6 +4519,18 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 	}
 
 	return env, nil
+}
+
+func stageRunnerPreparation(progress io.Writer) {
+	progresscmd.Stage(progress, "preparing project and dependencies")
+}
+
+func stageRunnerInterpreterResolution(progress io.Writer, planning bool) {
+	if planning {
+		progresscmd.Stage(progress, "planning interpreter and managed library")
+		return
+	}
+	progresscmd.Stage(progress, "resolving interpreter and managed library")
 }
 
 func resolveCacheRoot(override string) (string, error) {
@@ -4708,10 +4727,10 @@ func printAppliedAdjustments(w io.Writer, prefix string, includeCRAN, includeBio
 	} else {
 		parts := []string{}
 		if len(includeCRAN) > 0 {
-			parts = append(parts, "CRAN="+strings.Join(includeCRAN, ", "))
+			parts = append(parts, "CRAN="+previewStrings(includeCRAN, 6))
 		}
 		if len(includeBioc) > 0 {
-			parts = append(parts, "Bioconductor="+strings.Join(includeBioc, ", "))
+			parts = append(parts, "Bioconductor="+previewStrings(includeBioc, 6))
 		}
 		fmt.Fprintf(w, "%sincluded packages: %s\n", prefix, strings.Join(parts, " | "))
 	}
@@ -4719,7 +4738,7 @@ func printAppliedAdjustments(w io.Writer, prefix string, includeCRAN, includeBio
 		fmt.Fprintf(w, "%sexcluded packages: <none>\n", prefix)
 		return
 	}
-	fmt.Fprintf(w, "%sexcluded packages: %s\n", prefix, strings.Join(excluded, ", "))
+	fmt.Fprintf(w, "%sexcluded packages: %s\n", prefix, previewStrings(excluded, 8))
 }
 
 func EnsureInstalled(env ResolvedEnvironment) error {
@@ -4832,6 +4851,7 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 		CacheRoot:   env.CacheRoot,
 		LibraryPath: env.LibraryPath,
 		Repo:        env.Repo,
+		Verbose:     env.Verbose,
 		Environment: toolchainenv.ApplyWithPlan(
 			os.Environ(),
 			effectivePrefixes,
@@ -5741,48 +5761,50 @@ func printEnvironment(env ResolvedEnvironment) {
 		effectivePrefixes = env.ToolchainPrefixes
 		effectivePkgConfig = env.PkgConfigPath
 	}
-	fmt.Fprintf(env.Stderr, "[rs] script: %s\n", env.ScriptPath)
+	scriptParts := []string{env.ScriptPath}
 	if env.ProjectConfig.Path != "" {
-		fmt.Fprintf(env.Stderr, "[rs] project config: %s\n", env.ProjectConfig.Path)
+		scriptParts = append(scriptParts, "project="+env.ProjectConfig.Path)
 	}
 	if env.ScriptConfig.ScriptKey != "" {
-		fmt.Fprintf(env.Stderr, "[rs] script profile: %s\n", env.ScriptConfig.ScriptKey)
+		scriptParts = append(scriptParts, "profile="+env.ScriptConfig.ScriptKey)
 	}
-	fmt.Fprintf(env.Stderr, "[rs] interpreter: %s\n", env.Interpreter)
-	fmt.Fprintf(env.Stderr, "[rs] library: %s\n", env.LibraryPath)
-	fmt.Fprintf(env.Stderr, "[rs] lockfile: %s\n", env.LockfilePath)
+	fmt.Fprintf(env.Stderr, "[rs] script: %s\n", strings.Join(scriptParts, " | "))
+
+	fmt.Fprintf(env.Stderr, "[rs] runtime: interpreter=%s | library=%s | lockfile=%s\n", env.Interpreter, env.LibraryPath, env.LockfilePath)
+
+	toolchainParts := []string{}
 	if detectedToolchain != nil {
-		fmt.Fprintf(env.Stderr, "[rs] auto-detected toolchain preset: %s\n", detectedToolchain.Preset)
+		toolchainParts = append(toolchainParts, "preset="+detectedToolchain.Preset)
 	}
-	if len(effectivePrefixes) == 0 {
-		fmt.Fprintln(env.Stderr, "[rs] toolchain prefixes: <none>")
-	} else {
-		fmt.Fprintf(env.Stderr, "[rs] toolchain prefixes: %s\n", strings.Join(effectivePrefixes, ", "))
+	toolchainParts = append(toolchainParts, fmt.Sprintf("prefixes=%d", len(effectivePrefixes)))
+	toolchainParts = append(toolchainParts, fmt.Sprintf("pkg-config=%d", len(effectivePkgConfig)))
+	fmt.Fprintf(env.Stderr, "[rs] toolchain: %s\n", strings.Join(toolchainParts, " | "))
+	if len(effectivePrefixes) > 0 {
+		fmt.Fprintf(env.Stderr, "[rs] toolchain prefixes: %s\n", previewStrings(effectivePrefixes, 4))
 	}
-	if len(effectivePkgConfig) == 0 {
-		fmt.Fprintln(env.Stderr, "[rs] pkg-config path: <none>")
-	} else {
-		fmt.Fprintf(env.Stderr, "[rs] pkg-config path: %s\n", strings.Join(effectivePkgConfig, ", "))
+	if len(effectivePkgConfig) > 0 {
+		fmt.Fprintf(env.Stderr, "[rs] pkg-config path: %s\n", previewStrings(effectivePkgConfig, 4))
 	}
-	if len(env.DetectedDeps) == 0 {
-		fmt.Fprintln(env.Stderr, "[rs] detected packages: <none>")
-	} else {
-		fmt.Fprintf(env.Stderr, "[rs] detected packages: %s\n", strings.Join(env.DetectedDeps, ", "))
+
+	fmt.Fprintf(
+		env.Stderr,
+		"[rs] packages: detected=%d | cran=%d | bioc=%d | sources=%d\n",
+		len(env.DetectedDeps),
+		len(env.CRANDeps),
+		len(env.BiocDeps),
+		len(env.SourceDeps),
+	)
+	if len(env.DetectedDeps) > 0 {
+		fmt.Fprintf(env.Stderr, "[rs] detected packages: %s\n", previewStrings(env.DetectedDeps, 8))
 	}
-	if len(env.CRANDeps) == 0 {
-		fmt.Fprintln(env.Stderr, "[rs] resolved CRAN packages: <none>")
-	} else {
-		fmt.Fprintf(env.Stderr, "[rs] resolved CRAN packages: %s\n", strings.Join(env.CRANDeps, ", "))
+	if len(env.CRANDeps) > 0 {
+		fmt.Fprintf(env.Stderr, "[rs] resolved CRAN packages: %s\n", previewStrings(env.CRANDeps, 8))
 	}
-	if len(env.BiocDeps) == 0 {
-		fmt.Fprintln(env.Stderr, "[rs] resolved Bioconductor packages: <none>")
-	} else {
-		fmt.Fprintf(env.Stderr, "[rs] resolved Bioconductor packages: %s\n", strings.Join(env.BiocDeps, ", "))
+	if len(env.BiocDeps) > 0 {
+		fmt.Fprintf(env.Stderr, "[rs] resolved Bioconductor packages: %s\n", previewStrings(env.BiocDeps, 8))
 	}
-	if len(env.SourceDeps) == 0 {
-		fmt.Fprintln(env.Stderr, "[rs] resolved custom sources: <none>")
-	} else {
-		fmt.Fprintf(env.Stderr, "[rs] resolved custom sources: %s\n", strings.Join(sourceSummary(env.SourceDeps), ", "))
+	if len(env.SourceDeps) > 0 {
+		fmt.Fprintf(env.Stderr, "[rs] resolved custom sources: %s\n", previewStrings(sourceSummary(env.SourceDeps), 6))
 	}
 }
 

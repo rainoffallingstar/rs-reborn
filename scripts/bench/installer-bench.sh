@@ -6,7 +6,7 @@ TMP_BASE="${TMPDIR:-/tmp}"
 OUT_DIR="${RS_BENCH_OUT:-${TMP_BASE%/}/rs-installer-bench}"
 GO_CACHE_DIR="${RS_BENCH_GOCACHE:-${TMPDIR:-/tmp}/rs-go-build}"
 PKG="./internal/installer"
-BENCH_RE='^Benchmark(LoadInstalledPackageFromLibraryStoreStateFastPath|FindReusablePackagesInLibrary|DiscoverReusablePackagesInLibraries|PrefetchPlannedPackagesCachedArtifacts)$'
+BENCH_RE='^Benchmark(LoadInstalledPackageFromLibraryStoreStateFastPath|FindReusablePackagesInLibrary|DiscoverReusablePackagesInLibraries|PrefetchPlannedPackagesCachedArtifacts|InstallPlanLayersLargeGraph|SplitRepoBatchChunksLargeBatch|FormatSlowInstallSummary)$'
 PROFILE_BENCH='^BenchmarkPrefetchPlannedPackagesCachedArtifacts$'
 
 usage() {

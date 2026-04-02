@@ -8,6 +8,12 @@ on:
       - "codex/**"
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_benchmarks:
+        description: "Run optional performance benchmark job"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -520,6 +526,49 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: ./scripts/ci/e2e-r-manager.ps1
+
+  benchmarks:
+    name: Benchmarks (Optional)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_benchmarks }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create benchmark output directory
+        run: mkdir -p bench-out
+
+      - name: Capture benchmark baseline
+        env:
+          RS_BENCH_OUT: bench-out
+        run: bash scripts/bench/capture-baseline.sh
+
+      - name: Append benchmark summary
+        run: |
+          {
+            echo "## Benchmarks"
+            echo
+            cat bench-out/SUMMARY.md
+            if [ -f bench-out/DIFF.md ]; then
+              echo
+              cat bench-out/DIFF.md
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          path: bench-out/
 
   native-r-manager-source:
     name: Native R Manager Source

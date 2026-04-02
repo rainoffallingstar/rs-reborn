@@ -189,6 +189,72 @@ func BenchmarkPrefetchPlannedPackagesCachedArtifacts(b *testing.B) {
 	}
 }
 
+func BenchmarkInstallPlanLayersLargeGraph(b *testing.B) {
+	planned := make(map[string]plannedPackage, 512)
+	order := make([]string, 0, 512)
+	for i := 0; i < 512; i++ {
+		name := fmt.Sprintf("pkg%03d", i)
+		order = append(order, name)
+		deps := []packageRequirement{}
+		if i >= 1 {
+			deps = append(deps, packageRequirement{Name: fmt.Sprintf("pkg%03d", i-1)})
+		}
+		if i >= 8 {
+			deps = append(deps, packageRequirement{Name: fmt.Sprintf("pkg%03d", i-8)})
+		}
+		planned[name] = plannedPackage{
+			Name:    name,
+			Version: "1.0.0",
+			Source:  sourceCRAN,
+			Deps:    deps,
+		}
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		layers := installPlanLayers(planned, order)
+		if len(layers) == 0 {
+			b.Fatal("installPlanLayers() returned no layers")
+		}
+	}
+}
+
+func BenchmarkSplitRepoBatchChunksLargeBatch(b *testing.B) {
+	names := make([]string, 0, 256)
+	for i := 0; i < 256; i++ {
+		names = append(names, fmt.Sprintf("pkg%03d", i))
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		chunks := splitRepoBatchChunks(names, 8)
+		if len(chunks) == 0 {
+			b.Fatal("splitRepoBatchChunks() returned no chunks")
+		}
+	}
+}
+
+func BenchmarkFormatSlowInstallSummary(b *testing.B) {
+	entries := make([]installTiming, 0, 128)
+	for i := 0; i < 128; i++ {
+		entries = append(entries, installTiming{
+			label:    fmt.Sprintf("pkg%03d", i),
+			duration: time.Duration(45+i) * time.Second,
+		})
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		summary := formatSlowInstallSummary(entries, 4)
+		if summary == "" {
+			b.Fatal("formatSlowInstallSummary() returned empty summary")
+		}
+	}
+}
+
 func benchmarkTarGzBytes(b *testing.B, files map[string]string) []byte {
 	b.Helper()
 	var gzBuf bytes.Buffer

@@ -17,6 +17,7 @@ import (
 
 	"github.com/rainoffallingstar/rs-reborn/internal/installer"
 	"github.com/rainoffallingstar/rs-reborn/internal/lockfile"
+	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
 	"github.com/rainoffallingstar/rs-reborn/internal/project"
 	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
 	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
@@ -761,6 +762,7 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 		CacheRoot:   cacheRoot,
 		LibraryPath: t.TempDir(),
 		Repo:        "https://cloud.r-project.org",
+		Verbose:     true,
 		Runtime: RuntimeMetadata{
 			Interpreter:     "/tmp/Rscript",
 			RVersion:        "4.4.3",
@@ -775,6 +777,9 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 	}, io.Discard, io.Discard)
 	if err != nil {
 		t.Fatalf("installerRequestFromEnvironment() error = %v", err)
+	}
+	if !req.Verbose {
+		t.Fatal("req.Verbose = false, want true")
 	}
 	if req.CacheRoot != cacheRoot {
 		t.Fatalf("req.CacheRoot = %q, want %q", req.CacheRoot, cacheRoot)
@@ -793,6 +798,133 @@ func TestInstallerRequestFromEnvironmentCarriesToolchainEnv(t *testing.T) {
 	}
 	if !sawPrefix || !sawPkg {
 		t.Fatalf("Environment = %v", req.Environment)
+	}
+}
+
+func TestPrintEnvironmentSummarizesVerboseOutput(t *testing.T) {
+	var stderr bytes.Buffer
+	env := ResolvedEnvironment{
+		ScriptPath:    "/tmp/analysis.R",
+		Interpreter:   "/tmp/Rscript",
+		LibraryPath:   "/tmp/lib",
+		LockfilePath:  "/tmp/rs.lock.json",
+		DetectedDeps:  []string{"dplyr", "ggplot2"},
+		CRANDeps:      []string{"dplyr"},
+		BiocDeps:      []string{"Biostrings"},
+		SourceDeps:    map[string]project.SourceSpec{"mypkg": {Type: "github", Repo: "owner/repo", Ref: "main"}},
+		ProjectConfig: project.Config{Path: "/tmp/rs.toml"},
+		ScriptConfig:  project.ResolvedScriptConfig{ScriptKey: "default"},
+		Stderr:        &stderr,
+	}
+
+	printEnvironment(env)
+	out := stderr.String()
+	if !strings.Contains(out, "[rs] script: /tmp/analysis.R | project=/tmp/rs.toml | profile=default") {
+		t.Fatalf("printEnvironment() script summary = %q", out)
+	}
+	if !strings.Contains(out, "[rs] runtime: interpreter=/tmp/Rscript | library=/tmp/lib | lockfile=/tmp/rs.lock.json") {
+		t.Fatalf("printEnvironment() runtime summary = %q", out)
+	}
+	if !strings.Contains(out, "[rs] packages: detected=2 | cran=1 | bioc=1 | sources=1") {
+		t.Fatalf("printEnvironment() package summary = %q", out)
+	}
+	if !strings.Contains(out, "[rs] resolved custom sources: mypkg=github:owner/repo@main") {
+		t.Fatalf("printEnvironment() source summary = %q", out)
+	}
+}
+
+func TestPrintEnvironmentPreviewsLargePackageLists(t *testing.T) {
+	var stderr bytes.Buffer
+	env := ResolvedEnvironment{
+		ScriptPath:   "/tmp/analysis.R",
+		Interpreter:  "/tmp/Rscript",
+		LibraryPath:  "/tmp/lib",
+		LockfilePath: "/tmp/rs.lock.json",
+		DetectedDeps: []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"},
+		CRANDeps:     []string{"a", "b", "c", "d", "e", "f", "g", "h", "i"},
+		BiocDeps:     []string{"A", "B", "C", "D", "E", "F", "G", "H", "I"},
+		SourceDeps: map[string]project.SourceSpec{
+			"pkg1": {Type: "github", Repo: "owner/one"},
+			"pkg2": {Type: "github", Repo: "owner/two"},
+			"pkg3": {Type: "github", Repo: "owner/three"},
+			"pkg4": {Type: "github", Repo: "owner/four"},
+			"pkg5": {Type: "github", Repo: "owner/five"},
+			"pkg6": {Type: "github", Repo: "owner/six"},
+			"pkg7": {Type: "github", Repo: "owner/seven"},
+		},
+		Stderr: &stderr,
+	}
+
+	printEnvironment(env)
+	out := stderr.String()
+	if !strings.Contains(out, "[rs] detected packages: a, b, c, d, e, f, g, h, +2 more") {
+		t.Fatalf("printEnvironment() detected preview = %q", out)
+	}
+	if !strings.Contains(out, "[rs] resolved CRAN packages: a, b, c, d, e, f, g, h, +1 more") {
+		t.Fatalf("printEnvironment() cran preview = %q", out)
+	}
+	if !strings.Contains(out, "[rs] resolved Bioconductor packages: A, B, C, D, E, F, G, H, +1 more") {
+		t.Fatalf("printEnvironment() bioc preview = %q", out)
+	}
+	if !strings.Contains(out, "[rs] resolved custom sources: pkg1=github:owner/one, pkg2=github:owner/two, pkg3=github:owner/three, pkg4=github:owner/four, pkg5=github:owner/five, pkg6=github:owner/six, +1 more") {
+		t.Fatalf("printEnvironment() source preview = %q", out)
+	}
+}
+
+func TestPrintEnvironmentPreviewsLongToolchainLists(t *testing.T) {
+	var stderr bytes.Buffer
+	env := ResolvedEnvironment{
+		ScriptPath:        "/tmp/analysis.R",
+		Interpreter:       "/tmp/Rscript",
+		LibraryPath:       "/tmp/lib",
+		LockfilePath:      "/tmp/rs.lock.json",
+		ToolchainPrefixes: []string{"/p1", "/p2", "/p3", "/p4", "/p5"},
+		PkgConfigPath:     []string{"/pc1", "/pc2", "/pc3", "/pc4", "/pc5"},
+		Stderr:            &stderr,
+	}
+
+	printEnvironment(env)
+	out := stderr.String()
+	if !strings.Contains(out, "[rs] toolchain prefixes: /p1, /p2, /p3, /p4, +1 more") {
+		t.Fatalf("printEnvironment() toolchain prefix preview = %q", out)
+	}
+	if !strings.Contains(out, "[rs] pkg-config path: /pc1, /pc2, /pc3, /pc4, +1 more") {
+		t.Fatalf("printEnvironment() pkg-config preview = %q", out)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("printEnvironment() line budget = %d, want 6:\n%s", len(lines), out)
+	}
+}
+
+func TestRunnerStageSequenceStaysCompact(t *testing.T) {
+	var stderr bytes.Buffer
+	stageRunnerPreparation(&stderr)
+	stageRunnerInterpreterResolution(&stderr, false)
+	progresscmd.Stage(&stderr, "recording lockfile")
+	progresscmd.Stage(&stderr, "launching script")
+
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	want := []string{
+		"[rs] preparing project and dependencies...",
+		"[rs] resolving interpreter and managed library...",
+		"[rs] recording lockfile...",
+		"[rs] launching script...",
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Fatalf("runner stage sequence = %v, want %v", lines, want)
+	}
+}
+
+func TestPreviewStrings(t *testing.T) {
+	if got := previewStrings(nil, 8); got != "<none>" {
+		t.Fatalf("previewStrings(nil) = %q, want <none>", got)
+	}
+	if got := previewStrings([]string{"a", "b"}, 8); got != "a, b" {
+		t.Fatalf("previewStrings(short) = %q", got)
+	}
+	if got := previewStrings([]string{"a", "b", "c", "d"}, 3); got != "a, b, c, +1 more" {
+		t.Fatalf("previewStrings(truncated) = %q", got)
 	}
 }
 
@@ -2540,6 +2672,57 @@ func TestListJSONOutputIncludesAppliedAdjustments(t *testing.T) {
 	}
 	if !reflect.DeepEqual(report.ExcludedDeps, []string{"dplyr"}) {
 		t.Fatalf("report.ExcludedDeps = %v", report.ExcludedDeps)
+	}
+}
+
+func TestListTextOutputPreviewsLongSections(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	rscriptPath := writeFakeRscript(t, dir)
+	script := strings.Join([]string{
+		"library(alpha)",
+		"library(beta)",
+		"library(gamma)",
+		"library(delta)",
+		"library(epsilon)",
+		"library(zeta)",
+		"library(eta)",
+		"library(theta)",
+		"library(iota)",
+		"library(kappa)",
+	}, "\n") + "\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := List(ListOptions{
+		ScriptPath:  scriptPath,
+		RscriptPath: rscriptPath,
+		IncludeDeps: []string{"inc1", "inc2", "inc3", "inc4", "inc5", "inc6", "inc7", "inc8"},
+		ExcludeDeps: []string{"exc1", "exc2", "exc3", "exc4", "exc5", "exc6", "exc7", "exc8", "exc9"},
+		Stdout:      &stdout,
+		Stderr:      &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "script: "+scriptPath) {
+		t.Fatalf("List() output missing script line:\n%s", out)
+	}
+	if !strings.Contains(out, "detected packages: alpha, beta, delta, epsilon, eta, gamma, iota, kappa, +2 more") {
+		t.Fatalf("List() output missing detected preview:\n%s", out)
+	}
+	if !strings.Contains(out, "cran packages: alpha, beta, delta, epsilon, eta, gamma, iota, kappa, +2 more") {
+		t.Fatalf("List() output missing cran preview:\n%s", out)
+	}
+	if !strings.Contains(out, "included packages: CRAN=inc1, inc2, inc3, inc4, inc5, inc6, +2 more") {
+		t.Fatalf("List() output missing included preview:\n%s", out)
+	}
+	if !strings.Contains(out, "excluded packages: exc1, exc2, exc3, exc4, exc5, exc6, exc7, exc8, +1 more") {
+		t.Fatalf("List() output missing excluded preview:\n%s", out)
 	}
 }
 
@@ -4554,6 +4737,25 @@ func TestPrintAppliedAdjustments(t *testing.T) {
 	}
 	if !strings.Contains(got, "[rs] excluded packages: dplyr") {
 		t.Fatalf("printAppliedAdjustments() missing exclude line:\n%s", got)
+	}
+}
+
+func TestPrintAppliedAdjustmentsPreviewsLongLists(t *testing.T) {
+	var out bytes.Buffer
+	printAppliedAdjustments(
+		&out,
+		"[info] ",
+		[]string{"alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"},
+		[]string{"BioA", "BioB", "BioC", "BioD", "BioE", "BioF", "BioG"},
+		[]string{"exc1", "exc2", "exc3", "exc4", "exc5", "exc6", "exc7", "exc8", "exc9"},
+	)
+
+	got := out.String()
+	if !strings.Contains(got, "[info] included packages: CRAN=alpha, beta, gamma, delta, epsilon, zeta, +1 more | Bioconductor=BioA, BioB, BioC, BioD, BioE, BioF, +1 more") {
+		t.Fatalf("printAppliedAdjustments() missing include preview:\n%s", got)
+	}
+	if !strings.Contains(got, "[info] excluded packages: exc1, exc2, exc3, exc4, exc5, exc6, exc7, exc8, +1 more") {
+		t.Fatalf("printAppliedAdjustments() missing exclude preview:\n%s", got)
 	}
 }
 

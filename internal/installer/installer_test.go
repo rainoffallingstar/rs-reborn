@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
 	"github.com/rainoffallingstar/rs-reborn/internal/project"
 	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
@@ -817,6 +818,91 @@ func TestInstallCompiledPackageBatchBatchesOrdinaryCompiledPackages(t *testing.T
 	}
 }
 
+func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *testing.T) {
+	original := installerEnsureBuildTools
+	t.Cleanup(func() {
+		installerEnsureBuildTools = original
+	})
+	installerEnsureBuildTools = func(pkg string, env []string) error {
+		return nil
+	}
+
+	dir := t.TempDir()
+	archive := testTarGzBytes(t, map[string]string{
+		"pkg/DESCRIPTION": "Package: pkg\nVersion: 1.0.0\n",
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+
+	logDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", logDir, err)
+	}
+	rBinary := writeTestCommand(
+		t,
+		dir,
+		"R",
+		fmt.Sprintf("#!/bin/sh\nlog=%q/$(date +%%s%%N)-$$.txt\nprintf '%%s\\n' \"$@\" > \"$log\"\n", logDir),
+		fmt.Sprintf("@echo off\r\nset LOGFILE=%q\\%%RANDOM%%-%%RANDOM%%.txt\r\n> \"%%LOGFILE%%\" echo %%*\r\n", filepath.ToSlash(logDir)),
+	)
+
+	inst := nativeInstaller{
+		tempRoot:       filepath.Join(dir, "tmp"),
+		downloadRoot:   filepath.Join(dir, "downloads"),
+		metaDir:        filepath.Join(dir, "meta"),
+		stdout:         io.Discard,
+		stderr:         io.Discard,
+		httpClient:     server.Client(),
+		rBinary:        rBinary,
+		prefetchedRepo: map[string]string{},
+		req: Request{
+			WorkDir:     dir,
+			CacheRoot:   filepath.Join(dir, "cache"),
+			LibraryPath: filepath.Join(dir, "lib"),
+			Environment: []string{"PATH=" + dir},
+		},
+		planned:           map[string]plannedPackage{},
+		installedPackages: map[string]installedPackage{},
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot, inst.metaDir, inst.req.LibraryPath, inst.req.CacheRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	for _, name := range []string{"a", "b", "c", "d"} {
+		inst.planned[name] = plannedPackage{
+			Name:    name,
+			Version: "1.0.0",
+			Source:  sourceCRAN,
+			Repo: &repoRecord{
+				Name:       name,
+				Version:    "1.0.0",
+				Source:     sourceCRAN,
+				TarballURL: server.URL + "/" + name + "_1.0.0.tar.gz",
+				DepsLoaded: true,
+			},
+		}
+	}
+
+	installed, err := inst.installRepoPackageBatches([]string{"a", "b", "c", "d"}, 2)
+	if err != nil {
+		t.Fatalf("installRepoPackageBatches() error = %v", err)
+	}
+	if !reflect.DeepEqual(installed, []string{"a", "b", "c", "d"}) {
+		t.Fatalf("installRepoPackageBatches() installed = %v", installed)
+	}
+
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%q) error = %v", logDir, err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("batch invocation count = %d, want 2", len(entries))
+	}
+}
+
 func TestPrepareInstallTargetPatchesEncodingMakevarsInTarball(t *testing.T) {
 	dir := t.TempDir()
 	prefix := filepath.Join(dir, "prefix")
@@ -932,7 +1018,7 @@ func TestSeedPlannedPackagesFromCacheReusesMatchingSiblingLibrary(t *testing.T) 
 			LibraryPath: targetLib,
 		},
 		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
-		stderr:            io.Discard,
+		stderr:            &bytes.Buffer{},
 		planned:           map[string]plannedPackage{"cli": {Name: "cli", Version: "3.6.5", Source: sourceCRAN}},
 		installedPackages: map[string]installedPackage{},
 	}
@@ -960,6 +1046,9 @@ func TestSeedPlannedPackagesFromCacheReusesMatchingSiblingLibrary(t *testing.T) 
 	}
 	if !os.SameFile(sourceInfo, targetInfo) {
 		t.Fatalf("expected reused package files to be hard-linked")
+	}
+	if log := inst.stderr.(*bytes.Buffer).String(); log != "" {
+		t.Fatalf("cache reuse log = %q, want silent single-package default reuse", log)
 	}
 }
 
@@ -993,6 +1082,46 @@ func TestSeedPlannedPackagesFromCacheSkipsMismatchedSiblingPackage(t *testing.T)
 	}
 	if _, err := os.Stat(filepath.Join(targetLib, "cli")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("target cli package unexpectedly copied, stat err = %v", err)
+	}
+}
+
+func TestSeedPlannedPackagesFromCacheReportsSingleReuseWhenVerbose(t *testing.T) {
+	cacheRoot := t.TempDir()
+	libraryRoot := filepath.Join(cacheRoot, "lib")
+	sourceLib := filepath.Join(libraryRoot, "aaaaaaaaaaaaaaaa")
+	targetLib := filepath.Join(libraryRoot, "bbbbbbbbbbbbbbbb")
+	for _, path := range []string{
+		filepath.Join(sourceLib, "cli"),
+		filepath.Join(sourceLib, ".rs-source-meta"),
+		targetLib,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sourceLib, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceLib, "cli", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(NAMESPACE) error = %v", err)
+	}
+
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: targetLib,
+			Verbose:     true,
+		},
+		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
+		stderr:            &bytes.Buffer{},
+		planned:           map[string]plannedPackage{"cli": {Name: "cli", Version: "3.6.5", Source: sourceCRAN}},
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.seedPlannedPackagesFromCache(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromCache() error = %v", err)
+	}
+	if log := inst.stderr.(*bytes.Buffer).String(); !strings.Contains(log, "reused 1 cached package from 1 library snapshot") {
+		t.Fatalf("cache reuse verbose log = %q", log)
 	}
 }
 
@@ -1032,7 +1161,7 @@ func TestSeedPlannedPackagesFromStoreReusesMatchingStoredPackage(t *testing.T) {
 			Runtime:     runtime,
 		},
 		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
-		stderr:            io.Discard,
+		stderr:            &bytes.Buffer{},
 		planned:           map[string]plannedPackage{"cli": pkg},
 		installedPackages: map[string]installedPackage{},
 	}
@@ -1060,6 +1189,58 @@ func TestSeedPlannedPackagesFromStoreReusesMatchingStoredPackage(t *testing.T) {
 	}
 	if !os.SameFile(sourceInfo, targetInfo) {
 		t.Fatalf("expected stored package files to be hard-linked")
+	}
+	if log := inst.stderr.(*bytes.Buffer).String(); log != "" {
+		t.Fatalf("store reuse log = %q, want silent single-package default reuse", log)
+	}
+}
+
+func TestSeedPlannedPackagesFromStoreReportsSingleReuseWhenVerbose(t *testing.T) {
+	cacheRoot := t.TempDir()
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
+	storeLib := packageStorePathForPlanned(cacheRoot, pkg, runtime)
+	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
+	for _, path := range []string{
+		filepath.Join(storeLib, "cli"),
+		targetLib,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "cli", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(NAMESPACE) error = %v", err)
+	}
+
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: targetLib,
+			Runtime:     runtime,
+			Verbose:     true,
+		},
+		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
+		stderr:            &bytes.Buffer{},
+		planned:           map[string]plannedPackage{"cli": pkg},
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.seedPlannedPackagesFromStore(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromStore() error = %v", err)
+	}
+	if log := inst.stderr.(*bytes.Buffer).String(); !strings.Contains(log, "reused 1 stored package") {
+		t.Fatalf("store reuse verbose log = %q", log)
 	}
 }
 
@@ -1105,7 +1286,7 @@ func TestSeedPlannedPackagesFromStoreReusesMultipleStoredPackages(t *testing.T) 
 			Runtime:     runtime,
 		},
 		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
-		stderr:            io.Discard,
+		stderr:            &bytes.Buffer{},
 		planned:           planned,
 		order:             order,
 		installedPackages: map[string]installedPackage{},
@@ -1120,6 +1301,9 @@ func TestSeedPlannedPackagesFromStoreReusesMultipleStoredPackages(t *testing.T) 
 		if _, err := os.Stat(filepath.Join(targetLib, name, "DESCRIPTION")); err != nil {
 			t.Fatalf("Stat(%s DESCRIPTION) error = %v", name, err)
 		}
+	}
+	if log := inst.stderr.(*bytes.Buffer).String(); !strings.Contains(log, "reused 2 stored packages") || strings.Contains(log, "reusing stored cli") || strings.Contains(log, "reusing stored glue") {
+		t.Fatalf("store reuse log = %q", log)
 	}
 }
 
@@ -1279,6 +1463,182 @@ func TestCompiledBatchWorkerLimitCapsAtTwo(t *testing.T) {
 	}
 	if got := compiledBatchWorkerLimit(8); got != 2 {
 		t.Fatalf("compiledBatchWorkerLimit(8) = %d, want 2", got)
+	}
+}
+
+func TestSplitRepoBatchChunksPreservesOrderAndMinBatchSize(t *testing.T) {
+	names := []string{"a", "b", "c", "d", "e", "f"}
+	got := splitRepoBatchChunks(names, 3)
+	want := [][]string{
+		{"a", "d"},
+		{"b", "e"},
+		{"c", "f"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitRepoBatchChunks() = %v, want %v", got, want)
+	}
+
+	got = splitRepoBatchChunks([]string{"a", "b", "c"}, 3)
+	want = [][]string{{"a", "b", "c"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("splitRepoBatchChunks() small batch = %v, want %v", got, want)
+	}
+}
+
+func TestShouldLogPackageInstallSummaryOnlyForSlowPackages(t *testing.T) {
+	if shouldLogPackageInstallSummary(44 * time.Second) {
+		t.Fatal("shouldLogPackageInstallSummary(44s) = true, want false")
+	}
+	if !shouldLogPackageInstallSummary(45 * time.Second) {
+		t.Fatal("shouldLogPackageInstallSummary(45s) = false, want true")
+	}
+}
+
+func TestShouldLogDependencyLayerSummary(t *testing.T) {
+	if shouldLogDependencyLayerSummary(5*time.Second, 0, 0, false) {
+		t.Fatal("shouldLogDependencyLayerSummary() = true for empty layer, want false")
+	}
+	if shouldLogDependencyLayerSummary(29*time.Second, 0, 3, false) {
+		t.Fatal("shouldLogDependencyLayerSummary() = true for fast pure layer, want false")
+	}
+	if !shouldLogDependencyLayerSummary(30*time.Second, 0, 3, false) {
+		t.Fatal("shouldLogDependencyLayerSummary() = false for slow pure layer, want true")
+	}
+	if !shouldLogDependencyLayerSummary(5*time.Second, 2, 3, false) {
+		t.Fatal("shouldLogDependencyLayerSummary() = false for compiled layer, want true")
+	}
+	if !shouldLogDependencyLayerSummary(5*time.Second, 0, 3, true) {
+		t.Fatal("shouldLogDependencyLayerSummary() = false for verbose pure layer, want true")
+	}
+}
+
+func TestFormatDependencyLayerSummary(t *testing.T) {
+	if got, ok := formatDependencyLayerSummary(1, 4, 10*time.Second, 0, 3, false); ok || got != "" {
+		t.Fatalf("formatDependencyLayerSummary() = (%q, %v), want empty suppressed summary", got, ok)
+	}
+	if got, ok := formatDependencyLayerSummary(2, 4, 30*time.Second, 0, 3, false); !ok || got != "dependency layer 2/4 completed in 30s (3 installed)" {
+		t.Fatalf("formatDependencyLayerSummary() = (%q, %v)", got, ok)
+	}
+	if got, ok := formatDependencyLayerSummary(3, 4, 12*time.Second, 2, 5, false); !ok || got != "dependency layer 3/4 completed in 12s (5 installed, 2 compiled)" {
+		t.Fatalf("formatDependencyLayerSummary() compiled = (%q, %v)", got, ok)
+	}
+	if got, ok := formatDependencyLayerSummary(1, 4, 10*time.Second, 0, 3, true); !ok || got != "dependency layer 1/4 completed in 10s (3 installed)" {
+		t.Fatalf("formatDependencyLayerSummary() verbose = (%q, %v)", got, ok)
+	}
+}
+
+func TestFormatDependencyLayerPlan(t *testing.T) {
+	if got := formatDependencyLayerPlan(1, 4, 3, 0); got != "dependency layer 1/4: 3 package(s)" {
+		t.Fatalf("formatDependencyLayerPlan() pure = %q", got)
+	}
+	if got := formatDependencyLayerPlan(2, 4, 0, 2); got != "dependency layer 2/4: 2 compiled package(s)" {
+		t.Fatalf("formatDependencyLayerPlan() compiled = %q", got)
+	}
+	if got := formatDependencyLayerPlan(3, 4, 5, 2); got != "dependency layer 3/4: 7 package(s) (5 pure, 2 compiled)" {
+		t.Fatalf("formatDependencyLayerPlan() mixed = %q", got)
+	}
+}
+
+func TestShouldStageDependencyLayerPlan(t *testing.T) {
+	if shouldStageDependencyLayerPlan(1, 0, false) {
+		t.Fatal("shouldStageDependencyLayerPlan(single pure) = true, want false")
+	}
+	if !shouldStageDependencyLayerPlan(0, 1, false) {
+		t.Fatal("shouldStageDependencyLayerPlan(compiled) = false, want true")
+	}
+	if !shouldStageDependencyLayerPlan(3, 0, false) {
+		t.Fatal("shouldStageDependencyLayerPlan(large pure) = false, want true")
+	}
+	if !shouldStageDependencyLayerPlan(1, 0, true) {
+		t.Fatal("shouldStageDependencyLayerPlan(verbose) = false, want true")
+	}
+}
+
+func TestFormatParallelInstallSummary(t *testing.T) {
+	if got := formatParallelInstallSummary(1, 1, "workers", []string{"cli"}); got != "" {
+		t.Fatalf("formatParallelInstallSummary() single = %q, want empty", got)
+	}
+	got := formatParallelInstallSummary(8, 4, "batches", []string{"a", "b", "c", "d", "e", "f", "g", "h"})
+	want := "installing 8 package(s) across 4 parallel batches: a, b, c, d, e, f, +2 more"
+	if got != want {
+		t.Fatalf("formatParallelInstallSummary() = %q, want %q", got, want)
+	}
+}
+
+func TestShouldLogParallelInstallSummary(t *testing.T) {
+	if shouldLogParallelInstallSummary(8, 4, false) {
+		t.Fatal("shouldLogParallelInstallSummary(small default) = true, want false")
+	}
+	if !shouldLogParallelInstallSummary(12, 4, false) {
+		t.Fatal("shouldLogParallelInstallSummary(large default) = false, want true")
+	}
+	if !shouldLogParallelInstallSummary(4, 2, true) {
+		t.Fatal("shouldLogParallelInstallSummary(verbose) = false, want true")
+	}
+}
+
+func TestFormatSlowInstallSummary(t *testing.T) {
+	if got := formatSlowInstallSummary(nil, 4); got != "" {
+		t.Fatalf("formatSlowInstallSummary(nil) = %q, want empty", got)
+	}
+	got := formatSlowInstallSummary([]installTiming{
+		{label: "sass", duration: 3*time.Minute + 30*time.Second},
+		{label: "ragg", duration: 94 * time.Second},
+		{label: "stringi", duration: 53 * time.Second},
+		{label: "ggplot2", duration: 60 * time.Second},
+		{label: "batch[cli, glue, +2 more]", duration: 48 * time.Second},
+	}, 4)
+	want := "slow installs: sass 3m30s, ragg 1m34s, ggplot2 1m00s, stringi 53s, +1 more"
+	if got != want {
+		t.Fatalf("formatSlowInstallSummary() = %q, want %q", got, want)
+	}
+}
+
+func TestShouldStageReuseSummary(t *testing.T) {
+	if shouldStageReuseSummary(1, false) {
+		t.Fatal("shouldStageReuseSummary(single default) = true, want false")
+	}
+	if !shouldStageReuseSummary(2, false) {
+		t.Fatal("shouldStageReuseSummary(multi default) = false, want true")
+	}
+	if !shouldStageReuseSummary(1, true) {
+		t.Fatal("shouldStageReuseSummary(verbose) = false, want true")
+	}
+}
+
+func TestFormatNativeInstallSummary(t *testing.T) {
+	got := formatNativeInstallSummary(12*time.Second, installSummaryStats{
+		installedCount:       8,
+		compiledInstallCount: 3,
+		reusedCount:          2,
+	})
+	want := "native package install completed in 12s (8 installed, 3 compiled, 2 reused)"
+	if got != want {
+		t.Fatalf("formatNativeInstallSummary() = %q, want %q", got, want)
+	}
+
+	got = formatNativeInstallSummary(3*time.Second, installSummaryStats{})
+	want = "native package install completed in 3s (no package changes)"
+	if got != want {
+		t.Fatalf("formatNativeInstallSummary() empty = %q, want %q", got, want)
+	}
+}
+
+func TestCountInstalledPlannedPackages(t *testing.T) {
+	inst := &nativeInstaller{
+		order: []string{"a", "b", "c"},
+		planned: map[string]plannedPackage{
+			"a": {Name: "a", Version: "1.0.0", Source: sourceCRAN},
+			"b": {Name: "b", Version: "1.0.0", Source: sourceCRAN},
+			"c": {Name: "c", Version: "1.0.0", Source: sourceCRAN},
+		},
+		installedPackages: map[string]installedPackage{
+			"a": {Name: "a", Version: "1.0.0", Source: sourceCRAN},
+			"c": {Name: "c", Version: "1.0.0", Source: sourceCRAN},
+		},
+	}
+	if got := countInstalledPlannedPackages(inst); got != 2 {
+		t.Fatalf("countInstalledPlannedPackages() = %d, want 2", got)
 	}
 }
 
@@ -2110,6 +2470,12 @@ func TestPrefetchPlannedPackagesReportsSummary(t *testing.T) {
 	if !strings.Contains(log, "prefetched 2 package artifact(s), downloaded 1, reused 1 cached") {
 		t.Fatalf("prefetch log = %q, want summary counts", log)
 	}
+	if strings.Contains(log, "reusing cached") {
+		t.Fatalf("prefetch log = %q, want multi-prefetch cache reuse lines to stay aggregated", log)
+	}
+	if strings.Contains(log, "downloading fresh_2.0.0.tar.gz") {
+		t.Fatalf("prefetch log = %q, want multi-prefetch download progress to stay aggregated", log)
+	}
 }
 
 func TestInstallerNotefPrefixesMessage(t *testing.T) {
@@ -2118,6 +2484,79 @@ func TestInstallerNotefPrefixesMessage(t *testing.T) {
 	inst.notef("native package install completed in %s", "12s")
 	if got := buf.String(); got != "[rs] native package install completed in 12s\n" {
 		t.Fatalf("notef() = %q", got)
+	}
+}
+
+func TestLogInstallCompletionIncludesSlowInstallSummary(t *testing.T) {
+	var buf bytes.Buffer
+	inst := nativeInstaller{
+		stderr: &buf,
+		installTimings: []installTiming{
+			{label: "sass", duration: 3*time.Minute + 30*time.Second},
+			{label: "ragg", duration: 94 * time.Second},
+		},
+	}
+	inst.logInstallCompletion(10*time.Minute, installSummaryStats{
+		installedCount:       12,
+		compiledInstallCount: 4,
+		reusedCount:          3,
+	})
+
+	got := buf.String()
+	if !strings.Contains(got, "[rs] slow installs: sass 3m30s, ragg 1m34s\n") {
+		t.Fatalf("logInstallCompletion() missing slow install summary:\n%s", got)
+	}
+	if !strings.Contains(got, "[rs] native package install completed in 10m00s (12 installed, 4 compiled, 3 reused)\n") {
+		t.Fatalf("logInstallCompletion() missing final summary:\n%s", got)
+	}
+}
+
+func TestDefaultInstallerLogStoryStaysCompact(t *testing.T) {
+	var log bytes.Buffer
+	progresscmd.Stage(&log, "prefetching 99 package artifact(s)")
+	progresscmd.Stage(&log, "prefetched 99 package artifact(s), downloaded 99")
+	progresscmd.Stage(&log, formatBuildToolsCheckStage("stringi"))
+	progresscmd.Stage(&log, formatDependencyLayerPlan(2, 5, 0, 3))
+
+	inst := nativeInstaller{
+		stderr: &log,
+		installTimings: []installTiming{
+			{label: "sass", duration: 3*time.Minute + 30*time.Second},
+			{label: "ragg", duration: 94 * time.Second},
+			{label: "stringi", duration: 53 * time.Second},
+		},
+	}
+	inst.logInstallCompletion(34*time.Minute+28*time.Second, installSummaryStats{
+		installedCount:       99,
+		compiledInstallCount: 28,
+	})
+
+	got := log.String()
+	for _, want := range []string{
+		"[rs] prefetching 99 package artifact(s)",
+		"[rs] prefetched 99 package artifact(s), downloaded 99",
+		"[rs] validating source build toolchain for stringi",
+		"[rs] dependency layer 2/5: 3 compiled package(s)",
+		"[rs] slow installs: sass 3m30s, ragg 1m34s, stringi 53s",
+		"[rs] native package install completed in 34m28s (99 installed, 28 compiled)",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("compact log story missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{
+		"reused 1 stored package",
+		"reused 1 cached package from 1 library snapshot",
+		"installing 8 package(s) across 4 parallel batches",
+		"installed cli in 12s",
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("compact log story unexpectedly contains %q:\n%s", unwanted, got)
+		}
+	}
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if len(lines) != 6 {
+		t.Fatalf("compact log story line budget = %d, want 6:\n%s", len(lines), got)
 	}
 }
 
@@ -2661,6 +3100,33 @@ func TestEnsurePackageBuildToolsReadyCachesSuccessfulCheck(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("installerEnsureBuildTools calls = %d, want 1", calls)
+	}
+}
+
+func TestEnsurePackageBuildToolsReadyReportsStageOnce(t *testing.T) {
+	original := installerEnsureBuildTools
+	t.Cleanup(func() {
+		installerEnsureBuildTools = original
+	})
+	installerEnsureBuildTools = func(pkg string, env []string) error {
+		return nil
+	}
+
+	var stderr bytes.Buffer
+	inst := nativeInstaller{stderr: &stderr}
+	if err := inst.ensurePackageBuildToolsReady("stringi"); err != nil {
+		t.Fatalf("ensurePackageBuildToolsReady(first) error = %v", err)
+	}
+	if err := inst.ensurePackageBuildToolsReady("xml2"); err != nil {
+		t.Fatalf("ensurePackageBuildToolsReady(second) error = %v", err)
+	}
+
+	log := stderr.String()
+	if strings.Count(log, "validating source build toolchain") != 1 {
+		t.Fatalf("build tools stage log = %q, want one stage line", log)
+	}
+	if !strings.Contains(log, "validating source build toolchain for stringi") {
+		t.Fatalf("build tools stage log = %q, want first package name", log)
 	}
 }
 

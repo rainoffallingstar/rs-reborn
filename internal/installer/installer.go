@@ -34,19 +34,25 @@ import (
 )
 
 const (
-	sourceCRAN            = "cran"
-	sourceBioconductor    = "bioconductor"
-	sourceLocal           = "local"
-	sourceGit             = "git"
-	sourceGitHub          = "github"
-	localKindFileSHA256   = "file_sha256"
-	localKindDirSHA256    = "dir_tree_sha256"
-	localKindMissing      = "missing"
-	localKindError        = "unavailable"
-	defaultHTTPTimeout    = 90 * time.Second
-	httpRetryAttempts     = 3
-	repoIndexCacheTTL     = 30 * time.Minute
-	PackageStoreStateFile = ".rs-store-state.json"
+	sourceCRAN              = "cran"
+	sourceBioconductor      = "bioconductor"
+	sourceLocal             = "local"
+	sourceGit               = "git"
+	sourceGitHub            = "github"
+	localKindFileSHA256     = "file_sha256"
+	localKindDirSHA256      = "dir_tree_sha256"
+	localKindMissing        = "missing"
+	localKindError          = "unavailable"
+	defaultHTTPTimeout      = 90 * time.Second
+	httpRetryAttempts       = 3
+	repoIndexCacheTTL       = 30 * time.Minute
+	PackageStoreStateFile   = ".rs-store-state.json"
+	nonTTYInstallStartMin   = 20 * time.Second
+	nonTTYInstallHeartbeat  = 45 * time.Second
+	nonTTYDownloadStartMin  = 8 * time.Second
+	nonTTYDownloadHeartbeat = 30 * time.Second
+	slowLayerSummaryMin     = 30 * time.Second
+	slowPackageSummaryMin   = 45 * time.Second
 )
 
 var (
@@ -75,6 +81,7 @@ type Request struct {
 	CacheRoot   string
 	LibraryPath string
 	Repo        string
+	Verbose     bool
 	Environment []string
 	Runtime     Runtime
 	CRANDeps    []string
@@ -116,6 +123,19 @@ type nativeInstaller struct {
 	prefetchedRepo    map[string]string
 	descriptionMu     sync.RWMutex
 	descriptionCache  map[string]description
+	installTimingMu   sync.Mutex
+	installTimings    []installTiming
+}
+
+type installSummaryStats struct {
+	reusedCount          int
+	installedCount       int
+	compiledInstallCount int
+}
+
+type installTiming struct {
+	label    string
+	duration time.Duration
 }
 
 func (i *nativeInstaller) stage(label string) {
@@ -127,6 +147,13 @@ func (i *nativeInstaller) notef(format string, args ...any) {
 		return
 	}
 	fmt.Fprintf(i.stderr, "[rs] "+format+"\n", args...)
+}
+
+func (i *nativeInstaller) verbosef(format string, args ...any) {
+	if !i.req.Verbose {
+		return
+	}
+	i.notef(format, args...)
 }
 
 type plannedPackage struct {
@@ -330,18 +357,19 @@ func install(req Request, waitForStoreSync bool) (func() error, error) {
 	if err := inst.seedPlannedPackagesFromCache(); err != nil {
 		return nil, err
 	}
-	prefetchStarted := time.Now()
 	if err := inst.prefetchPlannedPackages(); err != nil {
 		return nil, err
 	}
-	inst.notef("prefetch completed in %s", installerFormatElapsed(time.Since(prefetchStarted)))
+	inst.verbosef("prefetch completed in %s", installerFormatElapsed(time.Since(installStarted)))
+	summaryStats := installSummaryStats{
+		reusedCount: countInstalledPlannedPackages(inst),
+	}
 
 	pendingStoreSyncs := make([]<-chan error, 0, 4)
 	if inst.canParallelInstallPurePackages() {
 		layers := installPlanLayers(inst.planned, inst.order)
 		for idx, layer := range layers {
 			layerStarted := time.Now()
-			progresscmd.Stage(inst.stderr, fmt.Sprintf("installing dependency layer %d/%d", idx+1, len(layers)))
 			pure := make([]string, 0, len(layer))
 			compiled := make([]string, 0, len(layer))
 			for _, name := range layer {
@@ -353,6 +381,9 @@ func install(req Request, waitForStoreSync bool) (func() error, error) {
 					continue
 				}
 				pure = append(pure, name)
+			}
+			if shouldStageDependencyLayerPlan(len(pure), len(compiled), inst.req.Verbose) {
+				progresscmd.Stage(inst.stderr, formatDependencyLayerPlan(idx+1, len(layers), len(pure), len(compiled)))
 			}
 			installed, err := inst.installPackageBatch(pure)
 			if err != nil {
@@ -366,6 +397,7 @@ func install(req Request, waitForStoreSync bool) (func() error, error) {
 			if syncDone := inst.startSyncPlannedPackagesToStore(installed); syncDone != nil {
 				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
 			}
+			summaryStats.installedCount += len(installed)
 			compiledInstalled, err := inst.installCompiledPackageBatch(compiled)
 			if err != nil {
 				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
@@ -378,37 +410,43 @@ func install(req Request, waitForStoreSync bool) (func() error, error) {
 			if syncDone := inst.startSyncPlannedPackagesToStore(compiledInstalled); syncDone != nil {
 				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
 			}
-			inst.notef(
-				"dependency layer %d/%d completed in %s (pure=%d compiled=%d installed=%d)",
+			summaryStats.installedCount += len(compiledInstalled)
+			summaryStats.compiledInstallCount += len(compiledInstalled)
+			layerInstalled := len(installed) + len(compiledInstalled)
+			if summary, ok := formatDependencyLayerSummary(
 				idx+1,
 				len(layers),
-				installerFormatElapsed(time.Since(layerStarted)),
-				len(pure),
+				time.Since(layerStarted),
 				len(compiled),
-				len(installed)+len(compiledInstalled),
-			)
+				layerInstalled,
+				inst.req.Verbose,
+			); ok {
+				inst.notef("%s", summary)
+			}
 		}
 		if waitForStoreSync {
 			if err := finalizePendingStoreSyncs(inst.stderr, pendingStoreSyncs); err != nil {
 				return nil, err
 			}
-			inst.notef("native package install completed in %s", installerFormatElapsed(time.Since(installStarted)))
+			inst.logInstallCompletion(time.Since(installStarted), summaryStats)
 			return nil, nil
 		}
 		wait := backgroundStoreSyncWaiter(inst.stderr, pendingStoreSyncs)
-		inst.notef("native package install completed in %s", installerFormatElapsed(time.Since(installStarted)))
+		inst.logInstallCompletion(time.Since(installStarted), summaryStats)
 		return wait, nil
 	}
 
-	for idx, name := range inst.order {
-		pkgStarted := time.Now()
-		progresscmd.Stage(inst.stderr, fmt.Sprintf("installing package %d/%d", idx+1, len(inst.order)))
+	for _, name := range inst.order {
 		installed, err := inst.installPlannedPackage(name)
 		if err != nil {
 			_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
 			return nil, err
 		}
 		if installed {
+			summaryStats.installedCount++
+			if plannedPackageNeedsCompilation(inst.planned[name]) {
+				summaryStats.compiledInstallCount++
+			}
 			if waitForStoreSync {
 				if err := inst.recordPlannedPackageInstalled(name); err != nil {
 					_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
@@ -424,18 +462,17 @@ func install(req Request, waitForStoreSync bool) (func() error, error) {
 				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
 			}
 		}
-		inst.notef("package %s completed in %s", name, installerFormatElapsed(time.Since(pkgStarted)))
 	}
 
 	if waitForStoreSync {
 		if err := finalizePendingStoreSyncs(inst.stderr, pendingStoreSyncs); err != nil {
 			return nil, err
 		}
-		inst.notef("native package install completed in %s", installerFormatElapsed(time.Since(installStarted)))
+		inst.logInstallCompletion(time.Since(installStarted), summaryStats)
 		return nil, nil
 	}
 	wait := backgroundStoreSyncWaiter(inst.stderr, pendingStoreSyncs)
-	inst.notef("native package install completed in %s", installerFormatElapsed(time.Since(installStarted)))
+	inst.logInstallCompletion(time.Since(installStarted), summaryStats)
 	return wait, nil
 }
 
@@ -593,6 +630,7 @@ func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
 		return nil
 	}
 
+	reusedCount := 0
 	if len(tasks) == 1 {
 		result := i.seedPlannedPackageFromStore(tasks[0])
 		if result.err != nil {
@@ -600,7 +638,10 @@ func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
 		}
 		if result.reused {
 			i.installedPackages[result.name] = result.installedPkg
-			progresscmd.Stage(i.stderr, "reusing stored "+result.name)
+			reusedCount++
+		}
+		if shouldStageReuseSummary(reusedCount, i.req.Verbose) {
+			progresscmd.Stage(i.stderr, formatStoredReuseSummary(reusedCount))
 		}
 		return nil
 	}
@@ -639,7 +680,10 @@ func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
 			continue
 		}
 		i.installedPackages[result.name] = result.installedPkg
-		progresscmd.Stage(i.stderr, "reusing stored "+result.name)
+		reusedCount++
+	}
+	if shouldStageReuseSummary(reusedCount, i.req.Verbose) {
+		progresscmd.Stage(i.stderr, formatStoredReuseSummary(reusedCount))
 	}
 	return nil
 }
@@ -708,6 +752,8 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 	if err != nil {
 		return err
 	}
+	reusedCount := 0
+	usedLibraries := map[string]struct{}{}
 	for _, result := range results {
 		if len(remaining) == 0 {
 			break
@@ -732,8 +778,12 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 				return err
 			}
 			delete(remaining, name)
-			progresscmd.Stage(i.stderr, "reusing cached "+name+" from "+result.entryName)
+			reusedCount++
+			usedLibraries[result.entryName] = struct{}{}
 		}
+	}
+	if shouldStageReuseSummary(reusedCount, i.req.Verbose) {
+		progresscmd.Stage(i.stderr, formatCacheReuseSummary(reusedCount, len(usedLibraries)))
 	}
 	return nil
 }
@@ -1244,7 +1294,7 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 			defer wg.Done()
 			for record := range jobs {
 				_, reused := i.repoDownloadReadyPath(record)
-				_, err := i.ensureRepoPackageDownloaded(record)
+				_, err := i.ensureRepoPackageDownloadedQuiet(record)
 				results <- prefetchResult{name: record.Name, reused: reused, err: err}
 			}
 		}()
@@ -1388,25 +1438,33 @@ func (i *nativeInstaller) applyPrefetchedRepoDescription(name string, desc descr
 }
 
 func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) {
-	return i.installPackageBatchWithFallbackWorkers(names, i.batchFallbackWorkerLimit(len(names)))
+	return i.installPackageBatchWithScheduling(
+		names,
+		i.batchInstallWorkerLimit(len(names)),
+		i.batchFallbackWorkerLimit(len(names)),
+	)
 }
 
 func (i *nativeInstaller) installCompiledPackageBatch(names []string) ([]string, error) {
-	return i.installPackageBatchWithFallbackWorkers(names, i.compiledBatchFallbackWorkerLimit(len(names)))
+	return i.installPackageBatchWithScheduling(
+		names,
+		i.compiledBatchInstallWorkerLimit(len(names)),
+		i.compiledBatchFallbackWorkerLimit(len(names)),
+	)
 }
 
-func (i *nativeInstaller) installPackageBatchWithFallbackWorkers(names []string, fallbackWorkers int) ([]string, error) {
+func (i *nativeInstaller) installPackageBatchWithScheduling(names []string, batchWorkers, fallbackWorkers int) ([]string, error) {
 	if len(names) > 1 {
 		batchable, remainder := i.splitBatchInstallableRepoPackages(names)
 		if len(batchable) > 1 {
-			batchInstalled, err := i.installRepoPackageBatch(batchable)
+			batchInstalled, err := i.installRepoPackageBatches(batchable, batchWorkers)
 			if err != nil {
 				return nil, err
 			}
 			if len(remainder) == 0 {
 				return batchInstalled, nil
 			}
-			restInstalled, err := i.installPackageBatchWithFallbackWorkers(remainder, fallbackWorkers)
+			restInstalled, err := i.installPackageBatchWithScheduling(remainder, batchWorkers, fallbackWorkers)
 			if err != nil {
 				return nil, err
 			}
@@ -1452,6 +1510,9 @@ func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers
 	}
 	if workers > len(names) {
 		workers = len(names)
+	}
+	if shouldLogParallelInstallSummary(len(names), workers, i.req.Verbose) {
+		i.verbosef("%s", formatParallelInstallSummary(len(names), workers, "workers", names))
 	}
 	jobsPerPackage := installJobsPerPackage(workers)
 	jobs := make(chan string)
@@ -1499,6 +1560,17 @@ func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers
 
 func compiledBatchWorkerLimit(items int) int {
 	return parallelWorkerLimitCap(items, 2)
+}
+
+func (i *nativeInstaller) batchInstallWorkerLimit(items int) int {
+	if writerIsTTY(i.stderr) {
+		return parallelWorkerLimitCap(items, 2)
+	}
+	return parallelWorkerLimitCap(items, 4)
+}
+
+func (i *nativeInstaller) compiledBatchInstallWorkerLimit(items int) int {
+	return compiledBatchWorkerLimit(items)
 }
 
 func (i *nativeInstaller) batchFallbackWorkerLimit(items int) int {
@@ -2257,7 +2329,6 @@ func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 }
 
 func (i *nativeInstaller) installRepoPackageWithJobs(record repoRecord, jobs int) error {
-	fmt.Fprintf(i.stdout, "[rs] installing %s package %s %s via native backend\n", record.Source, record.Name, record.Version)
 	if strings.HasSuffix(strings.ToLower(record.TarballURL), ".tar.gz") && record.NeedsCompilation {
 		if err := i.ensurePackageBuildToolsReady(record.Name); err != nil {
 			return err
@@ -2340,6 +2411,115 @@ func (i *nativeInstaller) isBatchInstallableRepoPackage(name string) bool {
 }
 
 func (i *nativeInstaller) installRepoPackageBatch(names []string) ([]string, error) {
+	return i.installRepoPackageBatchWithJobs(names, 0, false)
+}
+
+func (i *nativeInstaller) installRepoPackageBatches(names []string, workers int) ([]string, error) {
+	chunks := splitRepoBatchChunks(names, workers)
+	if len(chunks) <= 1 {
+		return i.installRepoPackageBatch(chunksOrNames(chunks, names))
+	}
+	if shouldLogParallelInstallSummary(len(names), len(chunks), i.req.Verbose) {
+		i.notef("%s", formatParallelInstallSummary(len(names), len(chunks), "batches", names))
+	}
+
+	type batchResult struct {
+		index     int
+		installed []string
+		err       error
+	}
+
+	jobsPerBatch := installJobsPerPackage(len(chunks))
+	results := make(chan batchResult, len(chunks))
+
+	var wg sync.WaitGroup
+	for idx, chunk := range chunks {
+		wg.Add(1)
+		go func(index int, group []string) {
+			defer wg.Done()
+			installed, err := i.installRepoPackageBatchWithJobs(group, jobsPerBatch, true)
+			results <- batchResult{index: index, installed: installed, err: err}
+		}(idx, append([]string(nil), chunk...))
+	}
+	wg.Wait()
+	close(results)
+
+	byIndex := make(map[int]batchResult, len(chunks))
+	for result := range results {
+		byIndex[result.index] = result
+	}
+
+	installedSet := make(map[string]struct{}, len(names))
+	for idx := range chunks {
+		result, ok := byIndex[idx]
+		if !ok {
+			return nil, fmt.Errorf("install batch did not return a result for chunk %d", idx)
+		}
+		if result.err != nil {
+			return nil, result.err
+		}
+		for _, name := range result.installed {
+			installedSet[name] = struct{}{}
+		}
+	}
+
+	installed := make([]string, 0, len(installedSet))
+	for _, name := range names {
+		if _, ok := installedSet[name]; ok {
+			installed = append(installed, name)
+		}
+	}
+	return installed, nil
+}
+
+func chunksOrNames(chunks [][]string, names []string) []string {
+	if len(chunks) == 1 {
+		return chunks[0]
+	}
+	return names
+}
+
+func splitRepoBatchChunks(names []string, workers int) [][]string {
+	if len(names) == 0 {
+		return nil
+	}
+	if len(names) <= 3 {
+		return [][]string{append([]string(nil), names...)}
+	}
+	maxWorkers := len(names) / 2
+	if maxWorkers < 1 {
+		maxWorkers = 1
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > maxWorkers {
+		workers = maxWorkers
+	}
+	if workers <= 1 {
+		return [][]string{append([]string(nil), names...)}
+	}
+
+	chunks := make([][]string, workers)
+	for idx, name := range names {
+		bucket := idx % workers
+		chunks[bucket] = append(chunks[bucket], name)
+	}
+
+	filtered := make([][]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		if len(chunk) == 0 {
+			continue
+		}
+		filtered = append(filtered, chunk)
+	}
+	if len(filtered) == 0 {
+		return [][]string{append([]string(nil), names...)}
+	}
+	return filtered
+}
+
+func (i *nativeInstaller) installRepoPackageBatchWithJobs(names []string, jobs int, quietProgress bool) ([]string, error) {
 	started := time.Now()
 	targets := make([]string, 0, len(names))
 	installed := make([]string, 0, len(names))
@@ -2348,7 +2528,6 @@ func (i *nativeInstaller) installRepoPackageBatch(names []string) ([]string, err
 		if !ok || pkg.Repo == nil || i.isPlannedPackageInstalled(pkg) {
 			continue
 		}
-		fmt.Fprintf(i.stdout, "[rs] queueing %s package %s %s for native batch install\n", pkg.Repo.Source, pkg.Repo.Name, pkg.Repo.Version)
 		target, err := i.ensureRepoPackageDownloaded(*pkg.Repo)
 		if err != nil {
 			return nil, fmt.Errorf("download %s: %w", name, err)
@@ -2374,12 +2553,19 @@ func (i *nativeInstaller) installRepoPackageBatch(names []string) ([]string, err
 	if len(targets) == 0 {
 		return nil, nil
 	}
-	cmd, err := buildInstallCommandWithJobs(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, "", 0, targets...)
+	cmd, err := buildInstallCommandWithJobs(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, "", jobs, targets...)
 	if err != nil {
 		return nil, err
 	}
-	label := fmt.Sprintf("installing R package batch (%d packages)", len(targets))
-	if err := progresscmd.Run(cmd, label, i.stderr, i.stderr); err != nil {
+	label := fmt.Sprintf("installing batch (%d packages)", len(targets))
+	progress := i.stderr
+	if quietProgress {
+		progress = io.Discard
+	}
+	if err := progresscmd.RunWithOptions(cmd, label, progress, i.stderr, progresscmd.RunOptions{
+		NonTTYStartDelay: nonTTYInstallStartMin,
+		NonTTYHeartbeat:  nonTTYInstallHeartbeat,
+	}); err != nil {
 		return nil, err
 	}
 	for _, name := range installed {
@@ -2387,11 +2573,22 @@ func (i *nativeInstaller) installRepoPackageBatch(names []string) ([]string, err
 			return nil, err
 		}
 	}
-	i.notef("batch installed %d package(s) in %s", len(installed), installerFormatElapsed(time.Since(started)))
+	i.recordInstallTiming(formatBatchInstallLabel(installed), time.Since(started))
+	if i.req.Verbose && !quietProgress {
+		i.notef("batch installed %d package(s) in %s", len(installed), installerFormatElapsed(time.Since(started)))
+	}
 	return installed, nil
 }
 
 func (i *nativeInstaller) ensureRepoPackageDownloaded(record repoRecord) (string, error) {
+	return i.ensureRepoPackageDownloadedWithOptions(record, false)
+}
+
+func (i *nativeInstaller) ensureRepoPackageDownloadedQuiet(record repoRecord) (string, error) {
+	return i.ensureRepoPackageDownloadedWithOptions(record, true)
+}
+
+func (i *nativeInstaller) ensureRepoPackageDownloadedWithOptions(record repoRecord, quiet bool) (string, error) {
 	rawURL := strings.TrimSpace(record.TarballURL)
 	if rawURL == "" {
 		return "", fmt.Errorf("package %s has no download URL", record.Name)
@@ -2401,7 +2598,7 @@ func (i *nativeInstaller) ensureRepoPackageDownloaded(record repoRecord) (string
 		return target, nil
 	}
 
-	target, err := i.download(rawURL, repoDownloadName(record))
+	target, err := i.downloadWithOptions(rawURL, repoDownloadName(record), quiet)
 	if err != nil {
 		return "", err
 	}
@@ -2506,18 +2703,6 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 }
 
 func (i *nativeInstaller) installPreparedSourceWithJobs(prepared preparedSource, jobs int) error {
-	switch prepared.Source {
-	case sourceLocal:
-		fmt.Fprintf(i.stdout, "[rs] installing local package %s from %s via native backend\n", prepared.Name, prepared.Location)
-	case sourceGit:
-		fmt.Fprintf(i.stdout, "[rs] installing git package %s from %s via native backend\n", prepared.Name, prepared.Location)
-	case sourceGitHub:
-		label := prepared.Location
-		if prepared.Ref != "" {
-			label += "@" + prepared.Ref
-		}
-		fmt.Fprintf(i.stdout, "[rs] installing github package %s from %s via native backend\n", prepared.Name, label)
-	}
 	if prepared.NeedsCompilation {
 		if err := i.ensurePackageBuildToolsReady(prepared.Name); err != nil {
 			return err
@@ -2539,14 +2724,249 @@ func (i *nativeInstaller) runRCommandInstall(packageName, target string, jobs in
 	if err != nil {
 		return err
 	}
-	label := fmt.Sprintf("installing R package %s", filepath.Base(target))
-	if err := progresscmd.Run(cmd, label, i.stderr, i.stderr); err != nil {
+	label := fmt.Sprintf("installing %s", filepath.Base(target))
+	if err := progresscmd.RunWithOptions(cmd, label, i.stderr, i.stderr, progresscmd.RunOptions{
+		SuppressTTYSuccess: true,
+		NonTTYStartDelay:   nonTTYInstallStartMin,
+		NonTTYHeartbeat:    nonTTYInstallHeartbeat,
+	}); err != nil {
 		return err
 	}
+	duration := time.Since(started)
 	if packageName != "" {
-		i.notef("installed %s in %s", packageName, installerFormatElapsed(time.Since(started)))
+		i.recordInstallTiming(packageName, duration)
+	}
+	if packageName != "" && i.req.Verbose {
+		i.notef("installed %s in %s", packageName, installerFormatElapsed(duration))
 	}
 	return nil
+}
+
+func shouldLogPackageInstallSummary(d time.Duration) bool {
+	return d >= slowPackageSummaryMin
+}
+
+func (i *nativeInstaller) recordInstallTiming(label string, d time.Duration) {
+	if strings.TrimSpace(label) == "" || !shouldLogPackageInstallSummary(d) {
+		return
+	}
+	i.installTimingMu.Lock()
+	i.installTimings = append(i.installTimings, installTiming{label: label, duration: d})
+	i.installTimingMu.Unlock()
+}
+
+func (i *nativeInstaller) logInstallCompletion(d time.Duration, stats installSummaryStats) {
+	if summary := formatSlowInstallSummary(i.snapshotInstallTimings(), 4); summary != "" {
+		i.notef("%s", summary)
+	}
+	i.notef("%s", formatNativeInstallSummary(d, stats))
+}
+
+func (i *nativeInstaller) snapshotInstallTimings() []installTiming {
+	i.installTimingMu.Lock()
+	defer i.installTimingMu.Unlock()
+	out := append([]installTiming(nil), i.installTimings...)
+	slices.SortStableFunc(out, func(a, b installTiming) int {
+		switch {
+		case a.duration > b.duration:
+			return -1
+		case a.duration < b.duration:
+			return 1
+		default:
+			return strings.Compare(a.label, b.label)
+		}
+	})
+	return out
+}
+
+func formatDependencyLayerSummary(index, total int, d time.Duration, compiledCount, installedCount int, verbose bool) (string, bool) {
+	if !shouldLogDependencyLayerSummary(d, compiledCount, installedCount, verbose) {
+		return "", false
+	}
+	if compiledCount > 0 {
+		return fmt.Sprintf(
+			"dependency layer %d/%d completed in %s (%d installed, %d compiled)",
+			index,
+			total,
+			installerFormatElapsed(d),
+			installedCount,
+			compiledCount,
+		), true
+	}
+	return fmt.Sprintf(
+		"dependency layer %d/%d completed in %s (%d installed)",
+		index,
+		total,
+		installerFormatElapsed(d),
+		installedCount,
+	), true
+}
+
+func shouldLogDependencyLayerSummary(d time.Duration, compiledCount, installedCount int, verbose bool) bool {
+	if installedCount <= 0 {
+		return false
+	}
+	if verbose {
+		return true
+	}
+	if compiledCount > 0 {
+		return true
+	}
+	return d >= slowLayerSummaryMin
+}
+
+func shouldStageDependencyLayerPlan(pureCount, compiledCount int, verbose bool) bool {
+	if verbose {
+		return true
+	}
+	if compiledCount > 0 {
+		return true
+	}
+	return pureCount+compiledCount >= 3
+}
+
+func formatDependencyLayerPlan(index, total, pureCount, compiledCount int) string {
+	totalCount := pureCount + compiledCount
+	if compiledCount > 0 && pureCount > 0 {
+		return fmt.Sprintf("dependency layer %d/%d: %d package(s) (%d pure, %d compiled)", index, total, totalCount, pureCount, compiledCount)
+	}
+	if compiledCount > 0 {
+		return fmt.Sprintf("dependency layer %d/%d: %d compiled package(s)", index, total, compiledCount)
+	}
+	if totalCount > 0 {
+		return fmt.Sprintf("dependency layer %d/%d: %d package(s)", index, total, totalCount)
+	}
+	return fmt.Sprintf("dependency layer %d/%d", index, total)
+}
+
+func formatParallelInstallSummary(packageCount, workers int, mode string, names []string) string {
+	if packageCount <= 0 || workers <= 1 {
+		return ""
+	}
+	summary := fmt.Sprintf("installing %d package(s) across %d parallel %s", packageCount, workers, mode)
+	if preview := previewInstallTargets(names, 6); preview != "" {
+		summary += ": " + preview
+	}
+	return summary
+}
+
+func shouldLogParallelInstallSummary(packageCount, workers int, verbose bool) bool {
+	if packageCount <= 0 || workers <= 1 {
+		return false
+	}
+	if verbose {
+		return true
+	}
+	return packageCount >= 12
+}
+
+func formatBatchInstallLabel(names []string) string {
+	if len(names) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("batch[%s]", previewInstallTargets(names, 4))
+}
+
+func previewInstallTargets(names []string, max int) string {
+	if len(names) == 0 {
+		return ""
+	}
+	if max <= 0 || len(names) <= max {
+		return strings.Join(names, ", ")
+	}
+	head := append([]string(nil), names[:max]...)
+	return fmt.Sprintf("%s, +%d more", strings.Join(head, ", "), len(names)-max)
+}
+
+func formatSlowInstallSummary(entries []installTiming, max int) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	ordered := append([]installTiming(nil), entries...)
+	slices.SortStableFunc(ordered, func(a, b installTiming) int {
+		switch {
+		case a.duration > b.duration:
+			return -1
+		case a.duration < b.duration:
+			return 1
+		default:
+			return strings.Compare(a.label, b.label)
+		}
+	})
+	if max <= 0 || max > len(entries) {
+		max = len(ordered)
+	}
+	parts := make([]string, 0, max)
+	for _, entry := range ordered[:max] {
+		parts = append(parts, fmt.Sprintf("%s %s", entry.label, installerFormatElapsed(entry.duration)))
+	}
+	summary := "slow installs: " + strings.Join(parts, ", ")
+	if len(ordered) > max {
+		summary += fmt.Sprintf(", +%d more", len(ordered)-max)
+	}
+	return summary
+}
+
+func shouldStageReuseSummary(count int, verbose bool) bool {
+	if count <= 0 {
+		return false
+	}
+	if verbose {
+		return true
+	}
+	return count >= 2
+}
+
+func formatNativeInstallSummary(d time.Duration, stats installSummaryStats) string {
+	parts := make([]string, 0, 3)
+	if stats.installedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d installed", stats.installedCount))
+	}
+	if stats.compiledInstallCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d compiled", stats.compiledInstallCount))
+	}
+	if stats.reusedCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d reused", stats.reusedCount))
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "no package changes")
+	}
+	return fmt.Sprintf("native package install completed in %s (%s)", installerFormatElapsed(d), strings.Join(parts, ", "))
+}
+
+func countInstalledPlannedPackages(i *nativeInstaller) int {
+	if i == nil || len(i.planned) == 0 {
+		return 0
+	}
+	count := 0
+	for _, name := range i.order {
+		pkg, ok := i.planned[name]
+		if ok && i.isPlannedPackageInstalled(pkg) {
+			count++
+		}
+	}
+	return count
+}
+
+func formatStoredReuseSummary(count int) string {
+	return fmt.Sprintf("reused %d stored %s", count, pluralize(count, "package", "packages"))
+}
+
+func formatCacheReuseSummary(packageCount, libraryCount int) string {
+	return fmt.Sprintf(
+		"reused %d cached %s from %d %s",
+		packageCount,
+		pluralize(packageCount, "package", "packages"),
+		libraryCount,
+		pluralize(libraryCount, "library snapshot", "library snapshots"),
+	)
+}
+
+func pluralize(count int, singular, plural string) string {
+	if count == 1 {
+		return singular
+	}
+	return plural
 }
 
 func buildInstallCommand(rBinary, workDir, cacheRoot, libraryPath string, env []string, packageName, target string) (*exec.Cmd, error) {
@@ -2904,10 +3324,16 @@ func withMakeLinkerFixups(env, prefixes []string, plan toolchainenv.NativeFixupP
 }
 
 func (i *nativeInstaller) download(rawURL, name string) (string, error) {
+	return i.downloadWithOptions(rawURL, name, false)
+}
+
+func (i *nativeInstaller) downloadWithOptions(rawURL, name string, quiet bool) (string, error) {
 	target := filepath.Join(i.downloadRoot, downloadCacheName(rawURL, name))
 	if info, err := os.Stat(target); err == nil && !info.IsDir() && info.Size() > 0 {
 		if err := validateCachedDownload(target); err == nil {
-			progresscmd.Stage(i.stderr, "reusing cached "+name)
+			if !quiet {
+				progresscmd.Stage(i.stderr, "reusing cached "+name)
+			}
 			return target, nil
 		}
 		_ = os.Remove(target)
@@ -2915,7 +3341,9 @@ func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 	legacyTarget := filepath.Join(i.downloadRoot, legacyDownloadCacheName(rawURL, name))
 	if info, err := os.Stat(legacyTarget); err == nil && !info.IsDir() && info.Size() > 0 {
 		if err := validateCachedDownload(legacyTarget); err == nil {
-			progresscmd.Stage(i.stderr, "reusing cached "+name)
+			if !quiet {
+				progresscmd.Stage(i.stderr, "reusing cached "+name)
+			}
 			return legacyTarget, nil
 		}
 		_ = os.Remove(legacyTarget)
@@ -2925,8 +3353,11 @@ func (i *nativeInstaller) download(rawURL, name string) (string, error) {
 		return "", err
 	}
 
-	i.stage("downloading " + name)
-	if err := downloadWithRetry(i.httpClient, rawURL, target, "downloading "+name, i.stderr); err != nil {
+	progress := i.stderr
+	if quiet {
+		progress = io.Discard
+	}
+	if err := downloadWithRetry(i.httpClient, rawURL, target, "downloading "+name, progress); err != nil {
 		return "", err
 	}
 	return target, nil
@@ -3685,7 +4116,10 @@ func downloadOnce(client *http.Client, rawURL, target, label string, progress io
 		_ = os.Remove(part)
 	}()
 
-	if err := progresscmd.Copy(file, resp.Body, resp.ContentLength, label, progress); err != nil {
+	if err := progresscmd.CopyWithOptions(file, resp.Body, resp.ContentLength, label, progress, progresscmd.CopyOptions{
+		NonTTYStartDelay: nonTTYDownloadStartMin,
+		NonTTYHeartbeat:  nonTTYDownloadHeartbeat,
+	}); err != nil {
 		return err
 	}
 	if err := file.Close(); err != nil {
@@ -4263,11 +4697,20 @@ func (i *nativeInstaller) ensurePackageBuildToolsReady(pkg string) error {
 	if i.buildToolsChecked {
 		return nil
 	}
+	i.stage(formatBuildToolsCheckStage(pkg))
 	if err := installerEnsureBuildTools(pkg, i.req.Environment); err != nil {
 		return err
 	}
 	i.buildToolsChecked = true
 	return nil
+}
+
+func formatBuildToolsCheckStage(pkg string) string {
+	pkg = strings.TrimSpace(pkg)
+	if pkg == "" {
+		return "validating source build toolchain"
+	}
+	return fmt.Sprintf("validating source build toolchain for %s", pkg)
 }
 
 func ensurePackageBuildToolsForEnvironment(pkg string, env []string) error {

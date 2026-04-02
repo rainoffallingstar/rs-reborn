@@ -90,6 +90,16 @@ Continuous integration:
 - [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes date-tagged GitHub Release binaries after successful `main` or `master` CI runs; successful rebuilds later the same day reuse that date tag and refresh the assets
 - the CI helper scripts live under [`scripts/ci/`](scripts/ci)
 
+Performance benchmarking:
+
+- installer microbenchmarks: [`scripts/bench/installer-bench.sh`](scripts/bench/installer-bench.sh)
+- runner/logging microbenchmarks: [`scripts/bench/runner-bench.sh`](scripts/bench/runner-bench.sh)
+- combined local baseline capture: [`scripts/bench/capture-baseline.sh`](scripts/bench/capture-baseline.sh), which also refreshes a latest-link alias and emits `benchmark.json`
+- baseline diff helper: [`scripts/bench/diff-baseline.sh`](scripts/bench/diff-baseline.sh), which compares explicit bundles or the default latest/previous captures
+- repeated baseline capture also emits a compact `DIFF.md`/`benchmark-diff.txt` pair when a previous capture is available
+- benchmark notes and current local baseline: [`docs/benchmarks.md`](docs/benchmarks.md)
+- optional CI benchmark job: manually trigger `CI` with `run_benchmarks=true` to upload a run-tagged benchmark artifact
+
 Initialize a project:
 
 ```bash
