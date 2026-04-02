@@ -1829,7 +1829,7 @@ func TestInstallRepoPackageReadsDescriptionFromDownloadedArtifact(t *testing.T) 
 	}
 }
 
-func TestPrefetchPlannedPackagesHydratesRepoMetadataFromDownloadedArtifact(t *testing.T) {
+func TestPrefetchPlannedPackagesLeavesRepoMetadataLazyButCached(t *testing.T) {
 	dir := t.TempDir()
 	archive := testTarGzBytes(t, map[string]string{
 		"pkg/DESCRIPTION": "Package: pkg\nVersion: 1.0.0\nImports: cli\nNeedsCompilation: yes\n",
@@ -1872,14 +1872,18 @@ func TestPrefetchPlannedPackagesHydratesRepoMetadataFromDownloadedArtifact(t *te
 		t.Fatalf("prefetchPlannedPackages() error = %v", err)
 	}
 	got := inst.planned["pkg"]
-	if got.Repo == nil || !got.Repo.DepsLoaded {
-		t.Fatalf("planned repo not hydrated: %#v", got.Repo)
+	if got.Repo == nil || got.Repo.DepsLoaded {
+		t.Fatalf("planned repo should remain lazy after prefetch: %#v", got.Repo)
 	}
-	if !got.Repo.NeedsCompilation {
-		t.Fatalf("NeedsCompilation = false, want true")
+	desc, err := inst.loadPrefetchedRepoDescription("pkg")
+	if err != nil {
+		t.Fatalf("loadPrefetchedRepoDescription() error = %v", err)
 	}
-	if !reflect.DeepEqual(got.Deps, []packageRequirement{{Name: "cli"}}) {
-		t.Fatalf("Deps = %v, want cli dependency", got.Deps)
+	if !desc.NeedsCompilation {
+		t.Fatalf("desc.NeedsCompilation = false, want true")
+	}
+	if !reflect.DeepEqual(desc.Dependencies, []packageRequirement{{Name: "cli"}}) {
+		t.Fatalf("desc.Dependencies = %v, want cli dependency", desc.Dependencies)
 	}
 }
 
@@ -1955,7 +1959,7 @@ func TestPrefetchPlannedPackagesReportsSummary(t *testing.T) {
 	if !strings.Contains(log, "prefetching 2 package artifact(s)") {
 		t.Fatalf("prefetch log = %q, want prefetch stage", log)
 	}
-	if !strings.Contains(log, "prefetched 2 package artifact(s), downloaded 1, reused 1 cached, hydrated metadata for 2") {
+	if !strings.Contains(log, "prefetched 2 package artifact(s), downloaded 1, reused 1 cached") {
 		t.Fatalf("prefetch log = %q, want summary counts", log)
 	}
 }

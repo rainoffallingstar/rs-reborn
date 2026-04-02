@@ -1158,7 +1158,6 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 	type prefetchStats struct {
 		reusedCache int
 		downloaded  int
-		hydrated    int
 	}
 	stats := prefetchStats{}
 	records := make([]repoRecord, 0, len(i.planned))
@@ -1183,13 +1182,6 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 	}
 
 	progresscmd.Stage(i.stderr, fmt.Sprintf("prefetching %d package artifact(s)", len(records)))
-	hydrationTargets := make([]string, 0, len(i.order))
-	for _, name := range i.order {
-		pkg, ok := i.planned[name]
-		if ok && pkg.Repo != nil && !pkg.Repo.DepsLoaded {
-			hydrationTargets = append(hydrationTargets, name)
-		}
-	}
 	if len(records) == 1 {
 		if _, ok := i.repoDownloadReadyPath(records[0]); ok {
 			stats.reusedCache++
@@ -1200,11 +1192,7 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 		if stats.reusedCache == 0 {
 			stats.downloaded++
 		}
-		if err := i.hydratePrefetchedRepoRecords(hydrationTargets); err != nil {
-			return err
-		}
-		stats.hydrated = len(hydrationTargets)
-		progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache, stats.hydrated))
+		progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache))
 		return nil
 	}
 
@@ -1248,24 +1236,17 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 		}
 		stats.downloaded++
 	}
-	if err := i.hydratePrefetchedRepoRecords(hydrationTargets); err != nil {
-		return err
-	}
-	stats.hydrated = len(hydrationTargets)
-	progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache, stats.hydrated))
+	progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache))
 	return nil
 }
 
-func formatPrefetchSummary(total, downloaded, reusedCache, hydrated int) string {
+func formatPrefetchSummary(total, downloaded, reusedCache int) string {
 	parts := []string{fmt.Sprintf("prefetched %d package artifact(s)", total)}
 	if downloaded > 0 {
 		parts = append(parts, fmt.Sprintf("downloaded %d", downloaded))
 	}
 	if reusedCache > 0 {
 		parts = append(parts, fmt.Sprintf("reused %d cached", reusedCache))
-	}
-	if hydrated > 0 {
-		parts = append(parts, fmt.Sprintf("hydrated metadata for %d", hydrated))
 	}
 	return strings.Join(parts, ", ")
 }
