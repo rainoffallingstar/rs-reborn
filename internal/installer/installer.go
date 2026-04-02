@@ -1372,6 +1372,15 @@ func (i *nativeInstaller) applyPrefetchedRepoDescription(name string, desc descr
 }
 
 func (i *nativeInstaller) installPackageBatch(names []string) ([]string, error) {
+	if len(names) > 1 && i.canBatchInstallRepoPackages(names) {
+		installed, err := i.installRepoPackageBatch(names)
+		if err != nil {
+			return nil, err
+		}
+		if len(installed) > 0 {
+			return installed, nil
+		}
+	}
 	return i.installPackageBatchWithWorkers(names, parallelWorkerLimit(len(names)))
 }
 
@@ -2200,6 +2209,63 @@ func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 	return nil
 }
 
+func (i *nativeInstaller) canBatchInstallRepoPackages(names []string) bool {
+	if len(names) < 2 {
+		return false
+	}
+	for _, name := range names {
+		pkg, ok := i.planned[name]
+		if !ok || i.isPlannedPackageInstalled(pkg) {
+			return false
+		}
+		if pkg.Source != sourceCRAN && pkg.Source != sourceBioconductor {
+			return false
+		}
+		if pkg.Repo == nil || pkg.Repo.NeedsCompilation {
+			return false
+		}
+		if len(toolchainenv.NativeCategoriesForPackages([]string{name})) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (i *nativeInstaller) installRepoPackageBatch(names []string) ([]string, error) {
+	targets := make([]string, 0, len(names))
+	installed := make([]string, 0, len(names))
+	for _, name := range names {
+		pkg, ok := i.planned[name]
+		if !ok || pkg.Repo == nil || i.isPlannedPackageInstalled(pkg) {
+			continue
+		}
+		fmt.Fprintf(i.stdout, "[rs] queueing %s package %s %s for native batch install\n", pkg.Repo.Source, pkg.Repo.Name, pkg.Repo.Version)
+		target, err := i.ensureRepoPackageDownloaded(*pkg.Repo)
+		if err != nil {
+			return nil, fmt.Errorf("download %s: %w", name, err)
+		}
+		targets = append(targets, target)
+		installed = append(installed, name)
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	cmd, err := buildInstallCommandTargets(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, "", targets...)
+	if err != nil {
+		return nil, err
+	}
+	label := fmt.Sprintf("installing R package batch (%d packages)", len(targets))
+	if err := progresscmd.Run(cmd, label, i.stderr, i.stderr); err != nil {
+		return nil, err
+	}
+	for _, name := range installed {
+		if err := removeSourceMetadata(i.metaDir, name); err != nil {
+			return nil, err
+		}
+	}
+	return installed, nil
+}
+
 func (i *nativeInstaller) ensureRepoPackageDownloaded(record repoRecord) (string, error) {
 	rawURL := strings.TrimSpace(record.TarballURL)
 	if rawURL == "" {
@@ -2351,10 +2417,16 @@ func (i *nativeInstaller) runRCommandInstall(packageName, target string) error {
 }
 
 func buildInstallCommand(rBinary, workDir, cacheRoot, libraryPath string, env []string, packageName, target string) (*exec.Cmd, error) {
+	return buildInstallCommandTargets(rBinary, workDir, cacheRoot, libraryPath, env, packageName, target)
+}
+
+func buildInstallCommandTargets(rBinary, workDir, cacheRoot, libraryPath string, env []string, packageName string, targets ...string) (*exec.Cmd, error) {
 	installEnv := withInstallEnv(withPackageNativeFixups(withLibraryEnv(env, libraryPath), packageName), cacheRoot)
+	args := []string{"CMD", "INSTALL", "-l", libraryPath}
+	args = append(args, targets...)
 	wrappedName, wrappedArgs, wrappedEnv, _, err := toolchainenv.WrapCommand(
 		rBinary,
-		[]string{"CMD", "INSTALL", "-l", libraryPath, target},
+		args,
 		installEnv,
 	)
 	if err != nil {

@@ -390,6 +390,55 @@ func TestBuildInstallCommandWrapsEnvaToolchainRun(t *testing.T) {
 	}
 }
 
+func TestBuildInstallCommandTargetsWrapsMultiplePackages(t *testing.T) {
+	dir := t.TempDir()
+	setTestHomeDir(t, dir)
+	binDir := filepath.Join(dir, "bin")
+	envaName := "enva"
+	if installerGOOS == "windows" {
+		envaName += ".exe"
+	}
+	envaPath := filepath.Join(binDir, envaName)
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(binDir) error = %v", err)
+	}
+	if err := os.WriteFile(envaPath, []byte("binary"), 0o755); err != nil {
+		t.Fatalf("WriteFile(enva) error = %v", err)
+	}
+
+	prefix := filepath.Join(dir, ".local", "share", "rattler", "envs", "rs-sysdeps")
+	env := toolchainenv.Apply([]string{"PATH=" + binDir}, []string{prefix}, []string{
+		filepath.Join(prefix, "lib", "pkgconfig"),
+		filepath.Join(prefix, "share", "pkgconfig"),
+	})
+
+	cmd, err := buildInstallCommandTargets(
+		"/usr/bin/R",
+		dir,
+		filepath.Join(dir, "cache"),
+		filepath.Join(dir, "lib"),
+		env,
+		"",
+		filepath.Join(dir, "pkg-a.tar.gz"),
+		filepath.Join(dir, "pkg-b.tar.gz"),
+	)
+	if err != nil {
+		t.Fatalf("buildInstallCommandTargets() error = %v", err)
+	}
+	if cmd.Path != envaPath {
+		t.Fatalf("cmd.Path = %q, want %q", cmd.Path, envaPath)
+	}
+	want := []string{
+		"run", "rs-sysdeps", "--",
+		"/usr/bin/R", "CMD", "INSTALL", "-l", filepath.Join(dir, "lib"),
+		filepath.Join(dir, "pkg-a.tar.gz"),
+		filepath.Join(dir, "pkg-b.tar.gz"),
+	}
+	if !reflect.DeepEqual(cmd.Args[1:], want) {
+		t.Fatalf("cmd.Args = %v, want %v", cmd.Args[1:], want)
+	}
+}
+
 func TestBuildInstallCommandPreservesExplicitParallelBuildEnv(t *testing.T) {
 	dir := t.TempDir()
 	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "cache"), filepath.Join(dir, "lib"), []string{
@@ -550,6 +599,50 @@ func TestBuildInstallCommandAddsPackageSpecificEncodingFixups(t *testing.T) {
 	}
 	if runtimeLibraryEnv := runtimeLibraryEnvForInstallerTest(); runtimeLibraryEnv != "" && !slices.Contains(cmd.Env, runtimeLibraryEnv+"="+libDir) {
 		t.Fatalf("cmd.Env missing %s=%s: %v", runtimeLibraryEnv, libDir, cmd.Env)
+	}
+}
+
+func TestCanBatchInstallRepoPackagesRejectsCompiledAndSpecialFixupPackages(t *testing.T) {
+	inst := nativeInstaller{
+		planned: map[string]plannedPackage{
+			"cli": {
+				Name:   "cli",
+				Source: sourceCRAN,
+				Repo: &repoRecord{
+					Name:             "cli",
+					Source:           sourceCRAN,
+					NeedsCompilation: false,
+				},
+			},
+			"xml2": {
+				Name:   "xml2",
+				Source: sourceCRAN,
+				Repo: &repoRecord{
+					Name:             "xml2",
+					Source:           sourceCRAN,
+					NeedsCompilation: true,
+				},
+			},
+			"haven": {
+				Name:   "haven",
+				Source: sourceCRAN,
+				Repo: &repoRecord{
+					Name:             "haven",
+					Source:           sourceCRAN,
+					NeedsCompilation: false,
+				},
+			},
+		},
+		installedPackages: map[string]installedPackage{},
+	}
+	if inst.canBatchInstallRepoPackages([]string{"cli"}) {
+		t.Fatalf("single package should not trigger batch install")
+	}
+	if inst.canBatchInstallRepoPackages([]string{"cli", "xml2"}) {
+		t.Fatalf("compiled package should prevent batch install")
+	}
+	if inst.canBatchInstallRepoPackages([]string{"cli", "haven"}) {
+		t.Fatalf("package requiring native fixups should prevent batch install")
 	}
 }
 
