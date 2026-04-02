@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -286,6 +287,10 @@ type ValidationMode string
 
 var nativeInstall = func(req installer.Request) error {
 	return installer.Install(req)
+}
+
+var nativeInstallForRun = func(req installer.Request) (func() error, error) {
+	return installer.InstallForRun(req)
 }
 
 var (
@@ -947,7 +952,7 @@ type InstallFailureDetail struct {
 	Symbols      []string
 }
 
-func Run(opts RunOptions) error {
+func Run(opts RunOptions) (runErr error) {
 	env, err := resolveEnvironment(RunOptions{
 		ScriptPath:    opts.ScriptPath,
 		ScriptArgs:    opts.ScriptArgs,
@@ -967,6 +972,21 @@ func Run(opts RunOptions) error {
 	if err != nil {
 		return err
 	}
+	var postInstallWait func() error
+	defer func() {
+		if postInstallWait == nil {
+			return
+		}
+		if err := postInstallWait(); err != nil {
+			if runErr == nil {
+				runErr = err
+				return
+			}
+			if opts.Stderr != nil {
+				fmt.Fprintf(opts.Stderr, "[rs] background managed package cache sync failed: %v\n", err)
+			}
+		}
+	}()
 	if opts.BootstrapToolchain {
 		if err := maybeBootstrapResolvedEnvironment(&env); err != nil {
 			return err
@@ -983,17 +1003,22 @@ func Run(opts RunOptions) error {
 			return err
 		}
 		if !opts.SkipInstall {
-			if err := EnsureInstalled(env); err != nil {
+			wait, err := ensureInstalledForRun(env)
+			if err != nil {
 				return err
 			}
+			postInstallWait = wait
 		}
 		if err := ValidateInstalledPackages(env, validation.Lockfile, ValidationModeLocked); err != nil {
 			return err
 		}
 	} else if !opts.SkipInstall {
-		if err := EnsureInstalled(env); err != nil {
+		wait, err := ensureInstalledForRun(env)
+		if err != nil {
 			return err
 		}
+		postInstallWait = wait
+		progresscmd.Stage(env.Stderr, "recording lockfile")
 		if err := WriteLockfile(env); err != nil {
 			return err
 		}
@@ -1007,6 +1032,7 @@ func Run(opts RunOptions) error {
 	cmd.Dir = filepath.Dir(env.ScriptPath)
 	cmd.Env = runtimeEnv(env, false)
 
+	progresscmd.Stage(env.Stderr, "launching script")
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -4555,6 +4581,36 @@ func ensureInstalledNative(env ResolvedEnvironment) error {
 	return nil
 }
 
+func ensureInstalledForRun(env ResolvedEnvironment) (func() error, error) {
+	backend := installBackend()
+	switch backend {
+	case "native", "auto":
+		return ensureInstalledNativeForRun(env)
+	case "pak":
+		return nil, bootstrapInstall(env, backend)
+	default:
+		return nil, fmt.Errorf("unsupported install backend %s", backend)
+	}
+}
+
+func ensureInstalledNativeForRun(env ResolvedEnvironment) (func() error, error) {
+	req, err := installerRequestFromEnvironment(env, env.Stdout, env.Stderr)
+	if err != nil {
+		return nil, err
+	}
+	wait, err := nativeInstallForRun(req)
+	if err != nil {
+		if upgraded, retryErr := maybeUpgradeBootstrappedToolchainAndRetry(&env, err); upgraded {
+			if retryErr == nil {
+				return nil, nil
+			}
+			return nil, wrapExternalInterpreterInstallError(retryErr, env.Runtime)
+		}
+		return nil, wrapExternalInterpreterInstallError(err, env.Runtime)
+	}
+	return wait, nil
+}
+
 func maybeUpgradeBootstrappedToolchainAndRetry(env *ResolvedEnvironment, installErr error) (bool, error) {
 	if env == nil || !env.BootstrappedToolchain {
 		return false, nil
@@ -4668,37 +4724,6 @@ func ValidateLockfile(env ResolvedEnvironment, mode ValidationMode) error {
 }
 
 func InstalledPackages(env ResolvedEnvironment) ([]lockfile.Package, error) {
-	script := `
-pkgs <- Filter(nzchar, strsplit(Sys.getenv("RS_ALL_DEPS", ""), ",", fixed = TRUE)[[1]])
-ip <- installed.packages(
-  lib.loc = .libPaths(),
-  fields = c("Priority", "Repository", "RemoteType", "RemoteUsername", "RemoteRepo", "RemoteRef", "RemoteSha", "RemoteSubdir", "RemoteHost")
-)
-for (pkg in pkgs) {
-  if (pkg %in% rownames(ip)) {
-    priority <- if ("Priority" %in% colnames(ip)) ip[pkg, "Priority"] else ""
-    source <- if ("Repository" %in% colnames(ip)) ip[pkg, "Repository"] else ""
-    remote_type <- if ("RemoteType" %in% colnames(ip)) ip[pkg, "RemoteType"] else ""
-    remote_username <- if ("RemoteUsername" %in% colnames(ip)) ip[pkg, "RemoteUsername"] else ""
-    remote_repo <- if ("RemoteRepo" %in% colnames(ip)) ip[pkg, "RemoteRepo"] else ""
-    remote_ref <- if ("RemoteRef" %in% colnames(ip)) ip[pkg, "RemoteRef"] else ""
-    remote_sha <- if ("RemoteSha" %in% colnames(ip)) ip[pkg, "RemoteSha"] else ""
-    remote_subdir <- if ("RemoteSubdir" %in% colnames(ip)) ip[pkg, "RemoteSubdir"] else ""
-    remote_host <- if ("RemoteHost" %in% colnames(ip)) ip[pkg, "RemoteHost"] else ""
-    cat(pkg, "\t", ip[pkg, "Version"], "\t", priority, "\t", source, "\t", remote_type, "\t", remote_username, "\t", remote_repo, "\t", remote_ref, "\t", remote_sha, "\t", remote_subdir, "\t", remote_host, "\n", sep = "")
-  }
-}`
-
-	output, err := runRIntrospectionScript(
-		env.Interpreter,
-		filepath.Dir(env.ScriptPath),
-		env.Stderr,
-		script,
-		append(runtimeEnv(env, false), "RS_ALL_DEPS="+strings.Join(allDeps(env), ",")),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("inspect installed packages: %w", err)
-	}
 	metaByName, err := readInstalledSourceMetadata(env.LibraryPath)
 	if err != nil {
 		return nil, err
@@ -4712,118 +4737,211 @@ for (pkg in pkgs) {
 		sourceByName[name] = "bioconductor"
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) == 1 && lines[0] == "" {
-		return nil, nil
-	}
-
-	packages := make([]lockfile.Package, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+	libraryPaths := installedPackageLibraryPaths(env)
+	packages := make([]lockfile.Package, 0, len(allDeps(env)))
+	for _, name := range allDeps(env) {
+		pkg, ok, err := readInstalledLockfilePackage(libraryPaths, name, sourceByName, env.SourceDeps, metaByName)
+		if err != nil {
+			return nil, err
 		}
-		fields := strings.Split(line, "\t")
-		if len(fields) < 2 {
-			continue
+		if ok {
+			packages = append(packages, pkg)
 		}
-		source := sourceByName[fields[0]]
-		priority := ""
-		if len(fields) >= 3 {
-			priority = fields[2]
-			if priority == "NA" {
-				priority = ""
-			}
-			if priority == "base" || priority == "recommended" {
-				source = priority
-			}
-		}
-		if len(fields) >= 4 && fields[3] != "" && source != "base" && source != "recommended" && source != "cran" && source != "bioconductor" {
-			source = fields[3]
-		}
-		pkg := lockfile.Package{
-			Name:     fields[0],
-			Version:  fields[1],
-			Source:   source,
-			Priority: priority,
-		}
-		if len(fields) >= 11 {
-			remoteType := fields[4]
-			remoteUsername := fields[5]
-			remoteRepo := fields[6]
-			remoteRef := fields[7]
-			remoteSHA := fields[8]
-			remoteSubdir := fields[9]
-			remoteHost := fields[10]
-			if remoteType == "github" {
-				pkg.Source = "github"
-				if remoteHost != "" && remoteHost != "NA" {
-					pkg.SourceHost = remoteHost
-				}
-				if remoteUsername != "" && remoteRepo != "" {
-					pkg.SourceLocation = remoteUsername + "/" + remoteRepo
-				}
-				if remoteRef != "" && remoteRef != "NA" {
-					pkg.SourceRef = remoteRef
-				}
-				if remoteSHA != "" && remoteSHA != "NA" {
-					pkg.SourceCommit = remoteSHA
-				}
-				if remoteSubdir != "" && remoteSubdir != "NA" {
-					pkg.SourceSubdir = remoteSubdir
-				}
-			}
-		}
-		if spec, ok := env.SourceDeps[pkg.Name]; ok {
-			switch spec.Type {
-			case "github":
-				pkg.Source = "github"
-				if pkg.SourceHost == "" {
-					pkg.SourceHost = spec.Host
-				}
-				if pkg.SourceLocation == "" {
-					pkg.SourceLocation = spec.Repo
-				}
-				if pkg.SourceRef == "" {
-					pkg.SourceRef = spec.Ref
-				}
-				if pkg.SourceSubdir == "" {
-					pkg.SourceSubdir = spec.Subdir
-				}
-			case "local":
-				pkg.Source = "local"
-				pkg.SourceLocation = spec.Path
-			}
-		}
-		if meta, ok := metaByName[pkg.Name]; ok {
-			if meta.Source != "" {
-				pkg.Source = meta.Source
-			}
-			if meta.SourceHost != "" {
-				pkg.SourceHost = meta.SourceHost
-			}
-			if meta.SourceLocation != "" {
-				pkg.SourceLocation = meta.SourceLocation
-			}
-			if meta.SourceRef != "" {
-				pkg.SourceRef = meta.SourceRef
-			}
-			if meta.SourceCommit != "" {
-				pkg.SourceCommit = meta.SourceCommit
-			}
-			if meta.SourceSubdir != "" {
-				pkg.SourceSubdir = meta.SourceSubdir
-			}
-			if meta.SourceFingerprint != "" {
-				pkg.SourceFingerprint = meta.SourceFingerprint
-			}
-			if meta.SourceFingerprintKind != "" {
-				pkg.SourceFingerprintKind = meta.SourceFingerprintKind
-			}
-		}
-		packages = append(packages, pkg)
 	}
 	return packages, nil
+}
+
+func installedPackageLibraryPaths(env ResolvedEnvironment) []string {
+	paths := make([]string, 0, 5)
+	seen := map[string]struct{}{}
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return
+		}
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok {
+			return
+		}
+		info, err := os.Stat(path)
+		if err != nil || !info.IsDir() {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	add(env.LibraryPath)
+	binDir := filepath.Dir(env.Interpreter)
+	add(filepath.Join(binDir, "..", "library"))
+	add(filepath.Join(binDir, "..", "lib", "R", "library"))
+	add(filepath.Join(binDir, "..", "lib64", "R", "library"))
+	add(filepath.Join(binDir, "..", "Resources", "library"))
+	return paths
+}
+
+func readInstalledLockfilePackage(libraryPaths []string, name string, sourceByName map[string]string, sourceDeps map[string]project.SourceSpec, metaByName map[string]sourceMetadata) (lockfile.Package, bool, error) {
+	for _, libraryPath := range libraryPaths {
+		pkg, ok, err := readInstalledLockfilePackageFromLibrary(libraryPath, name, sourceByName, sourceDeps, metaByName)
+		if err != nil {
+			return lockfile.Package{}, false, err
+		}
+		if ok {
+			return pkg, true, nil
+		}
+	}
+	return lockfile.Package{}, false, nil
+}
+
+func readInstalledLockfilePackageFromLibrary(libraryPath, name string, sourceByName map[string]string, sourceDeps map[string]project.SourceSpec, metaByName map[string]sourceMetadata) (lockfile.Package, bool, error) {
+	descPath := filepath.Join(libraryPath, name, "DESCRIPTION")
+	data, err := os.ReadFile(descPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return lockfile.Package{}, false, nil
+	}
+	if err != nil {
+		return lockfile.Package{}, false, fmt.Errorf("read installed DESCRIPTION for %s: %w", name, err)
+	}
+	fields := parseDCFRecord(data)
+	if len(fields) == 0 {
+		return lockfile.Package{}, false, nil
+	}
+	pkg := lockfile.Package{
+		Name:     name,
+		Version:  normalizeInstalledPackageField(fields["Version"]),
+		Source:   sourceByName[name],
+		Priority: normalizeInstalledPackageField(fields["Priority"]),
+	}
+	if pkg.Priority == "base" || pkg.Priority == "recommended" {
+		pkg.Source = pkg.Priority
+	}
+	repository := normalizeInstalledPackageField(fields["Repository"])
+	if pkg.Source != "base" && pkg.Source != "recommended" {
+		switch {
+		case strings.EqualFold(repository, "CRAN") && pkg.Source == "":
+			pkg.Source = "cran"
+		case strings.Contains(strings.ToLower(repository), "bioconductor") && pkg.Source == "":
+			pkg.Source = "bioconductor"
+		case repository != "" && pkg.Source != "cran" && pkg.Source != "bioconductor":
+			pkg.Source = repository
+		}
+	}
+	if normalizeInstalledPackageField(fields["RemoteType"]) == "github" {
+		pkg.Source = "github"
+		remoteHost := normalizeInstalledPackageField(fields["RemoteHost"])
+		remoteUsername := normalizeInstalledPackageField(fields["RemoteUsername"])
+		remoteRepo := normalizeInstalledPackageField(fields["RemoteRepo"])
+		remoteRef := normalizeInstalledPackageField(fields["RemoteRef"])
+		remoteSHA := normalizeInstalledPackageField(fields["RemoteSha"])
+		remoteSubdir := normalizeInstalledPackageField(fields["RemoteSubdir"])
+		if remoteHost != "" {
+			pkg.SourceHost = remoteHost
+		}
+		if remoteUsername != "" && remoteRepo != "" {
+			pkg.SourceLocation = remoteUsername + "/" + remoteRepo
+		}
+		if remoteRef != "" {
+			pkg.SourceRef = remoteRef
+		}
+		if remoteSHA != "" {
+			pkg.SourceCommit = remoteSHA
+		}
+		if remoteSubdir != "" {
+			pkg.SourceSubdir = remoteSubdir
+		}
+	}
+	if spec, ok := sourceDeps[pkg.Name]; ok {
+		switch spec.Type {
+		case "github":
+			pkg.Source = "github"
+			if pkg.SourceHost == "" {
+				pkg.SourceHost = spec.Host
+			}
+			if pkg.SourceLocation == "" {
+				pkg.SourceLocation = spec.Repo
+			}
+			if pkg.SourceRef == "" {
+				pkg.SourceRef = spec.Ref
+			}
+			if pkg.SourceSubdir == "" {
+				pkg.SourceSubdir = spec.Subdir
+			}
+		case "local":
+			pkg.Source = "local"
+			pkg.SourceLocation = spec.Path
+		case "git":
+			pkg.Source = "git"
+			if pkg.SourceLocation == "" {
+				pkg.SourceLocation = spec.URL
+			}
+			if pkg.SourceRef == "" {
+				pkg.SourceRef = spec.Ref
+			}
+			if pkg.SourceSubdir == "" {
+				pkg.SourceSubdir = spec.Subdir
+			}
+		}
+	}
+	if meta, ok := metaByName[pkg.Name]; ok {
+		if meta.Source != "" {
+			pkg.Source = meta.Source
+		}
+		if meta.SourceHost != "" {
+			pkg.SourceHost = meta.SourceHost
+		}
+		if meta.SourceLocation != "" {
+			pkg.SourceLocation = meta.SourceLocation
+		}
+		if meta.SourceRef != "" {
+			pkg.SourceRef = meta.SourceRef
+		}
+		if meta.SourceCommit != "" {
+			pkg.SourceCommit = meta.SourceCommit
+		}
+		if meta.SourceSubdir != "" {
+			pkg.SourceSubdir = meta.SourceSubdir
+		}
+		if meta.SourceFingerprint != "" {
+			pkg.SourceFingerprint = meta.SourceFingerprint
+		}
+		if meta.SourceFingerprintKind != "" {
+			pkg.SourceFingerprintKind = meta.SourceFingerprintKind
+		}
+	}
+	return pkg, true, nil
+}
+
+func normalizeInstalledPackageField(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.EqualFold(value, "NA") {
+		return ""
+	}
+	return value
+}
+
+func parseDCFRecord(data []byte) map[string]string {
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	record := map[string]string{}
+	lastKey := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "" {
+			if len(record) > 0 {
+				break
+			}
+			continue
+		}
+		if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && lastKey != "" {
+			record[lastKey] += " " + strings.TrimSpace(line)
+			continue
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		lastKey = strings.TrimSpace(key)
+		record[lastKey] = strings.TrimSpace(value)
+	}
+	return record
 }
 
 func InspectRuntime(env ResolvedEnvironment) (RuntimeMetadata, error) {

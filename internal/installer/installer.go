@@ -292,28 +292,43 @@ func Validate(req Request) error {
 }
 
 func Install(req Request) error {
-	inst, err := newInstaller(req, true)
+	wait, err := install(req, true)
 	if err != nil {
 		return err
+	}
+	if wait != nil {
+		return wait()
+	}
+	return nil
+}
+
+func InstallForRun(req Request) (func() error, error) {
+	return install(req, false)
+}
+
+func install(req Request, waitForStoreSync bool) (func() error, error) {
+	inst, err := newInstaller(req, true)
+	if err != nil {
+		return nil, err
 	}
 	defer os.RemoveAll(inst.tempRoot)
 
 	if err := inst.plan(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := inst.seedPlannedPackagesFromStore(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := inst.seedPlannedPackagesFromCache(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := inst.prefetchPlannedPackages(); err != nil {
-		return err
+		return nil, err
 	}
 
+	pendingStoreSyncs := make([]<-chan error, 0, 4)
 	if inst.canParallelInstallPurePackages() {
 		layers := installPlanLayers(inst.planned, inst.order)
-		pendingStoreSyncs := make([]<-chan error, 0, len(layers)*2)
 		for idx, layer := range layers {
 			progresscmd.Stage(inst.stderr, fmt.Sprintf("installing dependency layer %d/%d", idx+1, len(layers)))
 			pure := make([]string, 0, len(layer))
@@ -331,11 +346,11 @@ func Install(req Request) error {
 			installed, err := inst.installPackageBatch(pure)
 			if err != nil {
 				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
-				return err
+				return nil, err
 			}
 			if err := inst.markPlannedPackagesInstalled(installed); err != nil {
 				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
-				return err
+				return nil, err
 			}
 			if syncDone := inst.startSyncPlannedPackagesToStore(installed); syncDone != nil {
 				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
@@ -343,33 +358,51 @@ func Install(req Request) error {
 			compiledInstalled, err := inst.installPackageBatchWithWorkers(compiled, compiledBatchWorkerLimit(len(compiled)))
 			if err != nil {
 				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
-				return err
+				return nil, err
 			}
 			if err := inst.markPlannedPackagesInstalled(compiledInstalled); err != nil {
 				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
-				return err
+				return nil, err
 			}
 			if syncDone := inst.startSyncPlannedPackagesToStore(compiledInstalled); syncDone != nil {
 				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
 			}
 		}
-		return waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
+		if waitForStoreSync {
+			return nil, finalizePendingStoreSyncs(inst.stderr, pendingStoreSyncs)
+		}
+		return backgroundStoreSyncWaiter(inst.stderr, pendingStoreSyncs), nil
 	}
 
 	for idx, name := range inst.order {
 		progresscmd.Stage(inst.stderr, fmt.Sprintf("installing package %d/%d", idx+1, len(inst.order)))
 		installed, err := inst.installPlannedPackage(name)
 		if err != nil {
-			return err
+			_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
+			return nil, err
 		}
 		if installed {
-			if err := inst.recordPlannedPackageInstalled(name); err != nil {
-				return err
+			if waitForStoreSync {
+				if err := inst.recordPlannedPackageInstalled(name); err != nil {
+					_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
+					return nil, err
+				}
+				continue
+			}
+			if err := inst.markPlannedPackageInstalled(name); err != nil {
+				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
+				return nil, err
+			}
+			if syncDone := inst.startSyncPlannedPackagesToStore([]string{name}); syncDone != nil {
+				pendingStoreSyncs = append(pendingStoreSyncs, syncDone)
 			}
 		}
 	}
 
-	return nil
+	if waitForStoreSync {
+		return nil, finalizePendingStoreSyncs(inst.stderr, pendingStoreSyncs)
+	}
+	return backgroundStoreSyncWaiter(inst.stderr, pendingStoreSyncs), nil
 }
 
 func (i *nativeInstaller) recordPlannedPackageInstalled(name string) error {
@@ -466,6 +499,23 @@ func waitAllSyncPlannedPackagesToStore(dones []<-chan error) error {
 		}
 	}
 	return firstErr
+}
+
+func finalizePendingStoreSyncs(stderr io.Writer, dones []<-chan error) error {
+	if len(dones) == 0 {
+		return nil
+	}
+	progresscmd.Stage(stderr, "finalizing managed package cache")
+	return waitAllSyncPlannedPackagesToStore(dones)
+}
+
+func backgroundStoreSyncWaiter(stderr io.Writer, dones []<-chan error) func() error {
+	if len(dones) == 0 {
+		return nil
+	}
+	return func() error {
+		return finalizePendingStoreSyncs(stderr, dones)
+	}
 }
 
 func (i *nativeInstaller) markPlannedPackageInstalled(name string) error {

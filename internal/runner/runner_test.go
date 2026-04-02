@@ -2096,6 +2096,98 @@ func TestReadInstalledSourceMetadataIncludesFingerprintFields(t *testing.T) {
 	}
 }
 
+func TestInstalledPackagesReadsManagedAndBaseLibrariesWithoutR(t *testing.T) {
+	root := t.TempDir()
+	managedLib := filepath.Join(root, "managed-lib")
+	baseLib := filepath.Join(root, "R", "lib", "R", "library")
+	for _, path := range []string{
+		filepath.Join(managedLib, "cli"),
+		filepath.Join(managedLib, "localpkg"),
+		filepath.Join(managedLib, "ignored"),
+		filepath.Join(managedLib, ".rs-source-meta"),
+		filepath.Join(baseLib, "stats"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(managedLib, "cli", "DESCRIPTION"), []byte(strings.Join([]string{
+		"Package: cli",
+		"Version: 3.6.5",
+		"Repository: CRAN",
+		"RemoteType: github",
+		"RemoteUsername: cli",
+		"RemoteRepo: cli",
+		"RemoteRef: v3.6.5",
+		"RemoteSha: abc123",
+		"RemoteSubdir: pkg",
+		"RemoteHost: github.example.com",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile(cli DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedLib, "localpkg", "DESCRIPTION"), []byte("Package: localpkg\nVersion: 0.1.0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(localpkg DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(managedLib, "ignored", "DESCRIPTION"), []byte("Package: ignored\nVersion: 9.9.9\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(ignored DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(baseLib, "stats", "DESCRIPTION"), []byte("Package: stats\nVersion: 4.5.3\nPriority: base\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(stats DESCRIPTION) error = %v", err)
+	}
+	metaLine := strings.Join([]string{"local", "", "/tmp/localpkg.tar.gz", "", "", "", "abc123", localSourceFingerprintKindFile}, "\t")
+	if err := os.WriteFile(filepath.Join(managedLib, ".rs-source-meta", "localpkg.tsv"), []byte(metaLine+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(localpkg metadata) error = %v", err)
+	}
+
+	env := ResolvedEnvironment{
+		Interpreter: filepath.Join(root, "R", "bin", "Rscript"),
+		LibraryPath: managedLib,
+		CRANDeps:    []string{"cli", "stats"},
+		SourceDeps: map[string]project.SourceSpec{
+			"localpkg": {
+				Package: "localpkg",
+				Type:    "local",
+				Path:    "/tmp/localpkg.tar.gz",
+			},
+		},
+	}
+
+	got, err := InstalledPackages(env)
+	if err != nil {
+		t.Fatalf("InstalledPackages() error = %v", err)
+	}
+	want := []lockfile.Package{
+		{
+			Name:           "cli",
+			Version:        "3.6.5",
+			Source:         "github",
+			SourceHost:     "github.example.com",
+			SourceLocation: "cli/cli",
+			SourceRef:      "v3.6.5",
+			SourceCommit:   "abc123",
+			SourceSubdir:   "pkg",
+		},
+		{
+			Name:                  "localpkg",
+			Version:               "0.1.0",
+			Source:                "local",
+			SourceLocation:        "/tmp/localpkg.tar.gz",
+			SourceFingerprint:     "abc123",
+			SourceFingerprintKind: localSourceFingerprintKindFile,
+		},
+		{
+			Name:     "stats",
+			Version:  "4.5.3",
+			Source:   "base",
+			Priority: "base",
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("InstalledPackages() = %#v, want %#v", got, want)
+	}
+}
+
 func TestValidateSourceDeps(t *testing.T) {
 	err := validateSourceDeps(map[string]project.SourceSpec{
 		"broken": {
