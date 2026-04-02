@@ -94,6 +94,22 @@ func TestParseDCFSupportsContinuationLines(t *testing.T) {
 	}
 }
 
+func TestInstallerFormatElapsed(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{d: 8 * time.Second, want: "8s"},
+		{d: 72 * time.Second, want: "1m12s"},
+		{d: 2*time.Hour + 5*time.Minute, want: "2h05m"},
+	}
+	for _, tc := range cases {
+		if got := installerFormatElapsed(tc.d); got != tc.want {
+			t.Fatalf("installerFormatElapsed(%v) = %q, want %q", tc.d, got, tc.want)
+		}
+	}
+}
+
 func TestFetchRepoIndexParsesPackagesGz(t *testing.T) {
 	oldGOOS := installerGOOS
 	t.Cleanup(func() {
@@ -1997,6 +2013,15 @@ func TestPrefetchPlannedPackagesReportsSummary(t *testing.T) {
 	}
 	if !strings.Contains(log, "prefetched 2 package artifact(s), downloaded 1, reused 1 cached") {
 		t.Fatalf("prefetch log = %q, want summary counts", log)
+	}
+}
+
+func TestInstallerNotefPrefixesMessage(t *testing.T) {
+	var buf bytes.Buffer
+	inst := nativeInstaller{stderr: &buf}
+	inst.notef("native package install completed in %s", "12s")
+	if got := buf.String(); got != "[rs] native package install completed in 12s\n" {
+		t.Fatalf("notef() = %q", got)
 	}
 }
 
