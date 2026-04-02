@@ -439,6 +439,29 @@ func TestBuildInstallCommandTargetsWrapsMultiplePackages(t *testing.T) {
 	}
 }
 
+func TestBuildInstallCommandWithJobsOverridesParallelism(t *testing.T) {
+	dir := t.TempDir()
+	cmd, err := buildInstallCommandWithJobs(
+		"/usr/bin/R",
+		dir,
+		filepath.Join(dir, "cache"),
+		filepath.Join(dir, "lib"),
+		[]string{"PATH=/usr/bin"},
+		"",
+		3,
+		filepath.Join(dir, "pkg.tar.gz"),
+	)
+	if err != nil {
+		t.Fatalf("buildInstallCommandWithJobs() error = %v", err)
+	}
+	if !slices.Contains(cmd.Env, "MAKEFLAGS=-j3") {
+		t.Fatalf("cmd.Env missing MAKEFLAGS=-j3: %v", cmd.Env)
+	}
+	if !slices.Contains(cmd.Env, "CMAKE_BUILD_PARALLEL_LEVEL=3") {
+		t.Fatalf("cmd.Env missing CMAKE_BUILD_PARALLEL_LEVEL=3: %v", cmd.Env)
+	}
+}
+
 func TestBuildInstallCommandPreservesExplicitParallelBuildEnv(t *testing.T) {
 	dir := t.TempDir()
 	cmd, err := buildInstallCommand("/usr/bin/R", dir, filepath.Join(dir, "cache"), filepath.Join(dir, "lib"), []string{
@@ -1108,6 +1131,22 @@ func TestCompiledBatchWorkerLimitCapsAtTwo(t *testing.T) {
 	}
 	if got := compiledBatchWorkerLimit(8); got != 2 {
 		t.Fatalf("compiledBatchWorkerLimit(8) = %d, want 2", got)
+	}
+}
+
+func TestInstallJobsPerPackageSplitsCompileBudgetAcrossWorkers(t *testing.T) {
+	if got := installJobsPerPackage(1); got != defaultInstallJobs() {
+		t.Fatalf("installJobsPerPackage(1) = %d, want %d", got, defaultInstallJobs())
+	}
+	wantTwoWorkers := defaultInstallJobs() / 2
+	if wantTwoWorkers < 1 {
+		wantTwoWorkers = 1
+	}
+	if got := installJobsPerPackage(2); got != wantTwoWorkers {
+		t.Fatalf("installJobsPerPackage(2) = %d", got)
+	}
+	if got := installJobsPerPackage(defaultInstallJobs() * 2); got != 1 {
+		t.Fatalf("installJobsPerPackage(oversubscribed) = %d, want 1", got)
 	}
 }
 

@@ -1128,17 +1128,21 @@ func installPlanLayers(planned map[string]plannedPackage, order []string) [][]st
 }
 
 func (i *nativeInstaller) installPlannedPackage(name string) (bool, error) {
+	return i.installPlannedPackageWithJobs(name, 0)
+}
+
+func (i *nativeInstaller) installPlannedPackageWithJobs(name string, jobs int) (bool, error) {
 	pkg := i.planned[name]
 	if i.isPlannedPackageInstalled(pkg) {
 		return false, nil
 	}
 	switch pkg.Source {
 	case sourceCRAN, sourceBioconductor:
-		if err := i.installRepoPackage(*pkg.Repo); err != nil {
+		if err := i.installRepoPackageWithJobs(*pkg.Repo, jobs); err != nil {
 			return false, err
 		}
 	case sourceLocal, sourceGit, sourceGitHub:
-		if err := i.installPreparedSource(*pkg.Prepared); err != nil {
+		if err := i.installPreparedSourceWithJobs(*pkg.Prepared, jobs); err != nil {
 			return false, err
 		}
 	default:
@@ -1389,7 +1393,7 @@ func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers
 		return nil, nil
 	}
 	if len(names) == 1 {
-		installed, err := i.installPlannedPackage(names[0])
+		installed, err := i.installPlannedPackageWithJobs(names[0], 0)
 		if err != nil || !installed {
 			return nil, err
 		}
@@ -1408,6 +1412,7 @@ func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers
 	if workers > len(names) {
 		workers = len(names)
 	}
+	jobsPerPackage := installJobsPerPackage(workers)
 	jobs := make(chan string)
 	results := make(chan installResult, len(names))
 
@@ -1417,7 +1422,7 @@ func (i *nativeInstaller) installPackageBatchWithWorkers(names []string, workers
 		go func() {
 			defer wg.Done()
 			for name := range jobs {
-				installed, err := i.installPlannedPackage(name)
+				installed, err := i.installPlannedPackageWithJobs(name, jobsPerPackage)
 				results <- installResult{name: name, installed: installed, err: err}
 			}
 		}()
@@ -1477,6 +1482,18 @@ func parallelWorkerLimitCap(items, maxWorkers int) int {
 		return 1
 	}
 	return workers
+}
+
+func installJobsPerPackage(workers int) int {
+	total := defaultInstallJobs()
+	if workers <= 1 || total <= 1 {
+		return total
+	}
+	jobs := total / workers
+	if jobs < 1 {
+		return 1
+	}
+	return jobs
 }
 
 func newInstaller(req Request, prepareLibrary bool) (*nativeInstaller, error) {
@@ -2175,6 +2192,10 @@ func (i *nativeInstaller) prepareSource(spec project.SourceSpec) (preparedSource
 }
 
 func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
+	return i.installRepoPackageWithJobs(record, 0)
+}
+
+func (i *nativeInstaller) installRepoPackageWithJobs(record repoRecord, jobs int) error {
 	fmt.Fprintf(i.stdout, "[rs] installing %s package %s %s via native backend\n", record.Source, record.Name, record.Version)
 	if strings.HasSuffix(strings.ToLower(record.TarballURL), ".tar.gz") && record.NeedsCompilation {
 		if err := i.ensurePackageBuildToolsReady(record.Name); err != nil {
@@ -2200,7 +2221,7 @@ func (i *nativeInstaller) installRepoPackage(record repoRecord) error {
 			}
 		}
 	}
-	if err := i.runRCommandInstall(record.Name, target); err != nil {
+	if err := i.runRCommandInstall(record.Name, target, jobs); err != nil {
 		return fmt.Errorf("install %s from %s: %w", record.Name, record.Source, err)
 	}
 	if err := removeSourceMetadata(i.metaDir, record.Name); err != nil {
@@ -2250,7 +2271,7 @@ func (i *nativeInstaller) installRepoPackageBatch(names []string) ([]string, err
 	if len(targets) == 0 {
 		return nil, nil
 	}
-	cmd, err := buildInstallCommandTargets(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, "", targets...)
+	cmd, err := buildInstallCommandWithJobs(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, "", 0, targets...)
 	if err != nil {
 		return nil, err
 	}
@@ -2377,6 +2398,10 @@ func (i *nativeInstaller) storeCachedDescription(key string, desc description) {
 }
 
 func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
+	return i.installPreparedSourceWithJobs(prepared, 0)
+}
+
+func (i *nativeInstaller) installPreparedSourceWithJobs(prepared preparedSource, jobs int) error {
 	switch prepared.Source {
 	case sourceLocal:
 		fmt.Fprintf(i.stdout, "[rs] installing local package %s from %s via native backend\n", prepared.Name, prepared.Location)
@@ -2394,18 +2419,18 @@ func (i *nativeInstaller) installPreparedSource(prepared preparedSource) error {
 			return err
 		}
 	}
-	if err := i.runRCommandInstall(prepared.Name, prepared.InstallPath); err != nil {
+	if err := i.runRCommandInstall(prepared.Name, prepared.InstallPath, jobs); err != nil {
 		return fmt.Errorf("install %s from %s source: %w", prepared.Name, prepared.Source, err)
 	}
 	return writeSourceMetadata(i.metaDir, prepared.Name, prepared)
 }
 
-func (i *nativeInstaller) runRCommandInstall(packageName, target string) error {
+func (i *nativeInstaller) runRCommandInstall(packageName, target string, jobs int) error {
 	installTarget, err := i.prepareInstallTarget(packageName, target)
 	if err != nil {
 		return err
 	}
-	cmd, err := buildInstallCommand(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, packageName, installTarget)
+	cmd, err := buildInstallCommandWithJobs(i.rBinary, i.req.WorkDir, i.req.CacheRoot, i.req.LibraryPath, i.req.Environment, packageName, jobs, installTarget)
 	if err != nil {
 		return err
 	}
@@ -2417,11 +2442,15 @@ func (i *nativeInstaller) runRCommandInstall(packageName, target string) error {
 }
 
 func buildInstallCommand(rBinary, workDir, cacheRoot, libraryPath string, env []string, packageName, target string) (*exec.Cmd, error) {
-	return buildInstallCommandTargets(rBinary, workDir, cacheRoot, libraryPath, env, packageName, target)
+	return buildInstallCommandWithJobs(rBinary, workDir, cacheRoot, libraryPath, env, packageName, 0, target)
 }
 
 func buildInstallCommandTargets(rBinary, workDir, cacheRoot, libraryPath string, env []string, packageName string, targets ...string) (*exec.Cmd, error) {
-	installEnv := withInstallEnv(withPackageNativeFixups(withLibraryEnv(env, libraryPath), packageName), cacheRoot)
+	return buildInstallCommandWithJobs(rBinary, workDir, cacheRoot, libraryPath, env, packageName, 0, targets...)
+}
+
+func buildInstallCommandWithJobs(rBinary, workDir, cacheRoot, libraryPath string, env []string, packageName string, jobs int, targets ...string) (*exec.Cmd, error) {
+	installEnv := withInstallEnv(withPackageNativeFixups(withLibraryEnv(env, libraryPath), packageName), cacheRoot, jobs)
 	args := []string{"CMD", "INSTALL", "-l", libraryPath}
 	args = append(args, targets...)
 	wrappedName, wrappedArgs, wrappedEnv, _, err := toolchainenv.WrapCommand(
@@ -4492,7 +4521,7 @@ func withLibraryEnv(env []string, libraryPath string) []string {
 	return filtered
 }
 
-func withInstallEnv(env []string, cacheRoot string) []string {
+func withInstallEnv(env []string, cacheRoot string, jobsOverride int) []string {
 	if len(env) == 0 {
 		env = os.Environ()
 	}
@@ -4523,7 +4552,11 @@ func withInstallEnv(env []string, cacheRoot string) []string {
 		}
 		filtered = append(filtered, entry)
 	}
-	jobs := strconv.Itoa(defaultInstallJobs())
+	jobCount := defaultInstallJobs()
+	if jobsOverride > 0 {
+		jobCount = jobsOverride
+	}
+	jobs := strconv.Itoa(jobCount)
 	if !hasMakeflags {
 		filtered = append(filtered, "MAKEFLAGS=-j"+jobs)
 	}
