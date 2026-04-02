@@ -851,13 +851,16 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 	}))
 	defer server.Close()
 
-	logPath := filepath.Join(dir, "invocations.log")
+	logDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", logDir, err)
+	}
 	rBinary := writeTestCommand(
 		t,
 		dir,
 		"R",
-		fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$*\" >> %q\n", logPath),
-		fmt.Sprintf("@echo off\r\n>> %q echo %%*\r\n", filepath.ToSlash(logPath)),
+		fmt.Sprintf("#!/bin/sh\nlog=%q/$(date +%%s%%N)-$$.txt\nprintf '%%s\\n' \"$@\" > \"$log\"\n", logDir),
+		fmt.Sprintf("@echo off\r\nset LOGFILE=%q\\%%RANDOM%%-%%RANDOM%%.txt\r\n> \"%%LOGFILE%%\" echo %%*\r\n", filepath.ToSlash(logDir)),
 	)
 
 	inst := nativeInstaller{
@@ -908,19 +911,20 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		data, err := os.ReadFile(logPath)
+		entries, err := os.ReadDir(logDir)
 		if err == nil {
-			lines := strings.FieldsFunc(string(data), func(r rune) bool {
-				return r == '\n' || r == '\r'
-			})
-			if len(lines) == 2 {
+			if len(entries) == 2 {
 				break
 			}
 			if time.Now().After(deadline) {
-				t.Fatalf("batch invocation count = %d, want 2; log contents = %q", len(lines), string(data))
+				names := make([]string, 0, len(entries))
+				for _, entry := range entries {
+					names = append(names, entry.Name())
+				}
+				t.Fatalf("batch invocation count = %d, want 2; log files = %v", len(entries), names)
 			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("ReadFile(%q) error = %v", logPath, err)
+			t.Fatalf("ReadDir(%q) error = %v", logDir, err)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
