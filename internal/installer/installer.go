@@ -60,6 +60,7 @@ var (
 	installerLookPath            = exec.LookPath
 	installerReadFile            = os.ReadFile
 	installerRunCmd              = func(cmd *exec.Cmd) error { return cmd.Run() }
+	installerRunProgressCommand  = progresscmd.RunWithOptions
 	installerReadDescriptionFile = readDescriptionFromTarball
 	installerEnsureBuildTools    = ensurePackageBuildToolsForEnvironment
 )
@@ -2562,7 +2563,7 @@ func (i *nativeInstaller) installRepoPackageBatchWithJobs(names []string, jobs i
 	if quietProgress {
 		progress = io.Discard
 	}
-	if err := progresscmd.RunWithOptions(cmd, label, progress, i.stderr, progresscmd.RunOptions{
+	if err := installerRunProgressCommand(cmd, label, progress, i.stderr, progresscmd.RunOptions{
 		NonTTYStartDelay: nonTTYInstallStartMin,
 		NonTTYHeartbeat:  nonTTYInstallHeartbeat,
 	}); err != nil {
@@ -2725,7 +2726,7 @@ func (i *nativeInstaller) runRCommandInstall(packageName, target string, jobs in
 		return err
 	}
 	label := fmt.Sprintf("installing %s", filepath.Base(target))
-	if err := progresscmd.RunWithOptions(cmd, label, i.stderr, i.stderr, progresscmd.RunOptions{
+	if err := installerRunProgressCommand(cmd, label, i.stderr, i.stderr, progresscmd.RunOptions{
 		SuppressTTYSuccess: true,
 		NonTTYStartDelay:   nonTTYInstallStartMin,
 		NonTTYHeartbeat:    nonTTYInstallHeartbeat,

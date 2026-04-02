@@ -11,12 +11,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -835,10 +837,22 @@ func TestInstallCompiledPackageBatchBatchesOrdinaryCompiledPackages(t *testing.T
 
 func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *testing.T) {
 	original := installerEnsureBuildTools
+	originalRunProgress := installerRunProgressCommand
 	t.Cleanup(func() {
 		installerEnsureBuildTools = original
+		installerRunProgressCommand = originalRunProgress
 	})
 	installerEnsureBuildTools = func(pkg string, env []string) error {
+		return nil
+	}
+	var (
+		invocationMu sync.Mutex
+		invocations  [][]string
+	)
+	installerRunProgressCommand = func(cmd *exec.Cmd, label string, progress io.Writer, errors io.Writer, opts progresscmd.RunOptions) error {
+		invocationMu.Lock()
+		invocations = append(invocations, append([]string(nil), cmd.Args...))
+		invocationMu.Unlock()
 		return nil
 	}
 
@@ -851,18 +865,6 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 	}))
 	defer server.Close()
 
-	logDir := filepath.Join(dir, "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%q) error = %v", logDir, err)
-	}
-	rBinary := writeTestCommand(
-		t,
-		dir,
-		"R",
-		fmt.Sprintf("#!/bin/sh\nlog=%q/$(date +%%s%%N)-$$.txt\nprintf '%%s\\n' \"$@\" > \"$log\"\n", logDir),
-		fmt.Sprintf("@echo off\r\npowershell -NoProfile -Command \"$path = Join-Path '%s' ([guid]::NewGuid().ToString() + '.txt'); Set-Content -LiteralPath $path -Value '%%*'\" >NUL\r\n", filepath.ToSlash(logDir)),
-	)
-
 	inst := nativeInstaller{
 		tempRoot:       filepath.Join(dir, "tmp"),
 		downloadRoot:   filepath.Join(dir, "downloads"),
@@ -870,7 +872,7 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 		stdout:         io.Discard,
 		stderr:         io.Discard,
 		httpClient:     server.Client(),
-		rBinary:        rBinary,
+		rBinary:        "R",
 		prefetchedRepo: map[string]string{},
 		req: Request{
 			WorkDir:     dir,
@@ -908,25 +910,15 @@ func TestInstallRepoPackageBatchesSplitsLargeBatchIntoMultipleInvocations(t *tes
 	if !reflect.DeepEqual(installed, []string{"a", "b", "c", "d"}) {
 		t.Fatalf("installRepoPackageBatches() installed = %v", installed)
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		entries, err := os.ReadDir(logDir)
-		if err == nil {
-			if len(entries) == 2 {
-				break
-			}
-			if time.Now().After(deadline) {
-				names := make([]string, 0, len(entries))
-				for _, entry := range entries {
-					names = append(names, entry.Name())
-				}
-				t.Fatalf("batch invocation count = %d, want 2; log files = %v", len(entries), names)
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("ReadDir(%q) error = %v", logDir, err)
+	invocationMu.Lock()
+	defer invocationMu.Unlock()
+	if len(invocations) != 2 {
+		t.Fatalf("batch invocation count = %d, want 2; args = %v", len(invocations), invocations)
+	}
+	for _, args := range invocations {
+		if len(args) < 2 {
+			t.Fatalf("batch invocation args too short: %v", args)
 		}
-		time.Sleep(25 * time.Millisecond)
 	}
 }
 
