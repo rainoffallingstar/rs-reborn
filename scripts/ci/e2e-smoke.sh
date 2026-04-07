@@ -53,18 +53,20 @@ grep -q '"rscript_path":' "$TMP_DIR/doctor.json"
 
 echo "==> bundled base packages stay out of install plans"
 "$RS_BIN" list --json "$STATS_SCRIPT_PATH" | tee "$TMP_DIR/list-stats.json"
-Rscript -e '
-report <- jsonlite::fromJSON(commandArgs(trailingOnly = TRUE)[1])
-if (!("stats" %in% report$detected_packages)) {
-  stop("expected stats in detected_packages")
-}
-if (!identical(unname(report$cran_packages), "jsonlite")) {
-  stop(sprintf("expected cran_packages to equal jsonlite, got: %s", paste(report$cran_packages, collapse = ",")))
-}
-if (length(report$bioc_packages) != 0) {
-  stop(sprintf("expected empty bioc_packages, got: %s", paste(report$bioc_packages, collapse = ",")))
-}
-' "$TMP_DIR/list-stats.json"
+python3 - "$TMP_DIR/list-stats.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    report = json.load(fh)
+
+if "stats" not in report.get("detected_packages", []):
+    raise SystemExit("expected stats in detected_packages")
+if report.get("cran_packages") != ["jsonlite"]:
+    raise SystemExit(f"expected cran_packages to equal ['jsonlite'], got: {report.get('cran_packages')}")
+if report.get("bioc_packages") != []:
+    raise SystemExit(f"expected empty bioc_packages, got: {report.get('bioc_packages')}")
+PY
 
 echo "==> lock lifecycle"
 "$RS_BIN" lock "$SCRIPT_PATH"
