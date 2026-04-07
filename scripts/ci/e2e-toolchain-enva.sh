@@ -55,7 +55,7 @@ echo "==> doctor --bootstrap-toolchain should prefer enva over micromamba and cr
 grep -q '"status": "ok"' "$TMP_DIR/doctor.json"
 grep -q '"toolchain_prefixes": \[' "$TMP_DIR/doctor.json"
 grep -q "$ENVA_PREFIX" "$TMP_DIR/doctor.json"
-grep -q '\[rs\] bootstrapping rootless toolchain preset: enva' "$TMP_DIR/doctor.stderr"
+grep -q '\[rvx\] bootstrapping rootless toolchain preset: enva' "$TMP_DIR/doctor.stderr"
 grep -q '^create ' "$ENVA_LOG"
 if grep -q 'micromamba' "$TMP_DIR/doctor.stderr"; then
   echo "expected enva bootstrap path without micromamba fallback"

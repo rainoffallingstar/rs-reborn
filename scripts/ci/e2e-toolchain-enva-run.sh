@@ -6,7 +6,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 RS_BIN="$TMP_DIR/rvx"
-RS_HOME_DIR="$TMP_DIR/rs-home"
+RS_HOME_DIR="$TMP_DIR/rvx-home"
 PROJECT_DIR="$TMP_DIR/project"
 SCRIPT_PATH="$PROJECT_DIR/analysis.R"
 BIN_DIR="$TMP_DIR/bin"
@@ -109,7 +109,7 @@ grep -q "toolchain-cppflags=-I$HOME/.local/share/rattler/envs/rs-sysdeps/include
 grep -q "toolchain-ldflags=-L$HOME/.local/share/rattler/envs/rs-sysdeps/lib" "$TMP_DIR/run.out"
 grep -q "pkg-config-path=$HOME/.local/share/rattler/envs/rs-sysdeps/bin/pkg-config" "$TMP_DIR/run.out"
 grep -q '^create ' "$ENVA_LOG"
-grep -q '\[rs\] bootstrapping rootless toolchain preset: enva' "$TMP_DIR/run.err"
+grep -q '\[rvx\] bootstrapping rootless toolchain preset: enva' "$TMP_DIR/run.err"
 if grep -q 'micromamba' "$TMP_DIR/run.err"; then
   echo "expected enva runtime bootstrap path without micromamba fallback"
   cat "$TMP_DIR/run.err"

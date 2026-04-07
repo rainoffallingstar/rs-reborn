@@ -1,6 +1,6 @@
-# `rs` v1 Draft Release Notes
+# `rvx` v1 Draft Release Notes
 
-`rs` is a small Go CLI for running R scripts with `uv run`-style dependency bootstrap.
+`rvx` is a small Go CLI for running R scripts with `uv run`-style dependency bootstrap.
 
 This first release focuses on making the core execution model trustworthy:
 
@@ -14,7 +14,7 @@ This first release focuses on making the core execution model trustworthy:
 
 ### R-first execution workflow
 
-`rs` now supports the core workflow around one script or a small repository:
+`rvx` now supports the core workflow around one script or a small repository:
 
 - `rvx run`
 - `rvx shell`
@@ -57,7 +57,7 @@ The lockfile and managed-library cache now track more than package names:
 
 This release also makes rootless and user-local source-build flows much more practical:
 
-- `rs` can auto-detect and auto-use an existing user-local toolchain prefix when no explicit toolchain config is present
+- `rvx` can auto-detect and auto-use an existing user-local toolchain prefix when no explicit toolchain config is present
 - `rvx init --toolchain-preset auto|enva|micromamba|mamba|conda|homebrew|spack` can seed common rootless layouts directly into `rs.toml`
 - `rvx toolchain detect`, `rvx toolchain template`, and `rvx doctor --toolchain-only` now provide a complete discover/preview/validate loop
 - commands such as `rvx run`, `rvx lock`, `rvx check`, `rvx doctor`, and `rvx r install --method source` now accept `--bootstrap-toolchain` to explicitly create a user-local toolchain prefix through a supported external manager when needed
@@ -78,7 +78,7 @@ This release adds basic multi-R support without expanding the tool beyond R:
 
 ### Native multi-R management
 
-On macOS, Linux, and Windows x64, `rs` now exposes:
+On macOS, Linux, and Windows x64, `rvx` now exposes:
 
 - `rvx r list`
 - `rvx r install <version>`

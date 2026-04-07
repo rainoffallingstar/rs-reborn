@@ -5,9 +5,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
+RS_BIN="$TMP_DIR/rvx"
 PROJECT_DIR="$TMP_DIR/project"
 SCRIPT_PATH="$PROJECT_DIR/analysis.R"
+STATS_SCRIPT_PATH="$PROJECT_DIR/stats-bundled.R"
 RSCRIPT_PATH="$(command -v Rscript)"
 export GOCACHE="$TMP_DIR/go-build"
 export GOMODCACHE="$TMP_DIR/gomodcache"
@@ -34,6 +35,10 @@ cat >"$SCRIPT_PATH" <<'EOF'
 args <- commandArgs(trailingOnly = TRUE)
 cat(jsonlite::toJSON(list(args = args, lib = .libPaths()[1]), auto_unbox = TRUE), "\n")
 EOF
+cat >"$STATS_SCRIPT_PATH" <<'EOF'
+library(stats)
+jsonlite::fromJSON("{}")
+EOF
 
 "$RS_BIN" init --rscript "$RSCRIPT_PATH" --from "$SCRIPT_PATH" "$PROJECT_DIR"
 grep -q 'rscript = ' "$PROJECT_DIR/rs.toml"
@@ -45,6 +50,21 @@ grep -q '"cran_packages":' "$TMP_DIR/list.json"
 
 "$RS_BIN" doctor --json "$SCRIPT_PATH" | tee "$TMP_DIR/doctor.json"
 grep -q '"rscript_path":' "$TMP_DIR/doctor.json"
+
+echo "==> bundled base packages stay out of install plans"
+"$RS_BIN" list --json "$STATS_SCRIPT_PATH" | tee "$TMP_DIR/list-stats.json"
+Rscript -e '
+report <- jsonlite::fromJSON(commandArgs(trailingOnly = TRUE)[1])
+if (!("stats" %in% report$detected_packages)) {
+  stop("expected stats in detected_packages")
+}
+if (!identical(unname(report$cran_packages), "jsonlite")) {
+  stop(sprintf("expected cran_packages to equal jsonlite, got: %s", paste(report$cran_packages, collapse = ",")))
+}
+if (length(report$bioc_packages) != 0) {
+  stop(sprintf("expected empty bioc_packages, got: %s", paste(report$bioc_packages, collapse = ",")))
+}
+' "$TMP_DIR/list-stats.json"
 
 echo "==> lock lifecycle"
 "$RS_BIN" lock "$SCRIPT_PATH"

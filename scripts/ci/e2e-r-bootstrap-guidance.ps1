@@ -30,7 +30,7 @@ cat("native-r-guidance\n")
     $oldRSHome = $env:RS_HOME
     try {
         $env:PATH = $SanitizedPath
-        $env:RS_HOME = Join-Path $TmpDir "rs-home"
+        $env:RS_HOME = Join-Path $TmpDir "rvx-home"
         & $RSBin run $ScriptPath *> $runOutput
     } catch {
         $runSucceeded = $false
@@ -54,7 +54,7 @@ cat("native-r-guidance\n")
     $doctorSucceeded = $true
     try {
         $env:PATH = $SanitizedPath
-        $env:RS_HOME = Join-Path $TmpDir "rs-home"
+        $env:RS_HOME = Join-Path $TmpDir "rvx-home"
         & $RSBin doctor $ScriptPath *> $doctorOutput
     } catch {
         $doctorSucceeded = $false

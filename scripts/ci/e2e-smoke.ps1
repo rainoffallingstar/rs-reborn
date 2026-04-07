@@ -6,6 +6,7 @@ $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-e2e-smoke-" + [System
 $RSBin = Join-Path $TmpDir "rvx.exe"
 $ProjectDir = Join-Path $TmpDir "project"
 $ScriptPath = Join-Path $ProjectDir "analysis.R"
+$StatsScriptPath = Join-Path $ProjectDir "stats-bundled.R"
 $RscriptPath = (Get-Command Rscript.exe).Source
 
 New-Item -ItemType Directory -Force -Path $TmpDir, $ProjectDir | Out-Null
@@ -35,6 +36,11 @@ args <- commandArgs(trailingOnly = TRUE)
 cat(jsonlite::toJSON(list(args = args, lib = .libPaths()[1]), auto_unbox = TRUE), "\n")
 '@ | Set-Content -LiteralPath $ScriptPath -Encoding ascii
 
+@'
+library(stats)
+jsonlite::fromJSON("{}")
+'@ | Set-Content -LiteralPath $StatsScriptPath -Encoding ascii
+
     & $RSBin init --rscript $RscriptPath --from $ScriptPath $ProjectDir
     $projectConfig = Get-Content -LiteralPath (Join-Path $ProjectDir "rs.toml") -Raw
     if ($projectConfig -notmatch 'rscript = ') {
@@ -48,6 +54,18 @@ cat(jsonlite::toJSON(list(args = args, lib = .libPaths()[1]), auto_unbox = TRUE)
     $doctorJson = (& $RSBin doctor --json $ScriptPath) | Out-String
     if ($doctorJson -notmatch '"rscript_path":') {
         throw "expected doctor JSON output"
+    }
+
+    $statsListJson = (& $RSBin list --json $StatsScriptPath) | Out-String
+    $statsReport = $statsListJson | ConvertFrom-Json
+    if ($statsReport.detected_packages -notcontains "stats") {
+        throw "expected stats to remain in detected packages"
+    }
+    if (@($statsReport.cran_packages).Count -ne 1 -or @($statsReport.cran_packages)[0] -ne "jsonlite") {
+        throw "expected bundled stats to stay out of cran_packages"
+    }
+    if (@($statsReport.bioc_packages).Count -ne 0) {
+        throw "expected bundled stats to stay out of bioc_packages"
     }
 
     & $RSBin lock $ScriptPath

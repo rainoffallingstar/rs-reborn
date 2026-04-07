@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
+RS_BIN="$TMP_DIR/rvx"
 PROJECT_DIR="$TMP_DIR/project"
 PKG_SRC_DIR="$TMP_DIR/localpkg"
 BUILD_DIR="$TMP_DIR/build"

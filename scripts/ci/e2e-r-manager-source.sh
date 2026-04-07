@@ -5,8 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
-RS_HOME_DIR="$TMP_DIR/rs-home"
+RS_BIN="$TMP_DIR/rvx"
+RS_HOME_DIR="$TMP_DIR/rvx-home"
 PROJECT_DIR="$TMP_DIR/project"
 SCRIPT_PATH="$PROJECT_DIR/analysis.R"
 export RS_HOME="$RS_HOME_DIR"

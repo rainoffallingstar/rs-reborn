@@ -1,6 +1,6 @@
-# rs Roadmap
+# rvx Roadmap
 
-This roadmap turns the current `rs` prototype into a more production-ready R workflow tool without expanding scope beyond R.
+This roadmap turns the current `rvx` prototype into a more production-ready R workflow tool without expanding scope beyond R.
 
 The sequencing principle is:
 
@@ -10,7 +10,7 @@ The sequencing principle is:
 
 ## Current baseline
 
-As of the current design, `rs` already has:
+As of the current design, `rvx` already has:
 
 - runtime commands: `run`, `shell`, `exec`, `lock`, `sync`
 - inspection commands: `scan`, `list`, `doctor`, `check`
@@ -62,7 +62,7 @@ Objective:
 Make `rs.toml` editing safe enough for regular use in real repositories.
 
 Why second:
-Once users adopt `rs`, config churn becomes part of normal workflow. Rewriting config unreliably creates avoidable friction.
+Once users adopt `rvx`, config churn becomes part of normal workflow. Rewriting config unreliably creates avoidable friction.
 
 Work items:
 
@@ -195,7 +195,7 @@ If work proceeds incrementally, the most sensible order is:
 
 ## Definition of success
 
-`rs` is succeeding when a user can:
+`rvx` is succeeding when a user can:
 
 - point it at an R script or small project
 - understand what dependencies it inferred

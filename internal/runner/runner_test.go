@@ -929,7 +929,7 @@ func TestRunnerStageSequenceStaysCompact(t *testing.T) {
 
 func TestRunEmitsStructuredEventsInOrder(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("RS_HOME", filepath.Join(dir, "rs-home"))
+	t.Setenv("RS_HOME", filepath.Join(dir, "rvx-home"))
 	toolchainPrefix := filepath.Join(dir, ".toolchain")
 	for _, path := range []string{toolchainPrefix, filepath.Join(toolchainPrefix, "lib", "pkgconfig")} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
@@ -982,7 +982,7 @@ func TestRunEmitsStructuredEventsInOrder(t *testing.T) {
 
 func TestSyncEmitsInstallEventsWithoutScriptLaunch(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("RS_HOME", filepath.Join(dir, "rs-home"))
+	t.Setenv("RS_HOME", filepath.Join(dir, "rvx-home"))
 	toolchainPrefix := filepath.Join(dir, ".toolchain")
 	for _, path := range []string{toolchainPrefix, filepath.Join(toolchainPrefix, "lib", "pkgconfig")} {
 		if err := os.MkdirAll(path, 0o755); err != nil {

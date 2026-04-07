@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
+RS_BIN="$TMP_DIR/rvx"
 RSCRIPT_PATH="$(command -v Rscript)"
 export GOCACHE="$TMP_DIR/go-build"
 export GOMODCACHE="$TMP_DIR/gomodcache"

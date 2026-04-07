@@ -23,7 +23,7 @@ cat("native-r-guidance\n")
 EOF
 
 echo "==> run should explain how to install R when Rscript is unavailable"
-if env PATH="$SANITIZED_PATH" HOME="${HOME:-$TMP_DIR}" TMPDIR="${TMPDIR:-$TMP_DIR}" RS_HOME="$TMP_DIR/rs-home" "$RS_BIN" run "$SCRIPT_PATH" >"$TMP_DIR/run.txt" 2>&1; then
+if env PATH="$SANITIZED_PATH" HOME="${HOME:-$TMP_DIR}" TMPDIR="${TMPDIR:-$TMP_DIR}" RS_HOME="$TMP_DIR/rvx-home" "$RS_BIN" run "$SCRIPT_PATH" >"$TMP_DIR/run.txt" 2>&1; then
   echo "expected rvx run to fail without a managed or external Rscript"
   cat "$TMP_DIR/run.txt"
   exit 1
@@ -46,7 +46,7 @@ case "$(uname -s)" in
 esac
 
 echo "==> doctor should surface the same next steps"
-if env PATH="$SANITIZED_PATH" HOME="${HOME:-$TMP_DIR}" TMPDIR="${TMPDIR:-$TMP_DIR}" RS_HOME="$TMP_DIR/rs-home" "$RS_BIN" doctor "$SCRIPT_PATH" >"$TMP_DIR/doctor.txt" 2>&1; then
+if env PATH="$SANITIZED_PATH" HOME="${HOME:-$TMP_DIR}" TMPDIR="${TMPDIR:-$TMP_DIR}" RS_HOME="$TMP_DIR/rvx-home" "$RS_BIN" doctor "$SCRIPT_PATH" >"$TMP_DIR/doctor.txt" 2>&1; then
   echo "expected rvx doctor to report blocking setup issues"
   cat "$TMP_DIR/doctor.txt"
   exit 1

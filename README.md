@@ -32,7 +32,7 @@ go build -o rvx ./cmd/rvx
 
 `rs` remains available as a compatibility alias, but `rvx` is now the primary binary name to avoid conflicts with the traditional Unix/BSD `rs` command.
 
-Use `rs` as a Go library:
+Use `rvx` as a Go library:
 
 ```go
 import (

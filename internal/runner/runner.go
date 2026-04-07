@@ -6349,7 +6349,7 @@ func runRIntrospectionScript(interpreter, workDir string, stderr io.Writer, scri
 	if info, err := os.Stat(workDir); err == nil && info.IsDir() {
 		tempDir = workDir
 	}
-	tmpFile, err := os.CreateTemp(tempDir, "rs-inspect-*.R")
+	tmpFile, err := os.CreateTemp(tempDir, "rvx-inspect-*.R")
 	if err != nil {
 		return nil, fmt.Errorf("prepare R introspection script: %w", err)
 	}

@@ -746,7 +746,7 @@ func envaBootstrapCommandWithPackages(path string, packages []string) string {
 	for _, pkg := range packages {
 		lines = append(lines, "  - "+pkg)
 	}
-	return fmt.Sprintf(`tmp="$(mktemp "${TMPDIR:-/tmp}/rs-enva-XXXXXX.yaml")" && cat >"$tmp" <<'EOF'
+	return fmt.Sprintf(`tmp="$(mktemp "${TMPDIR:-/tmp}/rvx-enva-XXXXXX")" && cat >"$tmp" <<'EOF'
 channels:
   - conda-forge
 dependencies:

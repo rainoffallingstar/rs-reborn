@@ -5,13 +5,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
+RS_BIN="$TMP_DIR/rvx"
 PROJECT_DIR="$TMP_DIR/project"
 BROKEN_DIR="$TMP_DIR/broken-project"
 ENV_DIR="$TMP_DIR/env-only"
 export GOCACHE="$TMP_DIR/go-build"
 export GOMODCACHE="$TMP_DIR/gomodcache"
-export RS_HOME="$TMP_DIR/rs-home"
+export RS_HOME="$TMP_DIR/rvx-home"
 
 cd "$ROOT_DIR"
 

@@ -362,7 +362,7 @@ func writeBootstrap(cacheRoot string) (string, error) {
 	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
 		return "", fmt.Errorf("create bootstrap dir: %w", err)
 	}
-	path := filepath.Join(bootstrapDir, "rs-profile.R")
+	path := filepath.Join(bootstrapDir, "rvx-profile.R")
 	source := bootstrapSource()
 	if data, err := os.ReadFile(path); err == nil && string(data) == source {
 		return path, nil
