@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
+RS_BIN="$TMP_DIR/rvx"
 BIN_DIR="$TMP_DIR/bin"
 HOME_DIR="$TMP_DIR/home"
 ENVA_PREFIX="$HOME_DIR/.local/share/rattler/envs/rs-sysdeps"
@@ -21,8 +21,8 @@ export PATH="$BIN_DIR:$PATH"
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> preparing fake enva and micromamba executables"
 cat >"$BIN_DIR/enva" <<'EOF'
@@ -66,8 +66,8 @@ fi
 echo "==> once the enva prefix exists, auto bootstrap plan should point at enva"
 "$RS_BIN" toolchain bootstrap auto >"$TMP_DIR/bootstrap.txt"
 grep -q '\[bootstrap\] preset: enva (detected complete layout, recommended)' "$TMP_DIR/bootstrap.txt"
-grep -q '\[next\] initialize project defaults: rs init --toolchain-preset enva' "$TMP_DIR/bootstrap.txt"
-grep -q '\[next\] validate toolchain configuration: rs doctor --toolchain-only' "$TMP_DIR/bootstrap.txt"
+grep -q '\[next\] initialize project defaults: rvx init --toolchain-preset enva' "$TMP_DIR/bootstrap.txt"
+grep -q '\[next\] validate toolchain configuration: rvx doctor --toolchain-only' "$TMP_DIR/bootstrap.txt"
 
 echo "==> when both prefixes exist, auto-detect should still recommend enva first"
 mkdir -p \
@@ -82,7 +82,7 @@ if [ "$first_preset" != "enva" ]; then
   exit 1
 fi
 
-echo "==> rs init --toolchain-preset auto should write enva defaults"
+echo "==> rvx init --toolchain-preset auto should write enva defaults"
 PROJECT_DIR="$TMP_DIR/project"
 "$RS_BIN" init --toolchain-preset auto "$PROJECT_DIR" >"$TMP_DIR/init.txt"
 grep -q 'toolchain_prefixes = \["'"$ENVA_PREFIX"'"\]' "$PROJECT_DIR/rs.toml"

@@ -57,8 +57,8 @@ EOF
   )
 }
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> building git source fixture repository"
 build_git_pkg_repo
@@ -94,7 +94,7 @@ fi
 grep -q 'source ref mismatch for gitpkg' "$TMP_DIR/check-release-drift.txt"
 
 if "$RS_BIN" run --locked "$SCRIPT_PATH" >"$TMP_DIR/run-release-drift.txt" 2>&1; then
-  echo "expected rs run --locked to fail after git source ref drift"
+  echo "expected rvx run --locked to fail after git source ref drift"
   cat "$TMP_DIR/run-release-drift.txt"
   exit 1
 fi

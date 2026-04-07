@@ -66,16 +66,16 @@ version_ldflags="-X github.com/rainoffallingstar/rs-reborn/internal/cli.cliVersi
 for target in "${platforms[@]}"; do
   read -r goos goarch archive <<<"$target"
 
-  artifact_base="rs_${TAG}_${goos}_${goarch}"
+  artifact_base="rvx_${TAG}_${goos}_${goarch}"
   staging_dir="$TMP_DIR/$artifact_base"
-  binary_name="rs"
+  binary_name="rvx"
   if [ "$goos" = "windows" ]; then
-    binary_name="rs.exe"
+    binary_name="rvx.exe"
   fi
 
   mkdir -p "$staging_dir"
   echo "==> building $artifact_base"
-  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w ${version_ldflags}" -o "$staging_dir/$binary_name" ./cmd/rs
+  CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w ${version_ldflags}" -o "$staging_dir/$binary_name" ./cmd/rvx
 
   case "$archive" in
     tar.gz)
@@ -98,9 +98,9 @@ echo "==> writing checksums"
 (
   cd "$OUTPUT_DIR"
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum rs_* > SHA256SUMS
+    sha256sum rvx_* > SHA256SUMS
   else
-    shasum -a 256 rs_* > SHA256SUMS
+    shasum -a 256 rvx_* > SHA256SUMS
   fi
 )
 

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 	"github.com/rainoffallingstar/rs-reborn/internal/installer"
 	"github.com/rainoffallingstar/rs-reborn/internal/lockfile"
 	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
@@ -909,8 +910,8 @@ func TestPrintEnvironmentPreviewsLongToolchainLists(t *testing.T) {
 
 func TestRunnerStageSequenceStaysCompact(t *testing.T) {
 	var stderr bytes.Buffer
-	stageRunnerPreparation(&stderr)
-	stageRunnerInterpreterResolution(&stderr, false)
+	stageRunnerPreparation(&stderr, nil, "/tmp/analysis.R")
+	stageRunnerInterpreterResolution(&stderr, false, nil, "/tmp/analysis.R")
 	progresscmd.Stage(&stderr, "recording lockfile")
 	progresscmd.Stage(&stderr, "launching script")
 
@@ -923,6 +924,159 @@ func TestRunnerStageSequenceStaysCompact(t *testing.T) {
 	}
 	if !reflect.DeepEqual(lines, want) {
 		t.Fatalf("runner stage sequence = %v, want %v", lines, want)
+	}
+}
+
+func TestRunEmitsStructuredEventsInOrder(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RS_HOME", filepath.Join(dir, "rs-home"))
+	toolchainPrefix := filepath.Join(dir, ".toolchain")
+	for _, path := range []string{toolchainPrefix, filepath.Join(toolchainPrefix, "lib", "pkgconfig")} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("toolchain_prefixes = [\".toolchain\"]\npkg_config_path = [\".toolchain/lib/pkgconfig\"]\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rs.toml) error = %v", err)
+	}
+
+	script := filepath.Join(dir, "analysis.R")
+	if err := os.WriteFile(script, []byte("cat('ok\\n')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", script, err)
+	}
+	rscript := writeFakeRscript(t, dir)
+
+	oldNative := nativeInstallForRun
+	t.Cleanup(func() {
+		nativeInstallForRun = oldNative
+	})
+	nativeInstallForRun = func(req installer.Request) (func() error, error) {
+		if req.Events != nil {
+			req.Events(Event{Source: "installer", Kind: "native_install_complete", Message: "native package install completed"})
+		}
+		return nil, nil
+	}
+
+	events := []Event{}
+	if err := Run(RunOptions{
+		ScriptPath:  script,
+		RscriptPath: rscript,
+		Stdout:      io.Discard,
+		Stderr:      io.Discard,
+		Events: func(event Event) {
+			events = append(events, event)
+		},
+	}); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	kinds := make([]string, 0, len(events))
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	want := []string{"preparing_project", "resolving_runtime", "native_install_complete", "lockfile_recording", "script_launch"}
+	if !reflect.DeepEqual(kinds, want) {
+		t.Fatalf("Run() event kinds = %v, want %v", kinds, want)
+	}
+}
+
+func TestSyncEmitsInstallEventsWithoutScriptLaunch(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RS_HOME", filepath.Join(dir, "rs-home"))
+	toolchainPrefix := filepath.Join(dir, ".toolchain")
+	for _, path := range []string{toolchainPrefix, filepath.Join(toolchainPrefix, "lib", "pkgconfig")} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("toolchain_prefixes = [\".toolchain\"]\npkg_config_path = [\".toolchain/lib/pkgconfig\"]\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rs.toml) error = %v", err)
+	}
+
+	script := filepath.Join(dir, "analysis.R")
+	if err := os.WriteFile(script, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", script, err)
+	}
+	rscript := writeFakeRscript(t, dir)
+
+	oldNative := nativeInstall
+	t.Cleanup(func() {
+		nativeInstall = oldNative
+	})
+	nativeInstall = func(req installer.Request) error {
+		if req.Events != nil {
+			req.Events(Event{Source: "installer", Kind: "prefetch_start", Message: "prefetching 1 package artifact(s)"})
+			req.Events(Event{Source: "installer", Kind: "native_install_complete", Message: "native package install completed"})
+		}
+		return nil
+	}
+
+	events := []Event{}
+	if err := Sync(SyncOptions{
+		ScriptPath:  script,
+		RscriptPath: rscript,
+		Stdout:      io.Discard,
+		Stderr:      io.Discard,
+		Events: func(event Event) {
+			events = append(events, event)
+		},
+	}); err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+
+	kinds := make([]string, 0, len(events))
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	if !slices.Contains(kinds, "native_install_complete") {
+		t.Fatalf("Sync() event kinds = %v, want native_install_complete", kinds)
+	}
+	if slices.Contains(kinds, "script_launch") {
+		t.Fatalf("Sync() event kinds = %v, want no script_launch", kinds)
+	}
+}
+
+func TestDoctorEmitsResolveEventsWithoutInstallMilestones(t *testing.T) {
+	dir := t.TempDir()
+	toolchainPrefix := filepath.Join(dir, ".toolchain")
+	for _, path := range []string{toolchainPrefix, filepath.Join(toolchainPrefix, "lib", "pkgconfig")} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("toolchain_prefixes = [\".toolchain\"]\npkg_config_path = [\".toolchain/lib/pkgconfig\"]\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rs.toml) error = %v", err)
+	}
+	script := filepath.Join(dir, "analysis.R")
+	if err := os.WriteFile(script, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", script, err)
+	}
+	rscript := writeFakeRscript(t, dir)
+
+	events := []Event{}
+	if err := Doctor(DoctorOptions{
+		ScriptPath:  script,
+		RscriptPath: rscript,
+		Stdout:      io.Discard,
+		Stderr:      io.Discard,
+		Events: func(event Event) {
+			events = append(events, event)
+		},
+	}); err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+
+	kinds := make([]string, 0, len(events))
+	for _, event := range events {
+		kinds = append(kinds, event.Kind)
+	}
+	if !slices.Contains(kinds, "preparing_project") || !slices.Contains(kinds, "resolving_runtime") {
+		t.Fatalf("Doctor() event kinds = %v", kinds)
+	}
+	for _, forbidden := range []string{"prefetch_start", "native_install_complete", "script_launch"} {
+		if slices.Contains(kinds, forbidden) {
+			t.Fatalf("Doctor() event kinds = %v, unexpected %s", kinds, forbidden)
+		}
 	}
 }
 
@@ -1127,8 +1281,8 @@ func TestResolveRunnableRscriptPathSuggestsExplicitAutoInstallWhenDisabled(t *te
 			t.Fatalf("spec = %q, want Rscript", spec)
 		}
 		return rmanager.RBootstrapAdvice{
-			ManualMessage: "install a managed R version with rs",
-			ManualCommand: "rs r install 4.4",
+			ManualMessage: "install a managed R version with " + brand.CLIName,
+			ManualCommand: brand.Command("r install 4.4"),
 			AutoEnableEnv: "RS_AUTO_INSTALL_R",
 		}
 	}
@@ -1141,7 +1295,7 @@ func TestResolveRunnableRscriptPathSuggestsExplicitAutoInstallWhenDisabled(t *te
 	if err == nil {
 		t.Fatalf("resolveRunnableRscriptPath() error = nil, want explicit guidance")
 	}
-	if !strings.Contains(err.Error(), "next step: install a managed R version with rs: rs r install 4.4") {
+	if !strings.Contains(err.Error(), "next step: install a managed R version with "+brand.CLIName+": "+brand.Command("r install 4.4")) {
 		t.Fatalf("resolveRunnableRscriptPath() error = %v", err)
 	}
 	if !strings.Contains(err.Error(), "explicit auto-install: set RS_AUTO_INSTALL_R=1 and retry") {
@@ -1768,8 +1922,8 @@ func TestValidationErrorIncludesModeContextAndHint(t *testing.T) {
 		"the managed library does not match the frozen dependency set",
 		"package not installed in managed library: cli",
 		"summary: missing packages = cli",
-		"hint: run `rs cache rm /tmp/project/.rs-cache/lib/abcdef0123456789`",
-		"run `rs lock /tmp/project/script.R`",
+		"hint: run `" + brand.Command("cache", "rm", "/tmp/project/.rs-cache/lib/abcdef0123456789") + "`",
+		"run `" + brand.Command("lock /tmp/project/script.R") + "`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ValidationError.Error() missing %q in:\n%s", want, got)
@@ -1842,7 +1996,7 @@ func TestValidationErrorIncludesInputSummaryAndHint(t *testing.T) {
 		"the current script, config, or runtime no longer matches the lockfile inputs required by --locked",
 		"summary: runtime drift = repository",
 		"summary: dependency set drift = cli",
-		"hint: run `rs lock /tmp/project/script.R`",
+		"hint: run `" + brand.Command("lock /tmp/project/script.R") + "`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("ValidationError.Error() missing %q in:\n%s", want, got)
@@ -2897,16 +3051,16 @@ func TestDoctorPrintsSystemHints(t *testing.T) {
 	if !strings.Contains(out, "[hint] package xml2 commonly need libxml2 development headers") {
 		t.Fatalf("Doctor() output missing xml2 hint:\n%s", out)
 	}
-	if !strings.Contains(out, "[next] create a lockfile and install the resolved dependencies: rs lock "+scriptPath) {
+	if !strings.Contains(out, "[next] create a lockfile and install the resolved dependencies: "+brand.Command("lock", scriptPath)) {
 		t.Fatalf("Doctor() output missing lock next step:\n%s", out)
 	}
-	if !strings.Contains(out, "[next] materialize the managed library for this script: rs run "+scriptPath) {
+	if !strings.Contains(out, "[next] materialize the managed library for this script: "+brand.Command("run", scriptPath)) {
 		t.Fatalf("Doctor() output missing install next step:\n%s", out)
 	}
-	if !strings.Contains(out, "[next] detect common rootless toolchain layouts on this machine before choosing prefixes to wire into rs: rs toolchain detect") {
+	if !strings.Contains(out, "[next] detect common rootless toolchain layouts on this machine before choosing prefixes to wire into "+brand.CLIName+": "+brand.Command("toolchain detect")) {
 		t.Fatalf("Doctor() output missing toolchain detect next step:\n%s", out)
 	}
-	if !strings.Contains(out, "[next] re-run the toolchain-only doctor after updating toolchain_prefixes/pkg_config_path or exporting RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH: rs doctor --toolchain-only "+scriptPath) {
+	if !strings.Contains(out, "[next] re-run the toolchain-only doctor after updating toolchain_prefixes/pkg_config_path or exporting RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH: "+brand.Command("doctor --toolchain-only", scriptPath)) {
 		t.Fatalf("Doctor() output missing toolchain-only validation next step:\n%s", out)
 	}
 	if !strings.Contains(out, "[summary] status=warning | errors=0 | warnings=2 | hints=2 |") || !strings.Contains(out, "blocking_next=0") {
@@ -3203,10 +3357,10 @@ func TestDoctorJSONOutput(t *testing.T) {
 	foundLock := false
 	foundRun := false
 	for _, step := range report.NextSteps {
-		if step.Category == "lock" && step.Kind == "create_lockfile" && step.Command == "rs lock "+scriptPath && !step.Blocking {
+		if step.Category == "lock" && step.Kind == "create_lockfile" && step.Command == brand.Command("lock", scriptPath) && !step.Blocking {
 			foundLock = true
 		}
-		if step.Category == "cache" && step.Kind == "materialize_library" && step.Command == "rs run "+scriptPath && !step.Blocking {
+		if step.Category == "cache" && step.Kind == "materialize_library" && step.Command == brand.Command("run", scriptPath) && !step.Blocking {
 			foundRun = true
 		}
 	}
@@ -3377,10 +3531,10 @@ func TestDoctorToolchainValidationReportsBrokenConfiguredPaths(t *testing.T) {
 		if step.Kind == "fix_toolchain_config" && step.Blocking {
 			foundNextStep = true
 		}
-		if step.Kind == "detect_toolchain" && step.Command == "rs toolchain detect" {
+		if step.Kind == "detect_toolchain" && step.Command == brand.Command("toolchain detect") {
 			foundDetect = true
 		}
-		if step.Kind == "validate_toolchain_only" && step.Command == "rs doctor --toolchain-only "+scriptPath {
+		if step.Kind == "validate_toolchain_only" && step.Command == brand.Command("doctor --toolchain-only", scriptPath) {
 			foundValidate = true
 		}
 		if step.Kind == "setup_detected_toolchain" && step.Blocking && strings.Contains(step.Command, filepath.Join(homebrewPrefix, "bin", "brew")) {
@@ -3392,7 +3546,7 @@ func TestDoctorToolchainValidationReportsBrokenConfiguredPaths(t *testing.T) {
 			}
 			foundSetup = true
 		}
-		if step.Kind == "init_detected_toolchain" && step.Blocking && step.Command == "rs init --toolchain-preset homebrew" {
+		if step.Kind == "init_detected_toolchain" && step.Blocking && step.Command == brand.Command("init --toolchain-preset homebrew") {
 			if step.Preset != "homebrew" {
 				t.Fatalf("init_detected_toolchain preset = %q, want homebrew (%#v)", step.Preset, step)
 			}
@@ -3486,7 +3640,7 @@ func TestDoctorWarnsWhenPkgConfigIsMissingForConfiguredToolchain(t *testing.T) {
 		if step.Kind == "install_pkg_config" && !step.Blocking {
 			foundNextStep = true
 		}
-		if step.Kind == "detect_toolchain" && step.Command == "rs toolchain detect" {
+		if step.Kind == "detect_toolchain" && step.Command == brand.Command("toolchain detect") {
 			foundDetect = true
 		}
 		if step.Kind == "setup_detected_toolchain" && !step.Blocking && strings.Contains(step.Command, filepath.Join(homebrewPrefix, "bin", "brew")) {
@@ -3816,7 +3970,7 @@ func TestMaybeBootstrapPlanToolchainUsesDependencyAwareCategories(t *testing.T) 
 	plan := dependencyPlan{
 		CRANDeps: []string{"haven"},
 	}
-	if err := maybeBootstrapPlanToolchain(&plan, io.Discard, io.Discard); err != nil {
+	if err := maybeBootstrapPlanToolchain(&plan, io.Discard, io.Discard, nil); err != nil {
 		t.Fatalf("maybeBootstrapPlanToolchain() error = %v", err)
 	}
 	if !called {
@@ -4188,7 +4342,7 @@ func TestBuildDoctorNextStepsHealthyEnvironment(t *testing.T) {
 	if steps[0].Category != "run" || steps[0].Kind != "run_script" {
 		t.Fatalf("steps[0] = %#v, want run/run_script", steps[0])
 	}
-	if steps[0].Command != "rs run /tmp/project/report.R" {
+	if steps[0].Command != brand.Command("run /tmp/project/report.R") {
 		t.Fatalf("steps[0].Command = %q", steps[0].Command)
 	}
 	if steps[0].Blocking {
@@ -4427,7 +4581,7 @@ func TestBuildDoctorNextStepsSuggestsNativeBootstrapWhenMissing(t *testing.T) {
 		}
 		return rmanager.RBootstrapAdvice{
 			ManualMessage: "install a managed R version with rs",
-			ManualCommand: "rs r install 5.3.2",
+			ManualCommand: brand.Command("r install 5.3.2"),
 			AutoEnableEnv: "RS_AUTO_INSTALL_R",
 		}
 	}
@@ -4443,10 +4597,10 @@ func TestBuildDoctorNextStepsSuggestsNativeBootstrapWhenMissing(t *testing.T) {
 	foundManual := false
 	foundAuto := false
 	for _, step := range steps {
-		if step.Kind == "install_r" && strings.Contains(step.Message, "rs r install 5.3.2") && step.Blocking {
+		if step.Kind == "install_r" && strings.Contains(step.Message, brand.Command("r install 5.3.2")) && step.Blocking {
 			foundManual = true
 		}
-		if step.Kind == "auto_install_r" && step.Command == "RS_AUTO_INSTALL_R=1 rs run /tmp/project/report.R" && step.Blocking {
+		if step.Kind == "auto_install_r" && step.Command == "RS_AUTO_INSTALL_R=1 "+brand.Command("run /tmp/project/report.R") && step.Blocking {
 			foundAuto = true
 		}
 	}
@@ -4484,7 +4638,7 @@ func TestBuildDoctorNextStepsSuggestsManagedRForExternalConda(t *testing.T) {
 
 	found := false
 	for _, step := range steps {
-		if step.Kind == "switch_to_managed_r" && strings.Contains(step.Command, "rs r install 4.4.3 && rs r use 4.4.3") {
+		if step.Kind == "switch_to_managed_r" && strings.Contains(step.Command, brand.Command("r install 4.4.3")+" && "+brand.Command("r use 4.4.3")) {
 			found = true
 			break
 		}
@@ -4523,10 +4677,10 @@ func TestBuildDoctorNextStepsSuggestsToolchainFollowupsForSystemHintsWithoutConf
 	foundSetup := false
 	foundInit := false
 	for _, step := range steps {
-		if step.Kind == "detect_toolchain" && step.Command == "rs toolchain detect" {
+		if step.Kind == "detect_toolchain" && step.Command == brand.Command("toolchain detect") {
 			foundDetect = true
 		}
-		if step.Kind == "validate_toolchain_only" && step.Command == "rs doctor --toolchain-only /tmp/project/report.R" {
+		if step.Kind == "validate_toolchain_only" && step.Command == brand.Command("doctor --toolchain-only /tmp/project/report.R") {
 			foundValidate = true
 		}
 		if step.Kind == "setup_detected_toolchain" && !step.Blocking && strings.Contains(step.Command, filepath.Join(homebrewPrefix, "bin", "brew")) {
@@ -4538,7 +4692,7 @@ func TestBuildDoctorNextStepsSuggestsToolchainFollowupsForSystemHintsWithoutConf
 			}
 			foundSetup = true
 		}
-		if step.Kind == "init_detected_toolchain" && !step.Blocking && step.Command == "rs init --toolchain-preset homebrew" {
+		if step.Kind == "init_detected_toolchain" && !step.Blocking && step.Command == brand.Command("init --toolchain-preset homebrew") {
 			if step.Preset != "homebrew" {
 				t.Fatalf("init_detected_toolchain preset = %q, want homebrew (%#v)", step.Preset, step)
 			}
@@ -4578,7 +4732,7 @@ func TestBuildDoctorNextStepsSuggestsRuntimeFixesForInstallFailureDiagnostics(t 
 	foundInspect := false
 	foundRuntimePath := false
 	for _, step := range steps {
-		if step.Kind == "recheck_toolchain_only" && step.Command == "rs doctor --toolchain-only /tmp/project/report.R" && !step.Blocking {
+		if step.Kind == "recheck_toolchain_only" && step.Command == brand.Command("doctor --toolchain-only /tmp/project/report.R") && !step.Blocking {
 			foundRecheck = true
 		}
 		if step.Kind == "configure_rootless_toolchain" && step.Blocking {
@@ -4662,10 +4816,10 @@ func TestWrapExternalInterpreterInstallErrorAddsCondaHint(t *testing.T) {
 	if !strings.Contains(err.Error(), "external Conda-style R") {
 		t.Fatalf("wrapExternalInterpreterInstallError() = %v", err)
 	}
-	if !strings.Contains(err.Error(), "rs toolchain detect") {
+	if !strings.Contains(err.Error(), brand.Command("toolchain detect")) {
 		t.Fatalf("wrapExternalInterpreterInstallError() missing rootless toolchain hint: %v", err)
 	}
-	if !strings.Contains(err.Error(), "rs doctor --toolchain-only") {
+	if !strings.Contains(err.Error(), brand.Command("doctor --toolchain-only")) {
 		t.Fatalf("wrapExternalInterpreterInstallError() missing toolchain-only hint: %v", err)
 	}
 	if !strings.Contains(err.Error(), "Detected recommended preset on this machine: homebrew") {

@@ -3,7 +3,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-e2e-pak-" + [System.Guid]::NewGuid().ToString("N"))
-$RSBin = Join-Path $TmpDir "rs.exe"
+$RSBin = Join-Path $TmpDir "rvx.exe"
 $ProjectDir = Join-Path $TmpDir "project"
 $ScriptPath = Join-Path $ProjectDir "analysis.R"
 $RscriptPath = (Get-Command Rscript.exe).Source
@@ -18,8 +18,8 @@ try {
 
     Set-Location $RootDir
 
-    Write-Host "==> building rs"
-    go build -o $RSBin ./cmd/rs
+    Write-Host "==> building rvx"
+    go build -o $RSBin ./cmd/rvx
 
     Write-Host "==> installing pak into isolated user library"
     New-Item -ItemType Directory -Force -Path $env:R_LIBS_USER | Out-Null

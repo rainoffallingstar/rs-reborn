@@ -46,8 +46,8 @@ EOF
   )
 }
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> building local package fixture"
 build_local_pkg
@@ -75,7 +75,7 @@ if [ -z "$MANAGED_LIBRARY" ]; then
 fi
 test -d "$MANAGED_LIBRARY"
 
-echo "==> remove active managed library through rs cache rm"
+echo "==> remove active managed library through rvx cache rm"
 "$RS_BIN" cache rm "$MANAGED_LIBRARY" | tee "$TMP_DIR/cache-rm.txt"
 grep -q '\[ok\] cache rm removed 1 managed library' "$TMP_DIR/cache-rm.txt"
 test ! -d "$MANAGED_LIBRARY"

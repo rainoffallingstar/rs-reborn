@@ -15,8 +15,8 @@ export RS_INSTALL_BACKEND=native
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> non-mutating example coverage"
 "$RS_BIN" scan "$ROOT_DIR/examples/cran-basic/analysis.R" | tee "$TMP_DIR/scan.txt"

@@ -27,6 +27,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
+	"github.com/rainoffallingstar/rs-reborn/internal/eventstream"
 	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
 	"github.com/rainoffallingstar/rs-reborn/internal/project"
 	"github.com/rainoffallingstar/rs-reborn/internal/rdeps"
@@ -78,6 +80,7 @@ type Runtime struct {
 
 type Request struct {
 	Interpreter string
+	ScriptPath  string
 	WorkDir     string
 	CacheRoot   string
 	LibraryPath string
@@ -90,6 +93,7 @@ type Request struct {
 	SourceDeps  map[string]project.SourceSpec
 	Stdout      io.Writer
 	Stderr      io.Writer
+	Events      eventstream.Handler
 }
 
 type nativeInstaller struct {
@@ -141,6 +145,52 @@ type installTiming struct {
 
 func (i *nativeInstaller) stage(label string) {
 	progresscmd.Stage(i.stderr, label)
+}
+
+func (i *nativeInstaller) emitEvent(kind, message, pkg string, current, total int, d time.Duration, fields map[string]string) {
+	eventstream.Emit(i.req.Events, eventstream.Event{
+		Source:     "installer",
+		Kind:       kind,
+		Message:    message,
+		ScriptPath: i.req.ScriptPath,
+		Package:    pkg,
+		Current:    current,
+		Total:      total,
+		Duration:   eventstream.FormatDuration(d),
+		Fields:     fields,
+	})
+}
+
+func (i *nativeInstaller) emitDependencyLayerStart(index, total, pureCount, compiledCount int) {
+	i.emitEvent(
+		"dependency_layer_start",
+		formatDependencyLayerPlan(index, total, pureCount, compiledCount),
+		"",
+		index,
+		total,
+		0,
+		map[string]string{
+			"pure_packages":     strconv.Itoa(pureCount),
+			"compiled_packages": strconv.Itoa(compiledCount),
+			"package_count":     strconv.Itoa(pureCount + compiledCount),
+		},
+	)
+}
+
+func (i *nativeInstaller) emitDependencyLayerComplete(index, total, pureCount, compiledCount, pureInstalled, compiledInstalled int, d time.Duration) {
+	i.emitEvent(
+		"dependency_layer_complete",
+		formatDependencyLayerPlan(index, total, pureCount, compiledCount),
+		"",
+		index,
+		total,
+		d,
+		map[string]string{
+			"installed_packages": strconv.Itoa(pureInstalled + compiledInstalled),
+			"pure_packages":      strconv.Itoa(pureInstalled),
+			"compiled_packages":  strconv.Itoa(compiledInstalled),
+		},
+	)
 }
 
 func (i *nativeInstaller) notef(format string, args ...any) {
@@ -386,6 +436,7 @@ func install(req Request, waitForStoreSync bool) (func() error, error) {
 			if shouldStageDependencyLayerPlan(len(pure), len(compiled), inst.req.Verbose) {
 				progresscmd.Stage(inst.stderr, formatDependencyLayerPlan(idx+1, len(layers), len(pure), len(compiled)))
 			}
+			inst.emitDependencyLayerStart(idx+1, len(layers), len(pure), len(compiled))
 			installed, err := inst.installPackageBatch(pure)
 			if err != nil {
 				_ = waitAllSyncPlannedPackagesToStore(pendingStoreSyncs)
@@ -424,6 +475,7 @@ func install(req Request, waitForStoreSync bool) (func() error, error) {
 			); ok {
 				inst.notef("%s", summary)
 			}
+			inst.emitDependencyLayerComplete(idx+1, len(layers), len(pure), len(compiled), len(installed), len(compiledInstalled), time.Since(layerStarted))
 		}
 		if waitForStoreSync {
 			if err := finalizePendingStoreSyncs(inst.stderr, pendingStoreSyncs); err != nil {
@@ -1263,7 +1315,11 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 		return nil
 	}
 
-	progresscmd.Stage(i.stderr, fmt.Sprintf("prefetching %d package artifact(s)", len(records)))
+	message := fmt.Sprintf("prefetching %d package artifact(s)", len(records))
+	progresscmd.Stage(i.stderr, message)
+	i.emitEvent("prefetch_start", message, "", len(records), len(records), 0, map[string]string{
+		"artifact_count": strconv.Itoa(len(records)),
+	})
 	if len(records) == 1 {
 		if _, ok := i.repoDownloadReadyPath(records[0]); ok {
 			stats.reusedCache++
@@ -1274,7 +1330,13 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 		if stats.reusedCache == 0 {
 			stats.downloaded++
 		}
-		progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache))
+		summary := formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache)
+		progresscmd.Stage(i.stderr, summary)
+		i.emitEvent("prefetch_complete", summary, "", len(records), len(records), 0, map[string]string{
+			"artifact_count": strconv.Itoa(len(records)),
+			"downloaded":     strconv.Itoa(stats.downloaded),
+			"reused_cache":   strconv.Itoa(stats.reusedCache),
+		})
 		return nil
 	}
 
@@ -1318,7 +1380,13 @@ func (i *nativeInstaller) prefetchPlannedPackages() error {
 		}
 		stats.downloaded++
 	}
-	progresscmd.Stage(i.stderr, formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache))
+	summary := formatPrefetchSummary(len(records), stats.downloaded, stats.reusedCache)
+	progresscmd.Stage(i.stderr, summary)
+	i.emitEvent("prefetch_complete", summary, "", len(records), len(records), 0, map[string]string{
+		"artifact_count": strconv.Itoa(len(records)),
+		"downloaded":     strconv.Itoa(stats.downloaded),
+		"reused_cache":   strconv.Itoa(stats.reusedCache),
+	})
 	return nil
 }
 
@@ -2798,7 +2866,13 @@ func (i *nativeInstaller) logInstallCompletion(d time.Duration, stats installSum
 	if summary := formatSlowInstallSummary(i.snapshotInstallTimings(), 4); summary != "" {
 		i.notef("%s", summary)
 	}
-	i.notef("%s", formatNativeInstallSummary(d, stats))
+	message := formatNativeInstallSummary(d, stats)
+	i.notef("%s", message)
+	i.emitEvent("native_install_complete", message, "", stats.installedCount, stats.installedCount+stats.reusedCount, d, map[string]string{
+		"installed_packages": strconv.Itoa(stats.installedCount),
+		"reused_packages":    strconv.Itoa(stats.reusedCount),
+		"compiled_packages":  strconv.Itoa(stats.compiledInstallCount),
+	})
 }
 
 func (i *nativeInstaller) snapshotInstallTimings() []installTiming {
@@ -4741,7 +4815,9 @@ func (i *nativeInstaller) ensurePackageBuildToolsReady(pkg string) error {
 	if i.buildToolsChecked {
 		return nil
 	}
-	i.stage(formatBuildToolsCheckStage(pkg))
+	message := formatBuildToolsCheckStage(pkg)
+	i.stage(message)
+	i.emitEvent("build_toolchain_validation", message, pkg, 0, 0, 0, nil)
 	if err := installerEnsureBuildTools(pkg, i.req.Environment); err != nil {
 		return err
 	}
@@ -5063,7 +5139,7 @@ func linuxSourceBuildAdvice() string {
 }
 
 func rootlessToolchainAdvice(env []string) string {
-	base := "if you cannot install system packages, provide a user-local toolchain prefix with enva, Homebrew-in-home, micromamba, mamba, conda, or Spack, then expose it via RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH or rs.toml; start with `rs toolchain detect`, `rs toolchain template auto`, and `rs doctor --toolchain-only`"
+	base := fmt.Sprintf("if you cannot install system packages, provide a user-local toolchain prefix with enva, Homebrew-in-home, micromamba, mamba, conda, or Spack, then expose it via RS_TOOLCHAIN_PREFIXES/RS_PKG_CONFIG_PATH or rs.toml; start with `%s`, `%s`, and `%s`", brand.Command("toolchain detect"), brand.Command("toolchain template auto"), brand.Command("doctor --toolchain-only"))
 	candidate, err := toolchainenv.CandidateFromEnvironment(env)
 	if err == nil && candidate != nil {
 		return fmt.Sprintf("%s; detected recommended preset on this machine: %s; setup follow-up: `%s`; project follow-up: `%s`", base, candidate.Preset, candidate.SuggestedSetupCommand, candidate.SuggestedInitCommand)

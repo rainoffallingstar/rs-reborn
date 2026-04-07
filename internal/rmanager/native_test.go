@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 )
 
 func writeFakeManagedRscript(t *testing.T, root, version string) string {
@@ -334,7 +336,7 @@ func TestLookupManagedInstallationUsesStoredRuntimeMetadata(t *testing.T) {
 
 func TestBootstrapAdviceForUsesRequestedVersion(t *testing.T) {
 	advice := BootstrapAdviceFor("5.3.2")
-	if !strings.Contains(advice.ManualCommand, "rs r install 5.3.2") {
+	if !strings.Contains(advice.ManualCommand, brand.Command("r install 5.3.2")) {
 		t.Fatalf("BootstrapAdviceFor() command = %q", advice.ManualCommand)
 	}
 }
@@ -544,7 +546,7 @@ func TestPreflightSourceBuildMacOSMissingLzmaHeader(t *testing.T) {
 	if !strings.Contains(err.Error(), "lzma.h header") {
 		t.Fatalf("preflightSourceBuild() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "rs r install 4.4.3 --method binary") {
+	if !strings.Contains(err.Error(), brand.Command("r install 4.4.3 --method binary")) {
 		t.Fatalf("preflightSourceBuild() error = %v", err)
 	}
 	if !strings.Contains(err.Error(), "rootless environment") {
@@ -598,7 +600,7 @@ func TestSourceBuildEnvironmentUsesRSToolchainPrefixes(t *testing.T) {
 		t.Fatalf("PATH = %q", pathValue)
 	}
 	if prefixValue == "" || pkgValue == "" {
-		t.Fatalf("sourceBuildEnvironment() missing rs toolchain markers: %v", env)
+		t.Fatalf("sourceBuildEnvironment() missing %s toolchain markers: %v", brand.CLIName, env)
 	}
 }
 

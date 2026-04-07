@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
 	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
@@ -228,7 +229,7 @@ func nativeResolveVersionOrPath(spec string) (string, error) {
 	if best := selectBestInstallation(installs, spec); best != nil {
 		return best.RscriptPath, nil
 	}
-	return "", fmt.Errorf("could not find an installed Rscript for version %q; run `rs r install %s`, use `rs r list` to inspect available interpreters, or set rs.toml rscript manually", spec, spec)
+	return "", fmt.Errorf("could not find an installed Rscript for version %q; run `%s`, use `%s` to inspect available interpreters, or set rs.toml rscript manually", spec, brand.Command("r install", spec), brand.Command("r list"))
 }
 
 func nativeEnsureInstalledRscript(spec string, stdout, stderr io.Writer) (string, error) {
@@ -279,20 +280,20 @@ func nativeBootstrapAdviceFor(spec string) RBootstrapAdvice {
 	case "linux":
 		distro, err := detectLinuxDistro()
 		if err == nil && isArchLinux(distro) {
-			advice.ManualMessage = "install R build dependencies and then install a managed R version with rs"
-			advice.ManualCommand = fmt.Sprintf("pacman -S --needed base-devel gcc-fortran curl xz bzip2 zlib readline pcre2 icu && rs r install %s --method source", installTarget)
+			advice.ManualMessage = fmt.Sprintf("install R build dependencies and then install a managed R version with %s", brand.CLIName)
+			advice.ManualCommand = fmt.Sprintf("pacman -S --needed base-devel gcc-fortran curl xz bzip2 zlib readline pcre2 icu && %s", brand.Command("r install", installTarget, "--method source"))
 			return advice
 		}
-		advice.ManualMessage = "install a managed R version with rs or set rs.toml rscript manually"
-		advice.ManualCommand = "rs r install " + installTarget
+		advice.ManualMessage = fmt.Sprintf("install a managed R version with %s or set rs.toml rscript manually", brand.CLIName)
+		advice.ManualCommand = brand.Command("r install", installTarget)
 		return advice
 	case "darwin":
-		advice.ManualMessage = "install a managed R version with rs or set rs.toml rscript manually"
-		advice.ManualCommand = "rs r install " + installTarget
+		advice.ManualMessage = fmt.Sprintf("install a managed R version with %s or set rs.toml rscript manually", brand.CLIName)
+		advice.ManualCommand = brand.Command("r install", installTarget)
 		return advice
 	case "windows":
-		advice.ManualMessage = "install a managed R version with rs or set rs.toml rscript manually"
-		advice.ManualCommand = "rs r install " + installTarget
+		advice.ManualMessage = fmt.Sprintf("install a managed R version with %s or set rs.toml rscript manually", brand.CLIName)
+		advice.ManualCommand = brand.Command("r install", installTarget)
 		return advice
 	default:
 		advice.ManualMessage = "set rs.toml rscript manually"
@@ -1760,7 +1761,7 @@ func sourceBuildAdvice(version string, missingTools, missingHeaders []string) st
 	switch nativeGOOS {
 	case "darwin":
 		parts := []string{
-			fmt.Sprintf("prefer a managed binary install first: rs r install %s --method binary", target),
+			fmt.Sprintf("prefer a managed binary install first: %s", brand.Command("r install", target, "--method binary")),
 			"if source build is required, install Xcode Command Line Tools plus the missing libraries in a user-local prefix such as Homebrew or Conda",
 		}
 		if len(missingHeaders) > 0 {

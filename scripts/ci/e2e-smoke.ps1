@@ -3,7 +3,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-e2e-smoke-" + [System.Guid]::NewGuid().ToString("N"))
-$RSBin = Join-Path $TmpDir "rs.exe"
+$RSBin = Join-Path $TmpDir "rvx.exe"
 $ProjectDir = Join-Path $TmpDir "project"
 $ScriptPath = Join-Path $ProjectDir "analysis.R"
 $RscriptPath = (Get-Command Rscript.exe).Source
@@ -17,8 +17,8 @@ try {
 
     Set-Location $RootDir
 
-    Write-Host "==> building rs"
-    go build -o $RSBin ./cmd/rs
+    Write-Host "==> building rvx"
+    go build -o $RSBin ./cmd/rvx
 
     Write-Host "==> non-mutating example coverage"
     $scanText = (& $RSBin scan (Join-Path $RootDir "examples\cran-basic\analysis.R")) | Out-String
@@ -83,7 +83,7 @@ cat(jsonlite::toJSON(list(args = args, lib = .libPaths()[1]), auto_unbox = TRUE)
 
     $rWhich = (& $RSBin r which $ProjectDir) | Out-String
     if ($rWhich -notmatch [Regex]::Escape($RscriptPath)) {
-        throw "expected rs r which output"
+        throw "expected rvx r which output"
     }
 
     Write-Host "CLI smoke E2E passed"

@@ -16,8 +16,8 @@ export RS_INSTALL_BACKEND=pak
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> installing pak into isolated user library"
 mkdir -p "$R_LIBS_USER"

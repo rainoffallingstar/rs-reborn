@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
+	"github.com/rainoffallingstar/rs-reborn/internal/eventstream"
 	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
 	"github.com/rainoffallingstar/rs-reborn/internal/project"
 	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
@@ -2541,6 +2543,63 @@ func TestPrefetchPlannedPackagesReportsSummary(t *testing.T) {
 	}
 }
 
+func TestPrefetchPlannedPackagesEmitsStructuredEvents(t *testing.T) {
+	dir := t.TempDir()
+	archive := testTarGzBytes(t, map[string]string{
+		"fresh/DESCRIPTION": "Package: fresh\nVersion: 2.0.0\nNeedsCompilation: no\n",
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+
+	record := repoRecord{
+		Name:       "fresh",
+		Version:    "2.0.0",
+		Source:     sourceCRAN,
+		TarballURL: server.URL + "/fresh_2.0.0.tar.gz",
+		DepsLoaded: false,
+	}
+	events := []eventstream.Event{}
+	inst := nativeInstaller{
+		tempRoot:       filepath.Join(dir, "tmp"),
+		downloadRoot:   filepath.Join(dir, "downloads"),
+		stderr:         io.Discard,
+		httpClient:     server.Client(),
+		prefetchedRepo: map[string]string{},
+		req: Request{
+			ScriptPath: filepath.Join(dir, "analysis.R"),
+			Events: func(event eventstream.Event) {
+				events = append(events, event)
+			},
+		},
+		planned: map[string]plannedPackage{
+			"fresh": {
+				Name:    "fresh",
+				Version: "2.0.0",
+				Source:  sourceCRAN,
+				Repo:    &record,
+			},
+		},
+		order: []string{"fresh"},
+	}
+	for _, path := range []string{inst.tempRoot, inst.downloadRoot} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+
+	if err := inst.prefetchPlannedPackages(); err != nil {
+		t.Fatalf("prefetchPlannedPackages() error = %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("prefetch events = %v, want 2", events)
+	}
+	if events[0].Kind != "prefetch_start" || events[1].Kind != "prefetch_complete" {
+		t.Fatalf("prefetch event kinds = %v", []string{events[0].Kind, events[1].Kind})
+	}
+}
+
 func TestInstallerNotefPrefixesMessage(t *testing.T) {
 	var buf bytes.Buffer
 	inst := nativeInstaller{stderr: &buf}
@@ -2571,6 +2630,35 @@ func TestLogInstallCompletionIncludesSlowInstallSummary(t *testing.T) {
 	}
 	if !strings.Contains(got, "[rs] native package install completed in 10m00s (12 installed, 4 compiled, 3 reused)\n") {
 		t.Fatalf("logInstallCompletion() missing final summary:\n%s", got)
+	}
+}
+
+func TestLogInstallCompletionEmitsStructuredEvent(t *testing.T) {
+	events := []eventstream.Event{}
+	inst := nativeInstaller{
+		stderr: io.Discard,
+		req: Request{
+			ScriptPath: "/tmp/analysis.R",
+			Events: func(event eventstream.Event) {
+				events = append(events, event)
+			},
+		},
+	}
+
+	inst.logInstallCompletion(95*time.Second, installSummaryStats{
+		reusedCount:          2,
+		installedCount:       5,
+		compiledInstallCount: 3,
+	})
+
+	if len(events) != 1 {
+		t.Fatalf("logInstallCompletion() events = %v, want 1", events)
+	}
+	if events[0].Kind != "native_install_complete" {
+		t.Fatalf("logInstallCompletion() event kind = %q", events[0].Kind)
+	}
+	if events[0].Duration == "" {
+		t.Fatalf("logInstallCompletion() duration empty: %#v", events[0])
 	}
 }
 
@@ -2972,10 +3060,10 @@ func TestEnsureLinuxSourceBuildToolsUsesDistroAdvice(t *testing.T) {
 	if !strings.Contains(err.Error(), "build-essential gfortran cmake") {
 		t.Fatalf("ensureLinuxSourceBuildTools() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "rs toolchain detect") {
+	if !strings.Contains(err.Error(), brand.Command("toolchain detect")) {
 		t.Fatalf("ensureLinuxSourceBuildTools() error missing rootless guidance = %v", err)
 	}
-	if !strings.Contains(err.Error(), "rs doctor --toolchain-only") {
+	if !strings.Contains(err.Error(), brand.Command("doctor --toolchain-only")) {
 		t.Fatalf("ensureLinuxSourceBuildTools() error missing toolchain-only guidance = %v", err)
 	}
 }
@@ -3193,6 +3281,61 @@ func TestEnsurePackageBuildToolsReadyReportsStageOnce(t *testing.T) {
 	}
 }
 
+func TestEnsurePackageBuildToolsReadyEmitsStructuredEvent(t *testing.T) {
+	original := installerEnsureBuildTools
+	t.Cleanup(func() {
+		installerEnsureBuildTools = original
+	})
+	installerEnsureBuildTools = func(pkg string, env []string) error {
+		return nil
+	}
+
+	events := []eventstream.Event{}
+	inst := nativeInstaller{
+		stderr: io.Discard,
+		req: Request{
+			ScriptPath: "/tmp/analysis.R",
+			Events: func(event eventstream.Event) {
+				events = append(events, event)
+			},
+		},
+	}
+	if err := inst.ensurePackageBuildToolsReady("stringi"); err != nil {
+		t.Fatalf("ensurePackageBuildToolsReady() error = %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ensurePackageBuildToolsReady() events = %v, want 1", events)
+	}
+	if events[0].Kind != "build_toolchain_validation" || events[0].Package != "stringi" {
+		t.Fatalf("ensurePackageBuildToolsReady() event = %#v", events[0])
+	}
+}
+
+func TestDependencyLayerHelpersEmitStructuredEvents(t *testing.T) {
+	events := []eventstream.Event{}
+	inst := nativeInstaller{
+		req: Request{
+			ScriptPath: "/tmp/analysis.R",
+			Events: func(event eventstream.Event) {
+				events = append(events, event)
+			},
+		},
+	}
+
+	inst.emitDependencyLayerStart(1, 3, 2, 1)
+	inst.emitDependencyLayerComplete(1, 3, 2, 1, 2, 1, 37*time.Second)
+
+	if len(events) != 2 {
+		t.Fatalf("dependency layer events = %v, want 2", events)
+	}
+	if events[0].Kind != "dependency_layer_start" || events[1].Kind != "dependency_layer_complete" {
+		t.Fatalf("dependency layer event kinds = %v", []string{events[0].Kind, events[1].Kind})
+	}
+	if events[1].Duration == "" {
+		t.Fatalf("dependency layer complete duration empty: %#v", events[1])
+	}
+}
+
 func TestRootlessToolchainAdviceIncludesDetectedPresetRecommendation(t *testing.T) {
 	dir := t.TempDir()
 	setTestHomeDir(t, dir)
@@ -3214,7 +3357,7 @@ func TestRootlessToolchainAdviceIncludesDetectedPresetRecommendation(t *testing.
 	if !strings.Contains(advice, filepath.Join(homebrewPrefix, "bin", "brew")) {
 		t.Fatalf("rootlessToolchainAdvice() = %q", advice)
 	}
-	if !strings.Contains(advice, "rs init --toolchain-preset homebrew") {
+	if !strings.Contains(advice, brand.Command("init --toolchain-preset homebrew")) {
 		t.Fatalf("rootlessToolchainAdvice() = %q", advice)
 	}
 }

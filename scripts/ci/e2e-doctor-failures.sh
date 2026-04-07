@@ -12,8 +12,8 @@ export GOMODCACHE="$TMP_DIR/gomodcache"
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 create_project() {
   local project_dir="$1"
@@ -33,14 +33,14 @@ create_project "$LOCAL_PROJECT"
 "$RS_BIN" add --project-dir "$LOCAL_PROJECT" --source local --path vendor/missing-localpkg.tar.gz localpkg
 
 if "$RS_BIN" doctor --rscript "$RSCRIPT_PATH" "$LOCAL_PROJECT/analysis.R" >"$TMP_DIR/local.txt" 2>&1; then
-  echo "expected rs doctor to fail for missing local source"
+  echo "expected rvx doctor to fail for missing local source"
   cat "$TMP_DIR/local.txt"
   exit 1
 fi
 grep -q '\[error\] local source "localpkg" does not exist:' "$TMP_DIR/local.txt"
 
 if "$RS_BIN" doctor --rscript "$RSCRIPT_PATH" --json "$LOCAL_PROJECT/analysis.R" >"$TMP_DIR/local.json" 2>&1; then
-  echo "expected rs doctor --json to fail for missing local source"
+  echo "expected rvx doctor --json to fail for missing local source"
   cat "$TMP_DIR/local.json"
   exit 1
 fi
@@ -56,14 +56,14 @@ create_project "$GIT_PROJECT"
 "$RS_BIN" add --project-dir "$GIT_PROJECT" --source git --url file:///tmp/rs-missing-git-source gitpkg
 
 if "$RS_BIN" doctor --rscript "$RSCRIPT_PATH" "$GIT_PROJECT/analysis.R" >"$TMP_DIR/git.txt" 2>&1; then
-  echo "expected rs doctor to fail for missing git source"
+  echo "expected rvx doctor to fail for missing git source"
   cat "$TMP_DIR/git.txt"
   exit 1
 fi
 grep -q '\[error\] git source "gitpkg" does not exist:' "$TMP_DIR/git.txt"
 
 if "$RS_BIN" doctor --rscript "$RSCRIPT_PATH" --json "$GIT_PROJECT/analysis.R" >"$TMP_DIR/git.json" 2>&1; then
-  echo "expected rs doctor --json to fail for missing git source"
+  echo "expected rvx doctor --json to fail for missing git source"
   cat "$TMP_DIR/git.json"
   exit 1
 fi
@@ -80,14 +80,14 @@ create_project "$TOKEN_PROJECT"
 "$RS_BIN" add --project-dir "$TOKEN_PROJECT" --source github --github-repo owner/privatepkg --token-env RS_TEST_GH_TOKEN privpkg
 
 if env -u RS_TEST_GH_TOKEN "$RS_BIN" doctor --rscript "$RSCRIPT_PATH" "$TOKEN_PROJECT/analysis.R" >"$TMP_DIR/token.txt" 2>&1; then
-  echo "expected rs doctor to fail for missing token env"
+  echo "expected rvx doctor to fail for missing token env"
   cat "$TMP_DIR/token.txt"
   exit 1
 fi
 grep -q '\[error\] source "privpkg" requires environment variable RS_TEST_GH_TOKEN, but it is not set' "$TMP_DIR/token.txt"
 
 if env -u RS_TEST_GH_TOKEN "$RS_BIN" doctor --rscript "$RSCRIPT_PATH" --json "$TOKEN_PROJECT/analysis.R" >"$TMP_DIR/token.json" 2>&1; then
-  echo "expected rs doctor --json to fail for missing token env"
+  echo "expected rvx doctor --json to fail for missing token env"
   cat "$TMP_DIR/token.json"
   exit 1
 fi

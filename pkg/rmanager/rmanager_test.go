@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 	publicrmanager "github.com/rainoffallingstar/rs-reborn/pkg/rmanager"
 )
 
@@ -27,7 +28,7 @@ func TestPublicBootstrapAdviceIncludesCommand(t *testing.T) {
 	if strings.TrimSpace(advice.AutoEnableEnv) == "" {
 		t.Fatalf("AutoEnableEnv = %q", advice.AutoEnableEnv)
 	}
-	if !strings.Contains(advice.ManualMessageWithCommand(), "rs r install 4.5.3") {
+	if !strings.Contains(advice.ManualMessageWithCommand(), brand.Command("r", "install", "4.5.3")) {
 		t.Fatalf("ManualMessageWithCommand() = %q", advice.ManualMessageWithCommand())
 	}
 }

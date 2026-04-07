@@ -57,8 +57,8 @@ EOF
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 mkdir -p "$PROJECT_DIR" "$PKG_WORK" "$PKG_BUILD" "$REPO_ROOT/src/contrib/Archive/pkgA"
 

@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 )
 
 var (
@@ -181,7 +183,7 @@ func resolveHomeDir(home string) (string, error) {
 }
 
 func errorsNoDetectedPreset() error {
-	return fmt.Errorf("could not auto-detect a common rootless toolchain preset on this machine; run `rs toolchain detect` or choose one of: %s", strings.Join(SupportedPresets(), ", "))
+	return fmt.Errorf("could not auto-detect a common rootless toolchain preset on this machine; run `%s` or choose one of: %s", brand.Command("toolchain detect"), strings.Join(SupportedPresets(), ", "))
 }
 
 func MergeWithDetected(prefixes, pkgConfig []string, home string) ([]string, []string, *Candidate, error) {
@@ -244,9 +246,9 @@ func bootstrapCandidateWithPackages(name, home string, env, packages []string) (
 		return &candidate, nil
 	}
 	if strings.TrimSpace(strings.ToLower(name)) == "auto" {
-		return nil, fmt.Errorf("could not auto-bootstrap a rootless toolchain on this machine; no supported auto-bootstrap manager command is callable. Try `rs toolchain detect`, `rs toolchain bootstrap enva`, `rs toolchain bootstrap homebrew`, or `rs toolchain bootstrap spack`")
+		return nil, fmt.Errorf("could not auto-bootstrap a rootless toolchain on this machine; no supported auto-bootstrap manager command is callable. Try `%s`, `%s`, `%s`, or `%s`", brand.Command("toolchain detect"), brand.Command("toolchain bootstrap enva"), brand.Command("toolchain bootstrap homebrew"), brand.Command("toolchain bootstrap spack"))
 	}
-	return nil, fmt.Errorf("toolchain preset %s is not callable on this machine; install or expose the matching manager first, or try `rs toolchain detect`", name)
+	return nil, fmt.Errorf("toolchain preset %s is not callable on this machine; install or expose the matching manager first, or try `%s`", name, brand.Command("toolchain detect"))
 }
 
 func candidateWithBootstrapEnv(candidate Candidate, env []string) Candidate {
@@ -275,7 +277,7 @@ func candidateForPreset(name, home string) (Candidate, error) {
 	if err != nil {
 		return Candidate{}, err
 	}
-	suggestedInitCommand := fmt.Sprintf("rs init --toolchain-preset %s", name)
+	suggestedInitCommand := brand.Command("init", "--toolchain-preset", name)
 	originalPrefixes := append([]string(nil), prefixes...)
 	originalPkgConfig := append([]string(nil), pkgConfig...)
 	actualPrefixes, actualPkgConfig := detectedCandidatePaths(name, prefixes, pkgConfig)

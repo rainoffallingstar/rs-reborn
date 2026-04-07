@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
+RS_BIN="$TMP_DIR/rvx"
 RS_HOME_DIR="$TMP_DIR/rs-home"
 PROJECT_DIR="$TMP_DIR/project"
 SCRIPT_PATH="$PROJECT_DIR/analysis.R"
@@ -25,8 +25,8 @@ export PATH="$BIN_DIR:$PATH"
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> preparing fake managed R"
 cat >"$MANAGED_RSCRIPT" <<'EOF'
@@ -100,7 +100,7 @@ EOF
 echo "==> initialize project without explicit toolchain config"
 "$RS_BIN" init "$PROJECT_DIR" >"$TMP_DIR/init.txt"
 
-echo "==> rs run --bootstrap-toolchain should invoke enva and inject the new prefix into runtime env"
+echo "==> rvx run --bootstrap-toolchain should invoke enva and inject the new prefix into runtime env"
 "$RS_BIN" run --bootstrap-toolchain "$SCRIPT_PATH" >"$TMP_DIR/run.out" 2>"$TMP_DIR/run.err"
 grep -q 'runtime-selected=managed' "$TMP_DIR/run.out"
 grep -q "toolchain-prefixes=$HOME/.local/share/rattler/envs/rs-sysdeps" "$TMP_DIR/run.out"

@@ -48,8 +48,8 @@ EOF
   )
 }
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> building initial local package tarball"
 build_local_pkg "hello-v1"
@@ -86,14 +86,14 @@ fi
 grep -q 'source fingerprint mismatch for localpkg' "$TMP_DIR/check-after.txt"
 
 if "$RS_BIN" run --locked "$SCRIPT_PATH" >"$TMP_DIR/run-locked-after.txt" 2>&1; then
-  echo "expected rs run --locked to fail after local source drift"
+  echo "expected rvx run --locked to fail after local source drift"
   cat "$TMP_DIR/run-locked-after.txt"
   exit 1
 fi
 grep -q 'source fingerprint mismatch for localpkg' "$TMP_DIR/run-locked-after.txt"
 
 if "$RS_BIN" run --frozen "$SCRIPT_PATH" >"$TMP_DIR/run-frozen-after.txt" 2>&1; then
-  echo "expected rs run --frozen to fail after local source drift"
+  echo "expected rvx run --frozen to fail after local source drift"
   cat "$TMP_DIR/run-frozen-after.txt"
   exit 1
 fi

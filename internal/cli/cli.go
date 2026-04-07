@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 	"github.com/rainoffallingstar/rs-reborn/internal/project"
 	"github.com/rainoffallingstar/rs-reborn/internal/rdeps"
 	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
@@ -84,6 +85,14 @@ var (
 	cliBuildDate               = "unknown"
 )
 
+func cliUsage(command string) error {
+	return errors.New("usage: " + brand.Command(command))
+}
+
+func cliCommand(parts ...string) string {
+	return brand.Command(parts...)
+}
+
 func (s *stringList) String() string {
 	return strings.Join(*s, ",")
 }
@@ -145,9 +154,9 @@ func Run(args []string) error {
 
 func versionCommand(args []string) error {
 	if len(args) != 0 {
-		return errors.New("usage: rs version")
+		return cliUsage("version")
 	}
-	fmt.Fprintf(os.Stdout, "rs %s\n", cliVersion)
+	fmt.Fprintf(os.Stdout, "%s %s\n", brand.CLIName, cliVersion)
 	fmt.Fprintf(os.Stdout, "commit: %s\n", cliCommit)
 	fmt.Fprintf(os.Stdout, "build_date: %s\n", cliBuildDate)
 	return nil
@@ -181,7 +190,7 @@ func runCommand(args []string) error {
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("missing R script path\n\nusage: rs run [flags] path/to/script.R [script args...]")
+		return fmt.Errorf("missing R script path\n\nusage: %s", cliCommand("run [flags] path/to/script.R [script args...]"))
 	}
 
 	scriptPath, err := filepath.Abs(rest[0])
@@ -214,7 +223,7 @@ func runCommand(args []string) error {
 
 func toolchainCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: rs toolchain <template|detect|bootstrap|plan|init> ...")
+		return cliUsage("toolchain <template|detect|bootstrap|plan|init> ...")
 	}
 
 	switch args[0] {
@@ -243,10 +252,10 @@ func diagnoseInstallErrorCommand(args []string) error {
 		return err
 	}
 	if *filePath != "" && fs.NArg() > 0 {
-		return errors.New("usage: rs diagnose-install-error [--json] [--file path/to/error.log] [error text]")
+		return cliUsage("diagnose-install-error [--json] [--file path/to/error.log] [error text]")
 	}
 	if *filePath == "" && fs.NArg() == 0 {
-		return errors.New("usage: rs diagnose-install-error [--json] [--file path/to/error.log] [error text]")
+		return cliUsage("diagnose-install-error [--json] [--file path/to/error.log] [error text]")
 	}
 
 	var raw string
@@ -293,7 +302,7 @@ func toolchainTemplateCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs toolchain template <preset|auto> [--format toml|env] [--check]")
+		return cliUsage("toolchain template <preset|auto> [--format toml|env] [--check]")
 	}
 
 	prefixes, pkgConfig, err := resolveToolchainPreset(fs.Arg(0))
@@ -346,7 +355,7 @@ func toolchainDetectCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: rs toolchain detect [--json]")
+		return cliUsage("toolchain detect [--json]")
 	}
 
 	candidates, err := detectToolchainCandidates()
@@ -369,7 +378,13 @@ func toolchainDetectCommand(args []string) error {
 
 	if len(candidates) == 0 {
 		fmt.Fprintln(os.Stdout, "no common rootless toolchain presets detected on this machine")
-		fmt.Fprintf(os.Stdout, "next step: try `rs toolchain template %s`\n", strings.Join(toolchainenv.SupportedPresets(), "`, `rs toolchain template "))
+		fmt.Fprintf(os.Stdout, "next step: try `%s`\n", strings.Join(func() []string {
+			commands := make([]string, 0, len(toolchainenv.SupportedPresets()))
+			for _, preset := range toolchainenv.SupportedPresets() {
+				commands = append(commands, cliCommand("toolchain template", preset))
+			}
+			return commands
+		}(), "`, `"))
 		return nil
 	}
 
@@ -400,7 +415,7 @@ func toolchainDetectCommand(args []string) error {
 		if candidate.SuggestedSetupNote != "" {
 			fmt.Fprintf(os.Stdout, "[next] setup note: %s\n", candidate.SuggestedSetupNote)
 		}
-		fmt.Fprintf(os.Stdout, "[next] preview template: rs toolchain template %s --check\n", candidate.Preset)
+		fmt.Fprintf(os.Stdout, "[next] preview template: %s\n", cliCommand("toolchain template", candidate.Preset, "--check"))
 		fmt.Fprintf(os.Stdout, "[next] initialize project defaults: %s\n", candidate.SuggestedInitCommand)
 	}
 	return nil
@@ -415,7 +430,7 @@ func toolchainBootstrapCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs toolchain bootstrap <preset|auto> [--json]")
+		return cliUsage("toolchain bootstrap <preset|auto> [--json]")
 	}
 
 	home, err := cliUserHomeDir()
@@ -428,11 +443,11 @@ func toolchainBootstrapCommand(args []string) error {
 	}
 	report := toolchainBootstrapReport{
 		Candidate:            *candidate,
-		TemplateCommand:      fmt.Sprintf("rs toolchain template %s", candidate.Preset),
-		EnvTemplateCommand:   fmt.Sprintf("rs toolchain template %s --format env", candidate.Preset),
+		TemplateCommand:      cliCommand("toolchain template", candidate.Preset),
+		EnvTemplateCommand:   cliCommand("toolchain template", candidate.Preset, "--format env"),
 		InitCommand:          candidate.SuggestedInitCommand,
-		DoctorCommand:        "rs doctor --toolchain-only",
-		TemplateCheckCommand: fmt.Sprintf("rs toolchain template %s --check", candidate.Preset),
+		DoctorCommand:        cliCommand("doctor --toolchain-only"),
+		TemplateCheckCommand: cliCommand("toolchain template", candidate.Preset, "--check"),
 	}
 
 	if *jsonOutput {
@@ -480,7 +495,7 @@ func toolchainPlanCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs toolchain plan [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] [--json] path/to/script.R")
+		return cliUsage("toolchain plan [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] [--json] path/to/script.R")
 	}
 
 	report, err := buildToolchainPlanReport(fs.Arg(0), *preset, *phase)
@@ -531,7 +546,7 @@ func toolchainInitCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs toolchain init [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] path/to/script.R")
+		return cliUsage("toolchain init [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] path/to/script.R")
 	}
 
 	scriptPath, err := filepath.Abs(fs.Arg(0))
@@ -604,7 +619,7 @@ func buildToolchainPlanReport(scriptArg, preset, phase string) (toolchainPlanRep
 		PlannedPackages: plannedPackages,
 		SetupCommand:    cliToolchainSetupCommand(*candidate, plannedPackages),
 		InitCommand:     candidate.SuggestedInitCommand,
-		DoctorCommand:   fmt.Sprintf("rs doctor --toolchain-only %s", scriptPath),
+		DoctorCommand:   cliCommand("doctor --toolchain-only", scriptPath),
 	}, nil
 }
 
@@ -672,7 +687,7 @@ func initCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: rs init [flags] [dir]")
+		return cliUsage("init [flags] [dir]")
 	}
 
 	targetDir := "."
@@ -975,7 +990,7 @@ func addCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return errors.New("usage: rs add [flags] <package> [package...]")
+		return cliUsage("add [flags] <package> [package...]")
 	}
 
 	packages := fs.Args()
@@ -1016,7 +1031,7 @@ func addCommand(args []string) error {
 		return fmt.Errorf("discover project config: %w", err)
 	}
 	if !found || projectCfg.Path == "" {
-		return fmt.Errorf("no %s found from %s\nrun `rs init` first", project.ConfigFileName, discoveryDir)
+		return fmt.Errorf("no %s found from %s\nrun `%s` first", project.ConfigFileName, discoveryDir, cliCommand("init"))
 	}
 
 	cfg, err := project.LoadEditable(projectCfg.Path)
@@ -1073,7 +1088,7 @@ func removeCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() == 0 {
-		return errors.New("usage: rs remove [flags] <package> [package...]")
+		return cliUsage("remove [flags] <package> [package...]")
 	}
 
 	discoveryDir := *projectDir
@@ -1104,7 +1119,7 @@ func removeCommand(args []string) error {
 		return fmt.Errorf("discover project config: %w", err)
 	}
 	if !found || projectCfg.Path == "" {
-		return fmt.Errorf("no %s found from %s\nrun `rs init` first", project.ConfigFileName, discoveryDir)
+		return fmt.Errorf("no %s found from %s\nrun `%s` first", project.ConfigFileName, discoveryDir, cliCommand("init"))
 	}
 
 	cfg, err := project.LoadEditable(projectCfg.Path)
@@ -1158,7 +1173,7 @@ func lockCommand(args []string) error {
 	}
 
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs lock [flags] path/to/script.R")
+		return cliUsage("lock [flags] path/to/script.R")
 	}
 
 	scriptPath, err := filepath.Abs(fs.Arg(0))
@@ -1204,7 +1219,7 @@ func listCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs list [flags] path/to/script.R")
+		return cliUsage("list [flags] path/to/script.R")
 	}
 
 	scriptPath, err := filepath.Abs(fs.Arg(0))
@@ -1241,7 +1256,7 @@ func pruneCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: rs prune [flags] [path/to/script.R]")
+		return cliUsage("prune [flags] [path/to/script.R]")
 	}
 
 	scriptPath := ""
@@ -1290,7 +1305,7 @@ func shellCommand(args []string) error {
 	}
 
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs shell [flags] path/to/script.R")
+		return cliUsage("shell [flags] path/to/script.R")
 	}
 
 	scriptPath, err := filepath.Abs(fs.Arg(0))
@@ -1346,10 +1361,10 @@ func execCommand(args []string) error {
 	}
 
 	if strings.TrimSpace(*expression) == "" {
-		return errors.New("usage: rs exec [flags] -e 'expression' path/to/script.R")
+		return cliUsage("exec [flags] -e 'expression' path/to/script.R")
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs exec [flags] -e 'expression' path/to/script.R")
+		return cliUsage("exec [flags] -e 'expression' path/to/script.R")
 	}
 
 	scriptPath, err := filepath.Abs(fs.Arg(0))
@@ -1379,7 +1394,7 @@ func execCommand(args []string) error {
 
 func cacheCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: rs cache <dir|ls|rm> [args]")
+		return cliUsage("cache <dir|ls|rm> [args]")
 	}
 
 	switch args[0] {
@@ -1402,7 +1417,7 @@ func cacheDirCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: rs cache dir [path/to/script.R]")
+		return cliUsage("cache dir [path/to/script.R]")
 	}
 
 	scriptPath := ""
@@ -1431,7 +1446,7 @@ func cacheListCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: rs cache ls [flags] [path/to/script.R]")
+		return cliUsage("cache ls [flags] [path/to/script.R]")
 	}
 
 	scriptPath := ""
@@ -1465,7 +1480,7 @@ func cacheRemoveCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs cache rm [flags] <hash|path>")
+		return cliUsage("cache rm [flags] <hash|path>")
 	}
 
 	scriptPath := ""
@@ -1494,7 +1509,7 @@ func syncCommand(args []string) error {
 
 func rCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: rs r <list|install|use|which> [args]")
+		return cliUsage("r <list|install|use|which> [args]")
 	}
 
 	switch args[0] {
@@ -1518,7 +1533,7 @@ func rListCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: rs r list")
+		return cliUsage("r list")
 	}
 	return rmanager.List(os.Stdout, os.Stderr)
 }
@@ -1532,7 +1547,7 @@ func rInstallCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs r install [--method auto|binary|source] [--bootstrap-toolchain] <version>")
+		return cliUsage("r install [--method auto|binary|source] [--bootstrap-toolchain] <version>")
 	}
 	return cliInstallRWithOptions(rmanager.InstallOptions{
 		Version:            fs.Arg(0),
@@ -1551,7 +1566,7 @@ func rUseCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs r use [--project-dir <dir>] <version|Rscript-path>")
+		return cliUsage("r use [--project-dir <dir>] <version|Rscript-path>")
 	}
 
 	startDir, _, err := resolveProjectTarget(*projectDir)
@@ -1563,7 +1578,7 @@ func rUseCommand(args []string) error {
 		return fmt.Errorf("discover project config: %w", err)
 	}
 	if !found {
-		return fmt.Errorf("no %s found from %s\nrun `rs init` first", project.ConfigFileName, startDir)
+		return fmt.Errorf("no %s found from %s\nrun `%s` first", project.ConfigFileName, startDir, cliCommand("init"))
 	}
 
 	editable, err := project.LoadEditable(cfg.Path)
@@ -1610,7 +1625,7 @@ func rWhichCommand(args []string) error {
 		return err
 	}
 	if fs.NArg() > 1 {
-		return errors.New("usage: rs r which [--script <path>] [dir|script]")
+		return cliUsage("r which [--script <path>] [dir|script]")
 	}
 
 	target := "."
@@ -1694,7 +1709,7 @@ func checkCommand(args []string) error {
 	}
 
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs check [flags] path/to/script.R")
+		return cliUsage("check [flags] path/to/script.R")
 	}
 
 	scriptPath, err := filepath.Abs(fs.Arg(0))
@@ -1750,10 +1765,10 @@ func doctorCommand(args []string) error {
 	}
 
 	if !*toolchainOnly && fs.NArg() != 1 {
-		return errors.New("usage: rs doctor [flags] path/to/script.R")
+		return cliUsage("doctor [flags] path/to/script.R")
 	}
 	if *toolchainOnly && fs.NArg() > 1 {
-		return errors.New("usage: rs doctor --toolchain-only [path/to/script.R|path/to/project]")
+		return cliUsage("doctor --toolchain-only [path/to/script.R|path/to/project]")
 	}
 
 	scriptPath := ""
@@ -1810,7 +1825,7 @@ func scanCommand(args []string) error {
 	}
 
 	if fs.NArg() != 1 {
-		return errors.New("usage: rs scan [flags] path/to/script.R")
+		return cliUsage("scan [flags] path/to/script.R")
 	}
 
 	scriptPath, err := filepath.Abs(fs.Arg(0))
@@ -1892,32 +1907,32 @@ func usageError() error {
 }
 
 func usageText() string {
-	return `rs manages a lightweight per-script R library and runs R scripts with automatic dependency installation.
+	return strings.ReplaceAll(`{{cmd}} manages a lightweight per-script R library and runs R scripts with automatic dependency installation.
 
 Usage:
-  rs version
-  rs init [flags] [dir]
-  rs add [flags] <package> [package...]
-  rs remove [flags] <package> [package...]
-  rs lock [flags] path/to/script.R
-  rs r <list|install|use|which> [args]
-  rs list [flags] path/to/script.R
-  rs prune [flags] [path/to/script.R]
-  rs shell [flags] path/to/script.R
-  rs exec [flags] -e 'expression' path/to/script.R
-  rs cache <dir|ls|rm> [args]
-  rs run [flags] path/to/script.R [script args...]
-  rs scan [flags] path/to/script.R
-  rs sync [flags] path/to/script.R
-  rs check [flags] path/to/script.R
-  rs doctor [flags] path/to/script.R
-  rs diagnose-install-error [--json] [--file path/to/error.log] [error text]
-  rs toolchain template <preset|auto> [--format toml|env] [--check]
-  rs toolchain detect [--json]
-  rs toolchain bootstrap <preset|auto> [--json]
-  rs toolchain plan [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] [--json] path/to/script.R
-  rs toolchain init [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] path/to/script.R
-  rs doctor --toolchain-only [path/to/script.R|path/to/project]
+  {{cmd}} version
+  {{cmd}} init [flags] [dir]
+  {{cmd}} add [flags] <package> [package...]
+  {{cmd}} remove [flags] <package> [package...]
+  {{cmd}} lock [flags] path/to/script.R
+  {{cmd}} r <list|install|use|which> [args]
+  {{cmd}} list [flags] path/to/script.R
+  {{cmd}} prune [flags] [path/to/script.R]
+  {{cmd}} shell [flags] path/to/script.R
+  {{cmd}} exec [flags] -e 'expression' path/to/script.R
+  {{cmd}} cache <dir|ls|rm> [args]
+  {{cmd}} run [flags] path/to/script.R [script args...]
+  {{cmd}} scan [flags] path/to/script.R
+  {{cmd}} sync [flags] path/to/script.R
+  {{cmd}} check [flags] path/to/script.R
+  {{cmd}} doctor [flags] path/to/script.R
+  {{cmd}} diagnose-install-error [--json] [--file path/to/error.log] [error text]
+  {{cmd}} toolchain template <preset|auto> [--format toml|env] [--check]
+  {{cmd}} toolchain detect [--json]
+  {{cmd}} toolchain bootstrap <preset|auto> [--json]
+  {{cmd}} toolchain plan [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] [--json] path/to/script.R
+  {{cmd}} toolchain init [--preset auto|enva|micromamba|mamba|conda|homebrew|spack] [--phase base|full] path/to/script.R
+  {{cmd}} doctor --toolchain-only [path/to/script.R|path/to/project]
 
 Commands:
   version print version, commit, and build metadata
@@ -1931,7 +1946,7 @@ Commands:
   shell  open an interactive R shell in the script's managed environment
   exec   execute an inline R expression in the script's managed environment
   cache  inspect cache locations and managed library directories
-  run    scan dependencies, install missing packages into rs cache, then execute the script
+  run    scan dependencies, install missing packages into {{cmd}} cache, then execute the script
   scan   print detected package dependencies for a script
   sync   alias for lock
   check  validate the current environment against the lock file
@@ -2118,5 +2133,5 @@ Flags for "doctor":
   --json                    print the diagnostic report as JSON
   --bootstrap-toolchain     if no rootless toolchain is configured, try to create one automatically with a detected external manager before diagnosing
   --verbose                 print additional environment details
-`
+`, "{{cmd}}", brand.CLIName)
 }

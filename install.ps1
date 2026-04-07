@@ -8,7 +8,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 $RepoOwner = "rainoffallingstar"
 $RepoName = "rs-reborn"
 $BinDir = if ($env:RS_INSTALL_DIR) { $env:RS_INSTALL_DIR } else { Join-Path $HOME ".cargo\bin" }
-$BinName = "rs.exe"
+$BinName = "rvx.exe"
 $BaseUrl = $env:RS_INSTALL_BASE_URL
 
 function Get-GitHubHeaders {
@@ -83,14 +83,14 @@ if ([string]::IsNullOrWhiteSpace($Tag)) {
 }
 
 $Arch = Get-Arch
-$Asset = "rs_${Tag}_windows_${Arch}.zip"
+$Asset = "rvx_${Tag}_windows_${Arch}.zip"
 if (-not [string]::IsNullOrWhiteSpace($BaseUrl)) {
     $Url = ($BaseUrl.TrimEnd('/')) + "/" + $Asset
 } else {
     $Url = "https://github.com/$RepoOwner/$RepoName/releases/download/$Tag/$Asset"
 }
 
-$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-install-" + [System.Guid]::NewGuid().ToString("N"))
+$TempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rvx-install-" + [System.Guid]::NewGuid().ToString("N"))
 $ArchivePath = Join-Path $TempDir $Asset
 $ChecksumPath = Join-Path $TempDir "SHA256SUMS"
 $ExtractDir = Join-Path $TempDir "extract"
@@ -126,7 +126,7 @@ try {
     New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
     Copy-Item -LiteralPath $BinaryPath -Destination (Join-Path $BinDir $BinName) -Force
 
-    Write-Host "installed rs $Tag to $(Join-Path $BinDir $BinName)"
+    Write-Host "installed rvx $Tag to $(Join-Path $BinDir $BinName)"
     $pathEntries = ($env:PATH -split ';') | Where-Object { $_ -ne "" }
     if ($pathEntries -notcontains $BinDir) {
         Write-Warning "$BinDir is not currently on PATH"

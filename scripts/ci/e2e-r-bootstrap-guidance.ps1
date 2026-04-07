@@ -3,7 +3,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-e2e-bootstrap-" + [System.Guid]::NewGuid().ToString("N"))
-$RSBin = Join-Path $TmpDir "rs.exe"
+$RSBin = Join-Path $TmpDir "rvx.exe"
 $ProjectDir = Join-Path $TmpDir "project"
 $ScriptPath = Join-Path $ProjectDir "analysis.R"
 $SanitizedPath = $env:SystemRoot + "\System32"
@@ -16,8 +16,8 @@ try {
 
     Set-Location $RootDir
 
-    Write-Host "==> building rs"
-    go build -o $RSBin ./cmd/rs
+    Write-Host "==> building rvx"
+    go build -o $RSBin ./cmd/rvx
 
 @'
 cat("native-r-guidance\n")
@@ -39,13 +39,13 @@ cat("native-r-guidance\n")
         $env:RS_HOME = $oldRSHome
     }
     if ($runSucceeded) {
-        throw "expected rs run to fail without a managed or external Rscript"
+        throw "expected rvx run to fail without a managed or external Rscript"
     }
     $runText = Get-Content -LiteralPath $runOutput -Raw
     if ($runText -notmatch "next step:" -or $runText -notmatch "RS_AUTO_INSTALL_R=1") {
         throw "missing bootstrap guidance in run output:`n$runText"
     }
-    if ($runText -notmatch "rs r install 4.4") {
+    if ($runText -notmatch "rvx r install 4.4") {
         throw "missing Windows native manager next step in run output:`n$runText"
     }
 
@@ -63,10 +63,10 @@ cat("native-r-guidance\n")
         $env:RS_HOME = $oldRSHome
     }
     if ($doctorSucceeded) {
-        throw "expected rs doctor to report blocking setup issues"
+        throw "expected rvx doctor to report blocking setup issues"
     }
     $doctorText = Get-Content -LiteralPath $doctorOutput -Raw
-    if ($doctorText -notmatch "RS_AUTO_INSTALL_R=1 rs run" -or $doctorText -notmatch "rs r install 4.4") {
+    if ($doctorText -notmatch "RS_AUTO_INSTALL_R=1 rvx run" -or $doctorText -notmatch "rvx r install 4.4") {
         throw "missing doctor bootstrap guidance:`n$doctorText"
     }
 

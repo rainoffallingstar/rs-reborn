@@ -3,7 +3,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-e2e-native-backend-" + [System.Guid]::NewGuid().ToString("N"))
-$RSBin = Join-Path $TmpDir "rs.exe"
+$RSBin = Join-Path $TmpDir "rvx.exe"
 $ProjectDir = Join-Path $TmpDir "project"
 $ScriptPath = Join-Path $ProjectDir "analysis.R"
 $RscriptPath = (Get-Command Rscript.exe).Source
@@ -17,8 +17,8 @@ try {
 
     Set-Location $RootDir
 
-    Write-Host "==> building rs"
-    go build -o $RSBin ./cmd/rs
+    Write-Host "==> building rvx"
+    go build -o $RSBin ./cmd/rvx
 
 @'
 cat(jsonlite::toJSON(list(value = "native-backend", bioc = as.character(packageVersion("BiocGenerics"))), auto_unbox = TRUE), "\n")
@@ -43,7 +43,7 @@ cat(jsonlite::toJSON(list(value = "native-backend", bioc = as.character(packageV
         }
     }
     if (-not $lockSucceeded) {
-        throw "rs lock failed:`n$lockText"
+        throw "rvx lock failed:`n$lockText"
     }
     if ($lockText -notmatch "native package install completed") {
         throw "expected native backend install output:`n$lockText"

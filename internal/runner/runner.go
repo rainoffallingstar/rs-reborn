@@ -21,6 +21,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
+	"github.com/rainoffallingstar/rs-reborn/internal/eventstream"
 	"github.com/rainoffallingstar/rs-reborn/internal/installer"
 	"github.com/rainoffallingstar/rs-reborn/internal/lockfile"
 	"github.com/rainoffallingstar/rs-reborn/internal/progresscmd"
@@ -29,6 +31,9 @@ import (
 	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
 	"github.com/rainoffallingstar/rs-reborn/internal/toolchainenv"
 )
+
+type Event = eventstream.Event
+type EventHandler = eventstream.Handler
 
 type RunOptions struct {
 	ScriptPath         string
@@ -47,6 +52,7 @@ type RunOptions struct {
 	Stdout             io.Writer
 	Stderr             io.Writer
 	AutoInstallR       bool
+	Events             EventHandler
 }
 
 type ShellOptions struct {
@@ -64,6 +70,7 @@ type ShellOptions struct {
 	BootstrapToolchain bool
 	Stdout             io.Writer
 	Stderr             io.Writer
+	Events             EventHandler
 }
 
 type ExecOptions struct {
@@ -82,6 +89,7 @@ type ExecOptions struct {
 	BootstrapToolchain bool
 	Stdout             io.Writer
 	Stderr             io.Writer
+	Events             EventHandler
 }
 
 type SyncOptions struct {
@@ -96,6 +104,7 @@ type SyncOptions struct {
 	BootstrapToolchain bool
 	Stdout             io.Writer
 	Stderr             io.Writer
+	Events             EventHandler
 }
 
 type LockOptions = SyncOptions
@@ -115,6 +124,7 @@ type CheckOptions struct {
 	BootstrapToolchain bool
 	Stdout             io.Writer
 	Stderr             io.Writer
+	Events             EventHandler
 }
 
 type DoctorOptions struct {
@@ -137,6 +147,7 @@ type DoctorOptions struct {
 	BootstrapToolchain bool
 	Stdout             io.Writer
 	Stderr             io.Writer
+	Events             EventHandler
 }
 
 type ListOptions struct {
@@ -235,6 +246,7 @@ type ResolvedEnvironment struct {
 	Verbose                         bool
 	Stdout                          io.Writer
 	Stderr                          io.Writer
+	Events                          EventHandler
 }
 
 type RuntimeMetadata struct {
@@ -610,12 +622,12 @@ func (e ValidationError) hintLine() string {
 
 	switch e.Kind {
 	case ValidationKindMissing, ValidationKindInputs:
-		return fmt.Sprintf("hint: run `rs lock %s` to refresh the lockfile, or run without --locked/--frozen if you intend to change dependencies", e.ScriptPath)
+		return fmt.Sprintf("hint: run `%s` to refresh the lockfile, or run without --locked/--frozen if you intend to change dependencies", brand.Command("lock", e.ScriptPath))
 	case ValidationKindInstalled:
 		if e.LibraryPath != "" {
-			return fmt.Sprintf("hint: run `rs cache rm %s` to drop the stale managed library, then rerun the command or run `rs lock %s` if the dependency state intentionally changed", e.LibraryPath, e.ScriptPath)
+			return fmt.Sprintf("hint: run `%s` to drop the stale managed library, then rerun the command or run `%s` if the dependency state intentionally changed", brand.Command("cache", "rm", e.LibraryPath), brand.Command("lock", e.ScriptPath))
 		}
-		return fmt.Sprintf("hint: remove the stale managed library, then rerun the command or run `rs lock %s` if the dependency state intentionally changed", e.ScriptPath)
+		return fmt.Sprintf("hint: remove the stale managed library, then rerun the command or run `%s` if the dependency state intentionally changed", brand.Command("lock", e.ScriptPath))
 	}
 	return ""
 }
@@ -1055,6 +1067,7 @@ type ToolchainPlanOptions struct {
 	CacheDir      string
 	RscriptPath   string
 	Progress      io.Writer
+	Events        EventHandler
 }
 
 type ToolchainPlanReport struct {
@@ -1125,6 +1138,7 @@ func Run(opts RunOptions) (runErr error) {
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
 		AutoInstallR:  true,
+		Events:        opts.Events,
 	})
 	if err != nil {
 		return err
@@ -1176,6 +1190,7 @@ func Run(opts RunOptions) (runErr error) {
 		}
 		postInstallWait = wait
 		progresscmd.Stage(env.Stderr, "recording lockfile")
+		emitRunnerEvent(env.Events, "lockfile_recording", "recording lockfile", env.ScriptPath)
 		if err := WriteLockfile(env); err != nil {
 			return err
 		}
@@ -1190,6 +1205,7 @@ func Run(opts RunOptions) (runErr error) {
 	cmd.Env = runtimeEnv(env, false)
 
 	progresscmd.Stage(env.Stderr, "launching script")
+	emitRunnerEvent(env.Events, "script_launch", "launching script", env.ScriptPath)
 	if err := cmd.Run(); err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -1215,6 +1231,7 @@ func PlanToolchain(opts ToolchainPlanOptions) (ToolchainPlanReport, error) {
 		opts.CacheDir,
 		opts.RscriptPath,
 		progress,
+		opts.Events,
 	)
 	if err != nil {
 		return ToolchainPlanReport{}, err
@@ -1256,6 +1273,7 @@ func Shell(opts ShellOptions) error {
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
 		AutoInstallR:  true,
+		Events:        opts.Events,
 	})
 	if err != nil {
 		return err
@@ -1287,6 +1305,7 @@ func Shell(opts ShellOptions) error {
 		if err := EnsureInstalled(env); err != nil {
 			return err
 		}
+		emitRunnerEvent(env.Events, "lockfile_recording", "recording lockfile", env.ScriptPath)
 		if err := WriteLockfile(env); err != nil {
 			return err
 		}
@@ -1333,6 +1352,7 @@ func Exec(opts ExecOptions) error {
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
 		AutoInstallR:  true,
+		Events:        opts.Events,
 	})
 	if err != nil {
 		return err
@@ -1364,6 +1384,7 @@ func Exec(opts ExecOptions) error {
 		if err := EnsureInstalled(env); err != nil {
 			return err
 		}
+		emitRunnerEvent(env.Events, "lockfile_recording", "recording lockfile", env.ScriptPath)
 		if err := WriteLockfile(env); err != nil {
 			return err
 		}
@@ -1399,6 +1420,7 @@ func Sync(opts SyncOptions) error {
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
 		AutoInstallR:  true,
+		Events:        opts.Events,
 	})
 	if err != nil {
 		return err
@@ -1412,6 +1434,7 @@ func Sync(opts SyncOptions) error {
 	if err := EnsureInstalled(env); err != nil {
 		return err
 	}
+	emitRunnerEvent(env.Events, "lockfile_recording", "recording lockfile", env.ScriptPath)
 	if err := WriteLockfile(env); err != nil {
 		return err
 	}
@@ -1430,7 +1453,7 @@ func List(opts ListOptions) error {
 		opts.Stderr = os.Stderr
 	}
 
-	plan, err := resolveDependencyPlanWithProgress(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath, opts.Stderr)
+	plan, err := resolveDependencyPlanWithProgress(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath, opts.Stderr, nil)
 	if err != nil {
 		return err
 	}
@@ -1816,6 +1839,7 @@ func Check(opts CheckOptions) error {
 		Verbose:       opts.Verbose,
 		Stdout:        opts.Stdout,
 		Stderr:        opts.Stderr,
+		Events:        opts.Events,
 	})
 	if err != nil {
 		return err
@@ -1875,13 +1899,13 @@ func Doctor(opts DoctorOptions) error {
 			return fmt.Errorf("%s is a directory, expected an R script", opts.ScriptPath)
 		}
 
-		plan, err = resolveDependencyPlanWithProgress(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath, opts.Stderr)
+		plan, err = resolveDependencyPlanWithProgress(opts.ScriptPath, opts.ExtraDeps, opts.ExtraBiocDeps, opts.ExcludeDeps, opts.Repo, opts.CacheDir, opts.RscriptPath, opts.Stderr, opts.Events)
 		if err != nil {
 			return err
 		}
 	}
 	if opts.BootstrapToolchain {
-		if err := maybeBootstrapPlanToolchain(&plan, opts.Stdout, opts.Stderr); err != nil {
+		if err := maybeBootstrapPlanToolchain(&plan, opts.Stdout, opts.Stderr, opts.Events); err != nil {
 			return err
 		}
 	}
@@ -1961,7 +1985,7 @@ func Doctor(opts DoctorOptions) error {
 		}
 	}
 	if !opts.ToolchainOnly && plan.Runtime.InterpreterKind == "external-conda" {
-		warnings = append(warnings, fmt.Sprintf("selected interpreter %s is an external Conda-style R installation; source package compilation may be less reliable than a managed rs R", plan.RscriptPath))
+		warnings = append(warnings, fmt.Sprintf("selected interpreter %s is an external Conda-style R installation; source package compilation may be less reliable than a managed %s R", plan.RscriptPath, brand.CLIName))
 	}
 
 	nextSteps := buildDoctorNextSteps(plan, rscriptErr, needsGit, warnings, errorsList, installFailureDiagnostics, systemHintDetails)
@@ -2133,7 +2157,7 @@ func Doctor(opts DoctorOptions) error {
 }
 
 func resolveDependencyPlan(scriptPath string, extraDeps, extraBiocDeps, excludeDeps []string, repoOverride, cacheDirOverride, rscriptOverride string) (dependencyPlan, error) {
-	return resolveDependencyPlanWithProgress(scriptPath, extraDeps, extraBiocDeps, excludeDeps, repoOverride, cacheDirOverride, rscriptOverride, io.Discard)
+	return resolveDependencyPlanWithProgress(scriptPath, extraDeps, extraBiocDeps, excludeDeps, repoOverride, cacheDirOverride, rscriptOverride, io.Discard, nil)
 }
 
 func resolveToolchainOnlyPlan(opts DoctorOptions) (dependencyPlan, error) {
@@ -2199,7 +2223,7 @@ func resolveToolchainOnlyPlan(opts DoctorOptions) (dependencyPlan, error) {
 	return plan, nil
 }
 
-func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDeps, excludeDeps []string, repoOverride, cacheDirOverride, rscriptOverride string, progress io.Writer) (dependencyPlan, error) {
+func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDeps, excludeDeps []string, repoOverride, cacheDirOverride, rscriptOverride string, progress io.Writer, events EventHandler) (dependencyPlan, error) {
 	info, err := os.Stat(scriptPath)
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("stat script: %w", err)
@@ -2208,7 +2232,7 @@ func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDe
 		return dependencyPlan{}, fmt.Errorf("%s is a directory, expected an R script", scriptPath)
 	}
 
-	stageRunnerPreparation(progress)
+	stageRunnerPreparation(progress, events, scriptPath)
 	projectCfg, _, err := project.Discover(filepath.Dir(scriptPath))
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("discover project config: %w", err)
@@ -2224,7 +2248,7 @@ func resolveDependencyPlanWithProgress(scriptPath string, extraDeps, extraBiocDe
 	if err != nil {
 		return dependencyPlan{}, fmt.Errorf("scan script: %w", err)
 	}
-	stageRunnerInterpreterResolution(progress, true)
+	stageRunnerInterpreterResolution(progress, true, events, scriptPath)
 	cranDeps, biocDeps := resolveManagedPackageSets(detectedDeps, scriptCfg.Packages, scriptCfg.BiocPackages, extraDeps, extraBiocDeps, excludeDeps)
 	sourceDeps := selectSourceDeps(scriptCfg.Sources, cranDeps, biocDeps)
 	cranDeps = filterManagedDeps(cranDeps, sourceDeps, biocDeps)
@@ -3407,8 +3431,8 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 		add(NextStepDetail{
 			Category: "setup",
 			Kind:     "detect_toolchain",
-			Message:  "detect common rootless toolchain layouts on this machine before choosing prefixes to wire into rs",
-			Command:  "rs toolchain detect",
+			Message:  fmt.Sprintf("detect common rootless toolchain layouts on this machine before choosing prefixes to wire into %s", brand.CLIName),
+			Command:  brand.Command("toolchain detect"),
 			Blocking: false,
 		})
 		add(NextStepDetail{
@@ -3433,15 +3457,15 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 			add(NextStepDetail{
 				Category: "setup",
 				Kind:     "auto_install_r",
-				Message:  "explicitly allow rs to install R automatically and rerun",
-				Command:  fmt.Sprintf("%s=1 rs run %s", advice.AutoEnableEnv, plan.ScriptPath),
+				Message:  fmt.Sprintf("explicitly allow %s to install R automatically and rerun", brand.CLIName),
+				Command:  fmt.Sprintf("%s=1 %s", advice.AutoEnableEnv, brand.Command("run", plan.ScriptPath)),
 				Blocking: true,
 			})
 		}
 		add(NextStepDetail{
 			Category: "setup",
 			Kind:     "configure_r",
-			Message:  "install R and make sure Rscript is available on PATH, or set rs.toml rscript manually before rerunning rs doctor or rs run",
+			Message:  fmt.Sprintf("install R and make sure Rscript is available on PATH, or set rs.toml rscript manually before rerunning %s or %s", brand.Command("doctor"), brand.Command("run")),
 			Blocking: true,
 		})
 	}
@@ -3477,7 +3501,7 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 			add(NextStepDetail{
 				Category: "network",
 				Kind:     "set_env_var",
-				Message:  "set the required source authentication environment variable and rerun rs doctor",
+				Message:  fmt.Sprintf("set the required source authentication environment variable and rerun %s", brand.Command("doctor")),
 				Blocking: true,
 			})
 		case strings.Contains(issue, "missing repo"),
@@ -3509,7 +3533,7 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 				Category: "lock",
 				Kind:     "create_lockfile",
 				Message:  "create a lockfile and install the resolved dependencies",
-				Command:  fmt.Sprintf("rs lock %s", plan.ScriptPath),
+				Command:  brand.Command("lock", plan.ScriptPath),
 				Blocking: false,
 			})
 		case strings.HasPrefix(warning, "managed library directory does not exist yet: "):
@@ -3517,7 +3541,7 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 				Category: "cache",
 				Kind:     "materialize_library",
 				Message:  "materialize the managed library for this script",
-				Command:  fmt.Sprintf("rs run %s", plan.ScriptPath),
+				Command:  brand.Command("run", plan.ScriptPath),
 				Blocking: false,
 			})
 		case strings.HasPrefix(warning, "pkg-config is not available on PATH; "):
@@ -3571,8 +3595,8 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 		add(NextStepDetail{
 			Category: "setup",
 			Kind:     "switch_to_managed_r",
-			Message:  "switch to a managed rs R if source package installs fail under the current external Conda-style interpreter",
-			Command:  fmt.Sprintf("rs r install %s && rs r use %s", target, target),
+			Message:  fmt.Sprintf("switch to a managed %s R if source package installs fail under the current external Conda-style interpreter", brand.CLIName),
+			Command:  fmt.Sprintf("%s && %s", brand.Command("r install", target), brand.Command("r use", target)),
 			Blocking: false,
 		})
 	}
@@ -3582,7 +3606,7 @@ func buildDoctorNextSteps(plan dependencyPlan, rscriptErr error, needsGit bool, 
 			Category: "run",
 			Kind:     "run_script",
 			Message:  "the environment looks healthy; run the script in its managed library",
-			Command:  fmt.Sprintf("rs run %s", plan.ScriptPath),
+			Command:  brand.Command("run", plan.ScriptPath),
 			Blocking: false,
 		})
 	}
@@ -3647,11 +3671,11 @@ func addInstallFailureNextSteps(plan dependencyPlan, diag InstallFailureDiagnost
 func doctorToolchainOnlyCommand(plan dependencyPlan) string {
 	switch {
 	case strings.TrimSpace(plan.ScriptPath) != "":
-		return fmt.Sprintf("rs doctor --toolchain-only %s", plan.ScriptPath)
+		return brand.Command("doctor --toolchain-only", plan.ScriptPath)
 	case strings.TrimSpace(plan.ProjectPath) != "":
-		return fmt.Sprintf("rs doctor --toolchain-only %s", filepath.Dir(plan.ProjectPath))
+		return brand.Command("doctor --toolchain-only", filepath.Dir(plan.ProjectPath))
 	default:
-		return "rs doctor --toolchain-only"
+		return brand.Command("doctor --toolchain-only")
 	}
 }
 
@@ -4418,6 +4442,19 @@ func ScanScript(path string) ([]string, error) {
 	return rdeps.FromFile(path)
 }
 
+func ResolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
+	env, err := resolveEnvironment(opts)
+	if err != nil {
+		return ResolvedEnvironment{}, err
+	}
+	if opts.BootstrapToolchain {
+		if err := maybeResolveDetectedToolchainForEnvironment(&env); err != nil {
+			return ResolvedEnvironment{}, err
+		}
+	}
+	return env, nil
+}
+
 func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 	info, err := os.Stat(opts.ScriptPath)
 	if err != nil {
@@ -4434,7 +4471,7 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		opts.Stderr = os.Stderr
 	}
 
-	stageRunnerPreparation(opts.Stderr)
+	stageRunnerPreparation(opts.Stderr, opts.Events, opts.ScriptPath)
 	projectCfg, _, err := project.Discover(filepath.Dir(opts.ScriptPath))
 	if err != nil {
 		return ResolvedEnvironment{}, fmt.Errorf("discover project config: %w", err)
@@ -4472,7 +4509,7 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		lockfilePath = defaultLockfilePath(projectCfg.RootDir, opts.ScriptPath)
 	}
 
-	stageRunnerInterpreterResolution(opts.Stderr, false)
+	stageRunnerInterpreterResolution(opts.Stderr, false, opts.Events, opts.ScriptPath)
 	selection := resolveInterpreterSelection(opts.RscriptPath, scriptCfg.Rscript, scriptCfg.RVersion, filepath.Dir(opts.ScriptPath), opts.Stderr, opts.AutoInstallR)
 	if selection.Issue != nil {
 		return ResolvedEnvironment{}, selection.Issue
@@ -4512,6 +4549,7 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 		Verbose:              opts.Verbose,
 		Stdout:               opts.Stdout,
 		Stderr:               opts.Stderr,
+		Events:               opts.Events,
 	}
 
 	if opts.Verbose {
@@ -4521,16 +4559,41 @@ func resolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
 	return env, nil
 }
 
-func stageRunnerPreparation(progress io.Writer) {
-	progresscmd.Stage(progress, "preparing project and dependencies")
+func emitStructuredEvent(handler EventHandler, source, kind, message, scriptPath, pkg string, current, total int, d time.Duration, fields map[string]string) {
+	eventstream.Emit(handler, Event{
+		Source:     source,
+		Kind:       kind,
+		Message:    message,
+		ScriptPath: scriptPath,
+		Package:    pkg,
+		Current:    current,
+		Total:      total,
+		Duration:   eventstream.FormatDuration(d),
+		Fields:     fields,
+	})
 }
 
-func stageRunnerInterpreterResolution(progress io.Writer, planning bool) {
+func emitRunnerEvent(handler EventHandler, kind, message, scriptPath string) {
+	emitStructuredEvent(handler, "runner", kind, message, scriptPath, "", 0, 0, 0, nil)
+}
+
+func emitToolchainEvent(handler EventHandler, kind, message, scriptPath string, fields map[string]string) {
+	emitStructuredEvent(handler, "toolchain", kind, message, scriptPath, "", 0, 0, 0, fields)
+}
+
+func stageRunnerPreparation(progress io.Writer, events EventHandler, scriptPath string) {
+	progresscmd.Stage(progress, "preparing project and dependencies")
+	emitRunnerEvent(events, "preparing_project", "preparing project and dependencies", scriptPath)
+}
+
+func stageRunnerInterpreterResolution(progress io.Writer, planning bool, events EventHandler, scriptPath string) {
 	if planning {
 		progresscmd.Stage(progress, "planning interpreter and managed library")
+		emitRunnerEvent(events, "resolving_runtime", "planning interpreter and managed library", scriptPath)
 		return
 	}
 	progresscmd.Stage(progress, "resolving interpreter and managed library")
+	emitRunnerEvent(events, "resolving_runtime", "resolving interpreter and managed library", scriptPath)
 }
 
 func resolveCacheRoot(override string) (string, error) {
@@ -4841,12 +4904,16 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 	if detectedToolchain != nil && stderr != nil {
 		fmt.Fprintf(stderr, "[rs] auto-detected rootless toolchain preset: %s\n", detectedToolchain.Preset)
 	}
+	if detectedToolchain != nil {
+		emitToolchainEvent(env.Events, "auto_detected_toolchain", fmt.Sprintf("auto-detected rootless toolchain preset: %s", detectedToolchain.Preset), env.ScriptPath, map[string]string{"preset": detectedToolchain.Preset})
+	}
 	sourceDeps := make(map[string]project.SourceSpec, len(env.SourceDeps))
 	for name, spec := range env.SourceDeps {
 		sourceDeps[name] = spec
 	}
 	return installer.Request{
 		Interpreter: env.Interpreter,
+		ScriptPath:  env.ScriptPath,
 		WorkDir:     filepath.Dir(env.ScriptPath),
 		CacheRoot:   env.CacheRoot,
 		LibraryPath: env.LibraryPath,
@@ -4873,6 +4940,7 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 		SourceDeps: sourceDeps,
 		Stdout:     stdout,
 		Stderr:     stderr,
+		Events:     env.Events,
 	}, nil
 }
 
@@ -5579,6 +5647,37 @@ func nativeFixupPlanForDependencies(prefixes, pkgConfig, cranDeps, biocDeps []st
 	return toolchainenv.BuildNativeFixupPlanWithEnv(os.Environ(), prefixes, pkgConfig, categories)
 }
 
+func maybeResolveDetectedToolchain(prefixes, pkgConfig []string, events EventHandler, scriptPath string) (*toolchainenv.Candidate, error) {
+	if len(toolchainenv.PrefixesFromEnv(os.Environ())) > 0 || len(toolchainenv.PkgConfigPathsFromEnv(os.Environ())) > 0 || len(prefixes) > 0 || len(pkgConfig) > 0 {
+		return nil, nil
+	}
+	recommended, err := toolchainenv.RecommendedCandidate("")
+	if err != nil {
+		return nil, err
+	}
+	if recommended == nil || !recommended.Complete {
+		return nil, nil
+	}
+	emitToolchainEvent(events, "auto_detected_toolchain", fmt.Sprintf("auto-detected rootless toolchain preset: %s", recommended.Preset), scriptPath, map[string]string{"preset": recommended.Preset})
+	return recommended, nil
+}
+
+func maybeResolveDetectedToolchainForEnvironment(env *ResolvedEnvironment) error {
+	if env == nil {
+		return nil
+	}
+	candidate, err := maybeResolveDetectedToolchain(env.ToolchainPrefixes, env.PkgConfigPath, env.Events, env.ScriptPath)
+	if err != nil {
+		return err
+	}
+	if candidate == nil {
+		return nil
+	}
+	env.ToolchainPrefixes = append([]string(nil), candidate.ToolchainPrefixes...)
+	env.PkgConfigPath = append([]string(nil), candidate.PkgConfigPath...)
+	return nil
+}
+
 func maybeBootstrapResolvedEnvironment(env *ResolvedEnvironment) error {
 	if env == nil {
 		return nil
@@ -5587,7 +5686,7 @@ func maybeBootstrapResolvedEnvironment(env *ResolvedEnvironment) error {
 	if len(categories) == 0 {
 		categories = systemHintCategories(collectSystemDependencyHintDetails(env.CRANDeps, env.BiocDeps, env.SourceDeps))
 	}
-	candidate, bootstrapped, err := maybeBootstrapToolchain(env.ToolchainPrefixes, env.PkgConfigPath, categories, "base", env.Stdout, env.Stderr)
+	candidate, bootstrapped, err := maybeBootstrapToolchain(env.ToolchainPrefixes, env.PkgConfigPath, categories, "base", env.Stdout, env.Stderr, env.Events, env.ScriptPath)
 	if err != nil {
 		return err
 	}
@@ -5604,7 +5703,7 @@ func maybeBootstrapResolvedEnvironment(env *ResolvedEnvironment) error {
 	return nil
 }
 
-func maybeBootstrapPlanToolchain(plan *dependencyPlan, stdout, stderr io.Writer) error {
+func maybeBootstrapPlanToolchain(plan *dependencyPlan, stdout, stderr io.Writer, events EventHandler) error {
 	if plan == nil {
 		return nil
 	}
@@ -5612,7 +5711,7 @@ func maybeBootstrapPlanToolchain(plan *dependencyPlan, stdout, stderr io.Writer)
 	if len(categories) == 0 {
 		categories = systemHintCategories(collectSystemDependencyHintDetails(plan.CRANDeps, plan.BiocDeps, plan.SourceDeps))
 	}
-	candidate, _, err := maybeBootstrapToolchain(plan.ToolchainPrefixes, plan.PkgConfigPath, categories, "base", stdout, stderr)
+	candidate, _, err := maybeBootstrapToolchain(plan.ToolchainPrefixes, plan.PkgConfigPath, categories, "base", stdout, stderr, events, plan.ScriptPath)
 	if err != nil {
 		return err
 	}
@@ -5623,17 +5722,18 @@ func maybeBootstrapPlanToolchain(plan *dependencyPlan, stdout, stderr io.Writer)
 	return nil
 }
 
-func maybeBootstrapToolchain(prefixes, pkgConfig, categories []string, phase string, stdout, stderr io.Writer) (*toolchainenv.Candidate, bool, error) {
+func maybeBootstrapToolchain(prefixes, pkgConfig, categories []string, phase string, stdout, stderr io.Writer, events EventHandler, scriptPath string) (*toolchainenv.Candidate, bool, error) {
 	if len(toolchainenv.PrefixesFromEnv(os.Environ())) > 0 || len(toolchainenv.PkgConfigPathsFromEnv(os.Environ())) > 0 || len(prefixes) > 0 || len(pkgConfig) > 0 {
 		return nil, false, nil
 	}
-	recommended, err := toolchainenv.RecommendedCandidate("")
+	recommended, err := maybeResolveDetectedToolchain(prefixes, pkgConfig, events, scriptPath)
 	if err != nil {
 		return nil, false, err
 	}
-	if recommended != nil && recommended.Complete {
+	if recommended != nil {
 		return recommended, false, nil
 	}
+	emitToolchainEvent(events, "bootstrapping_toolchain", "bootstrapping rootless toolchain preset", scriptPath, map[string]string{"phase": phase})
 	candidate, err := bootstrapToolchainPresetForPhase(categories, phase, stdout, stderr)
 	return candidate, true, err
 }
@@ -6339,11 +6439,11 @@ func wrapExternalInterpreterInstallError(err error, runtime RuntimeMetadata) err
 	hints := []string{}
 	if runtime.InterpreterKind == "external-conda" {
 		target := firstNonEmpty(runtime.RVersion, "4.4")
-		hints = append(hints, fmt.Sprintf("hint: the selected interpreter %s looks like an external Conda-style R; source package installs can be less reliable there. Consider switching to a managed rs R with `rs r install %s && rs r use %s`", runtime.Interpreter, target, target))
+		hints = append(hints, fmt.Sprintf("hint: the selected interpreter %s looks like an external Conda-style R; source package installs can be less reliable there. Consider switching to a managed %s R with `%s && %s`", runtime.Interpreter, brand.CLIName, brand.Command("r install", target), brand.Command("r use", target)))
 	}
 	hints = append(hints, diagnoseNativeLibraryInstallHints(err)...)
 	if looksLikeToolchainFailure(err) {
-		toolchainHint := "hint: if you must stay on the current interpreter, provide a user-local toolchain prefix and validate it with `rs toolchain detect`, `rs toolchain template auto`, and `rs doctor --toolchain-only`"
+		toolchainHint := fmt.Sprintf("hint: if you must stay on the current interpreter, provide a user-local toolchain prefix and validate it with `%s`, `%s`, and `%s`", brand.Command("toolchain detect"), brand.Command("toolchain template auto"), brand.Command("doctor --toolchain-only"))
 		if candidate, detectErr := toolchainenv.RecommendedCandidate(""); detectErr == nil && candidate != nil {
 			toolchainHint = fmt.Sprintf("%s. Detected recommended preset on this machine: %s. Setup follow-up: `%s`. Project follow-up: `%s`", toolchainHint, candidate.Preset, candidate.SuggestedSetupCommand, candidate.SuggestedInitCommand)
 		}

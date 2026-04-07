@@ -15,10 +15,10 @@ export GOMODCACHE="$TMP_DIR/gomodcache"
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
-echo "==> installing R from source via the native rs manager"
+echo "==> installing R from source via the native rvx manager"
 "$RS_BIN" r install --method source 4.4
 "$RS_BIN" r list | tee "$TMP_DIR/r-list.txt"
 grep -q 'managed' "$TMP_DIR/r-list.txt"

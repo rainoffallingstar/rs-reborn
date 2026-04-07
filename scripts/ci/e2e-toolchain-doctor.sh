@@ -15,8 +15,8 @@ export RS_HOME="$TMP_DIR/rs-home"
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> project-config toolchain-only doctor should pass"
 mkdir -p "$PROJECT_DIR/.toolchain/bin" "$PROJECT_DIR/pkgconfig"

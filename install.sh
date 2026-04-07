@@ -4,7 +4,7 @@ set -euo pipefail
 REPO_OWNER="rainoffallingstar"
 REPO_NAME="rs-reborn"
 BIN_DIR="${RS_INSTALL_DIR:-$HOME/.cargo/bin}"
-BIN_NAME="rs"
+BIN_NAME="rvx"
 BASE_URL="${RS_INSTALL_BASE_URL:-}"
 
 checksum_cmd() {
@@ -138,7 +138,7 @@ if [ -z "$TAG" ]; then
   exit 1
 fi
 
-ASSET="rs_${TAG}_${OS}_${ARCH}.tar.gz"
+ASSET="rvx_${TAG}_${OS}_${ARCH}.tar.gz"
 if [ -n "$BASE_URL" ]; then
   URL="${BASE_URL%/}/${ASSET}"
 else

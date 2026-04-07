@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 	"github.com/rainoffallingstar/rs-reborn/internal/project"
 	"github.com/rainoffallingstar/rs-reborn/internal/rmanager"
 	"github.com/rainoffallingstar/rs-reborn/internal/runner"
@@ -38,7 +39,7 @@ func TestRunVersionCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run(version) error = %v", err)
 	}
-	if !strings.Contains(output, "rs 2026-04-01") {
+	if !strings.Contains(output, brand.CLIName+" 2026-04-01") {
 		t.Fatalf("Run(version) output = %q, want version line", output)
 	}
 	if !strings.Contains(output, "commit: abc123def456") {
@@ -68,21 +69,21 @@ func TestRunVersionFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run(--version) error = %v", err)
 	}
-	if !strings.Contains(output, "rs 2026-04-01") {
+	if !strings.Contains(output, brand.CLIName+" 2026-04-01") {
 		t.Fatalf("Run(--version) output = %q, want version line", output)
 	}
 }
 
 func TestRunVersionCommandRejectsArgs(t *testing.T) {
 	err := Run([]string{"version", "extra"})
-	if err == nil || !strings.Contains(err.Error(), "usage: rs version") {
+	if err == nil || !strings.Contains(err.Error(), "usage: "+brand.Command("version")) {
 		t.Fatalf("Run(version extra) error = %v, want usage error", err)
 	}
 }
 
 func TestUsageTextIncludesVersionCommand(t *testing.T) {
 	usage := usageText()
-	if !strings.Contains(usage, "rs version") {
+	if !strings.Contains(usage, brand.Command("version")) {
 		t.Fatalf("usageText() missing version usage: %q", usage)
 	}
 	if !strings.Contains(usage, "version print version, commit, and build metadata") {
@@ -352,7 +353,7 @@ func TestDoctorCommandRejectsMissingScriptWithoutToolchainOnly(t *testing.T) {
 	if err == nil {
 		t.Fatal("doctorCommand() error = nil, want usage error")
 	}
-	if !strings.Contains(err.Error(), "usage: rs doctor [flags] path/to/script.R") {
+	if !strings.Contains(err.Error(), "usage: "+brand.Command("doctor [flags] path/to/script.R")) {
 		t.Fatalf("doctorCommand() error = %v", err)
 	}
 }
@@ -535,7 +536,7 @@ func TestInitCommandRejectsAutoToolchainPresetWhenNothingDetected(t *testing.T) 
 	if !strings.Contains(err.Error(), "could not auto-detect a common rootless toolchain preset on this machine") {
 		t.Fatalf("initCommand() error = %v", err)
 	}
-	if !strings.Contains(err.Error(), "rs toolchain detect") {
+	if !strings.Contains(err.Error(), brand.Command("toolchain detect")) {
 		t.Fatalf("initCommand() error = %v", err)
 	}
 }
@@ -731,13 +732,13 @@ func TestToolchainDetectCommandPrintsDetectedCandidates(t *testing.T) {
 	if !strings.Contains(output, "[detect] homebrew (complete, recommended)") {
 		t.Fatalf("toolchainDetectCommand() output = %q", output)
 	}
-	if !strings.Contains(output, "[next] preview template: rs toolchain template homebrew --check") {
+	if !strings.Contains(output, "[next] preview template: "+brand.Command("toolchain template homebrew --check")) {
 		t.Fatalf("toolchainDetectCommand() output = %q", output)
 	}
 	if !strings.Contains(output, `[next] prepare user-local prefix: "`+filepath.Join(prefix, "bin", "brew")+`" install pkg-config gcc`) {
 		t.Fatalf("toolchainDetectCommand() output = %q", output)
 	}
-	if !strings.Contains(output, "[next] initialize project defaults: rs init --toolchain-preset homebrew") {
+	if !strings.Contains(output, "[next] initialize project defaults: "+brand.Command("init --toolchain-preset homebrew")) {
 		t.Fatalf("toolchainDetectCommand() output = %q", output)
 	}
 }
@@ -776,7 +777,7 @@ func TestToolchainDetectCommandJSONOutput(t *testing.T) {
 	if !report.Candidates[0].Recommended {
 		t.Fatalf("report.Candidates[0].Recommended = false, want true")
 	}
-	if report.Candidates[0].SuggestedInitCommand != "rs init --toolchain-preset micromamba" {
+	if report.Candidates[0].SuggestedInitCommand != brand.Command("init --toolchain-preset micromamba") {
 		t.Fatalf("report.Candidates[0].SuggestedInitCommand = %q", report.Candidates[0].SuggestedInitCommand)
 	}
 	if !strings.Contains(report.Candidates[0].SuggestedSetupCommand, `"micromamba" create -y -p "`) {
@@ -862,7 +863,7 @@ func TestToolchainDetectCommandReportsNoCandidates(t *testing.T) {
 	if !strings.Contains(output, "no common rootless toolchain presets detected on this machine") {
 		t.Fatalf("toolchainDetectCommand() output = %q", output)
 	}
-	if !strings.Contains(output, "rs toolchain template micromamba") {
+	if !strings.Contains(output, brand.Command("toolchain template micromamba")) {
 		t.Fatalf("toolchainDetectCommand() output = %q", output)
 	}
 }
@@ -935,10 +936,10 @@ func TestToolchainBootstrapCommandPrintsBootstrapPlan(t *testing.T) {
 	if !strings.Contains(output, `[bootstrap] setup command: "`+filepath.Join(homebrewPrefix, "bin", "brew")+`" install pkg-config gcc`) {
 		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
 	}
-	if !strings.Contains(output, "[next] initialize project defaults: rs init --toolchain-preset homebrew") {
+	if !strings.Contains(output, "[next] initialize project defaults: "+brand.Command("init --toolchain-preset homebrew")) {
 		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
 	}
-	if !strings.Contains(output, "[next] validate toolchain configuration: rs doctor --toolchain-only") {
+	if !strings.Contains(output, "[next] validate toolchain configuration: "+brand.Command("doctor --toolchain-only")) {
 		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
 	}
 }
@@ -971,10 +972,10 @@ func TestToolchainBootstrapCommandJSONOutput(t *testing.T) {
 	if report.Candidate.Preset != "micromamba" {
 		t.Fatalf("report.Candidate.Preset = %q", report.Candidate.Preset)
 	}
-	if report.InitCommand != "rs init --toolchain-preset micromamba" {
+	if report.InitCommand != brand.Command("init --toolchain-preset micromamba") {
 		t.Fatalf("report.InitCommand = %q", report.InitCommand)
 	}
-	if report.TemplateCheckCommand != "rs toolchain template micromamba --check" {
+	if report.TemplateCheckCommand != brand.Command("toolchain template micromamba --check") {
 		t.Fatalf("report.TemplateCheckCommand = %q", report.TemplateCheckCommand)
 	}
 	if !strings.Contains(report.Candidate.SuggestedSetupCommand, `"micromamba" create -y -p "`) {
@@ -1005,7 +1006,7 @@ func TestToolchainBootstrapCommandPrintsEnvaPlan(t *testing.T) {
 	if !strings.Contains(output, "enva") || !strings.Contains(output, "create --yaml") {
 		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
 	}
-	if !strings.Contains(output, "[next] initialize project defaults: rs init --toolchain-preset enva") {
+	if !strings.Contains(output, "[next] initialize project defaults: "+brand.Command("init --toolchain-preset enva")) {
 		t.Fatalf("toolchainBootstrapCommand() output = %q", output)
 	}
 }
@@ -1027,7 +1028,7 @@ func TestToolchainPlanCommandJSONOutputIncludesResolvedSystemPackages(t *testing
 			Preset:               "enva",
 			ToolchainPrefixes:    []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps")},
 			PkgConfigPath:        []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps", "lib", "pkgconfig")},
-			SuggestedInitCommand: "rs init --toolchain-preset enva",
+			SuggestedInitCommand: brand.Command("init --toolchain-preset enva"),
 		}, nil
 	}
 	cliPlanToolchain = func(opts runner.ToolchainPlanOptions) (runner.ToolchainPlanReport, error) {
@@ -1089,7 +1090,7 @@ func TestToolchainInitCommandBasePhaseBootstrapsOnlyBasePackages(t *testing.T) {
 			Preset:               "enva",
 			ToolchainPrefixes:    []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps")},
 			PkgConfigPath:        []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps", "lib", "pkgconfig")},
-			SuggestedInitCommand: "rs init --toolchain-preset enva",
+			SuggestedInitCommand: brand.Command("init --toolchain-preset enva"),
 		}, nil
 	}
 	cliPlanToolchain = func(opts runner.ToolchainPlanOptions) (runner.ToolchainPlanReport, error) {
@@ -1121,7 +1122,7 @@ func TestToolchainInitCommandBasePhaseBootstrapsOnlyBasePackages(t *testing.T) {
 			Preset:               "enva",
 			ToolchainPrefixes:    []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps")},
 			PkgConfigPath:        []string{filepath.Join(home, ".local", "share", "rattler", "envs", "rs-sysdeps", "lib", "pkgconfig")},
-			SuggestedInitCommand: "rs init --toolchain-preset enva",
+			SuggestedInitCommand: brand.Command("init --toolchain-preset enva"),
 		}, nil
 	}
 

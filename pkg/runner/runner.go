@@ -12,6 +12,7 @@ type SyncOptions = internalrunner.SyncOptions
 type LockOptions = internalrunner.LockOptions
 type CheckOptions = internalrunner.CheckOptions
 type DoctorOptions = internalrunner.DoctorOptions
+type ToolchainPlanOptions = internalrunner.ToolchainPlanOptions
 type ListOptions = internalrunner.ListOptions
 type PruneOptions = internalrunner.PruneOptions
 type CacheDirOptions = internalrunner.CacheDirOptions
@@ -19,6 +20,8 @@ type CacheListOptions = internalrunner.CacheListOptions
 type CacheRemoveOptions = internalrunner.CacheRemoveOptions
 type ExitError = internalrunner.ExitError
 type ReportedError = internalrunner.ReportedError
+type Event = internalrunner.Event
+type EventHandler = internalrunner.EventHandler
 type ResolvedEnvironment = internalrunner.ResolvedEnvironment
 type RuntimeMetadata = internalrunner.RuntimeMetadata
 type ValidationError = internalrunner.ValidationError
@@ -34,6 +37,7 @@ type InstalledIssueDetail = internalrunner.InstalledIssueDetail
 type DoctorReport = internalrunner.DoctorReport
 type DoctorSummary = internalrunner.DoctorSummary
 type DoctorIssueDetail = internalrunner.DoctorIssueDetail
+type ToolchainPlanReport = internalrunner.ToolchainPlanReport
 type SystemHintDetail = internalrunner.SystemHintDetail
 type NextStepDetail = internalrunner.NextStepDetail
 
@@ -99,12 +103,20 @@ func Doctor(opts DoctorOptions) error {
 	return internalrunner.Doctor(opts)
 }
 
+func PlanToolchain(opts ToolchainPlanOptions) (ToolchainPlanReport, error) {
+	return internalrunner.PlanToolchain(opts)
+}
+
 func ResolveRscriptPath(override, configValue string) (string, error) {
 	return internalrunner.ResolveRscriptPath(override, configValue)
 }
 
 func ScanScript(path string) ([]string, error) {
 	return internalrunner.ScanScript(path)
+}
+
+func ResolveEnvironment(opts RunOptions) (ResolvedEnvironment, error) {
+	return internalrunner.ResolveEnvironment(opts)
 }
 
 func EnsureInstalled(env ResolvedEnvironment) error {

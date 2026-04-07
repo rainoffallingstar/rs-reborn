@@ -19,8 +19,8 @@ export GOMODCACHE="$TMP_DIR/gomodcache"
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 mkdir -p "$PROJECT_DIR" "$(dirname "$MANAGED_RSCRIPT")" "$EXTERNAL_ROOT" "$RS_HOME_DIR/r"
 
@@ -108,7 +108,7 @@ grep -q "$MANAGED_RSCRIPT" "$TMP_DIR/r-which.txt"
 PATH="$EXTERNAL_ROOT:$PATH" "$RS_BIN" run "$SCRIPT_PATH" | tee "$TMP_DIR/run.txt"
 grep -q 'managed-current-selected' "$TMP_DIR/run.txt"
 if grep -q 'external-conda-selected' "$TMP_DIR/run.txt"; then
-  echo "expected rs run to prefer current managed R over external conda R"
+  echo "expected rvx run to prefer current managed R over external conda R"
   cat "$TMP_DIR/run.txt"
   exit 1
 fi

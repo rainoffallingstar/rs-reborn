@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
+RS_BIN="$TMP_DIR/rvx"
 PROJECT_DIR="$TMP_DIR/project"
 SCRIPT_PATH="$PROJECT_DIR/analysis.R"
 MISMATCH_PROJECT_DIR="$TMP_DIR/mismatch-project"
@@ -15,10 +15,10 @@ export GOMODCACHE="$TMP_DIR/gomodcache"
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
-echo "==> installing R via the native rs manager"
+echo "==> installing R via the native rvx manager"
 "$RS_BIN" r install 4.4
 "$RS_BIN" r list | tee "$TMP_DIR/r-list.txt"
 grep -q '4\.4' "$TMP_DIR/r-list.txt"
@@ -34,7 +34,7 @@ EOF
 grep -q '4\.4' "$TMP_DIR/r-which.txt"
 grep -q 'r_version = "4.4"' "$PROJECT_DIR/rs.toml"
 if grep -q '^rscript = ' "$PROJECT_DIR/rs.toml"; then
-  echo "expected rs r use 4.4 to write r_version instead of rscript"
+  echo "expected rvx r use 4.4 to write r_version instead of rscript"
   cat "$PROJECT_DIR/rs.toml"
   exit 1
 fi

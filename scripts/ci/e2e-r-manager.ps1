@@ -3,7 +3,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $TmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rs-e2e-r-manager-" + [System.Guid]::NewGuid().ToString("N"))
-$RSBin = Join-Path $TmpDir "rs.exe"
+$RSBin = Join-Path $TmpDir "rvx.exe"
 $ProjectDir = Join-Path $TmpDir "project"
 $ScriptPath = Join-Path $ProjectDir "analysis.R"
 $MismatchProjectDir = Join-Path $TmpDir "mismatch-project"
@@ -17,10 +17,10 @@ try {
 
     Set-Location $RootDir
 
-    Write-Host "==> building rs"
-    go build -o $RSBin ./cmd/rs
+    Write-Host "==> building rvx"
+    go build -o $RSBin ./cmd/rvx
 
-    Write-Host "==> installing R via the native rs manager"
+    Write-Host "==> installing R via the native rvx manager"
     & $RSBin r install 4.4
     $rList = (& $RSBin r list) | Out-String
     $rList | Tee-Object -FilePath (Join-Path $TmpDir "r-list.txt") | Out-Null
@@ -37,14 +37,14 @@ cat("native-r-e2e\n")
     $rWhich = ((& $RSBin r which $ProjectDir) | Out-String).Trim()
     $rWhich | Tee-Object -FilePath (Join-Path $TmpDir "r-which.txt") | Out-Null
     if ($rWhich -notmatch "Rscript") {
-        throw "expected rs r which to resolve a managed Rscript"
+        throw "expected rvx r which to resolve a managed Rscript"
     }
     $projectConfig = Get-Content -LiteralPath (Join-Path $ProjectDir "rs.toml") -Raw
     if ($projectConfig -notmatch 'r_version = "4.4"') {
-        throw "expected rs r use 4.4 to write r_version"
+        throw "expected rvx r use 4.4 to write r_version"
     }
     if ($projectConfig -match '(?m)^rscript = ') {
-        throw "expected rs r use 4.4 to write r_version instead of rscript"
+        throw "expected rvx r use 4.4 to write r_version instead of rscript"
     }
 
     $runOutput = (& $RSBin run $ScriptPath) | Out-String

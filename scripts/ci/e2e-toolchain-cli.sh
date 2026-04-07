@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-RS_BIN="$TMP_DIR/rs"
+RS_BIN="$TMP_DIR/rvx"
 HOME_DIR="$TMP_DIR/home"
 HOMEBREW_PREFIX="$HOME_DIR/homebrew"
 ENVA_PREFIX="$HOME_DIR/.local/share/rattler/envs/rs-sysdeps"
@@ -17,8 +17,8 @@ export GOMODCACHE="$TMP_DIR/gomodcache"
 
 cd "$ROOT_DIR"
 
-echo "==> building rs"
-go build -o "$RS_BIN" ./cmd/rs
+echo "==> building rvx"
+go build -o "$RS_BIN" ./cmd/rvx
 
 echo "==> preparing a detected homebrew-style toolchain layout"
 mkdir -p \
@@ -30,15 +30,15 @@ echo "==> toolchain detect should report a complete homebrew candidate"
 "$RS_BIN" toolchain detect >"$TMP_DIR/detect.txt"
 grep -q '\[detect\] homebrew (complete, recommended)' "$TMP_DIR/detect.txt"
 grep -q '\[next\] prepare user-local prefix: "'"$HOMEBREW_PREFIX"'/bin/brew" install pkg-config gcc' "$TMP_DIR/detect.txt"
-grep -q '\[next\] preview template: rs toolchain template homebrew --check' "$TMP_DIR/detect.txt"
-grep -q '\[next\] initialize project defaults: rs init --toolchain-preset homebrew' "$TMP_DIR/detect.txt"
+grep -q '\[next\] preview template: rvx toolchain template homebrew --check' "$TMP_DIR/detect.txt"
+grep -q '\[next\] initialize project defaults: rvx init --toolchain-preset homebrew' "$TMP_DIR/detect.txt"
 
 echo "==> toolchain detect --json should expose structured candidates"
 "$RS_BIN" toolchain detect --json >"$TMP_DIR/detect.json"
 grep -q '"preset": "homebrew"' "$TMP_DIR/detect.json"
 grep -q '"complete": true' "$TMP_DIR/detect.json"
 grep -q '"recommended": true' "$TMP_DIR/detect.json"
-grep -q '"suggested_init_command": "rs init --toolchain-preset homebrew"' "$TMP_DIR/detect.json"
+grep -q '"suggested_init_command": "rvx init --toolchain-preset homebrew"' "$TMP_DIR/detect.json"
 grep -q '"suggested_setup_command": ' "$TMP_DIR/detect.json"
 grep -q 'install pkg-config gcc' "$TMP_DIR/detect.json"
 grep -q "$HOMEBREW_PREFIX" "$TMP_DIR/detect.json"
@@ -46,14 +46,14 @@ grep -q "$HOMEBREW_PREFIX" "$TMP_DIR/detect.json"
 echo "==> toolchain bootstrap should print a one-shot setup plan"
 "$RS_BIN" toolchain bootstrap auto >"$TMP_DIR/bootstrap.txt"
 grep -q '\[bootstrap\] preset: homebrew (detected complete layout, recommended)' "$TMP_DIR/bootstrap.txt"
-grep -q '\[next\] initialize project defaults: rs init --toolchain-preset homebrew' "$TMP_DIR/bootstrap.txt"
-grep -q '\[next\] validate toolchain configuration: rs doctor --toolchain-only' "$TMP_DIR/bootstrap.txt"
+grep -q '\[next\] initialize project defaults: rvx init --toolchain-preset homebrew' "$TMP_DIR/bootstrap.txt"
+grep -q '\[next\] validate toolchain configuration: rvx doctor --toolchain-only' "$TMP_DIR/bootstrap.txt"
 
 echo "==> toolchain bootstrap --json should expose the same plan structurally"
 "$RS_BIN" toolchain bootstrap auto --json >"$TMP_DIR/bootstrap.json"
 grep -q '"preset": "homebrew"' "$TMP_DIR/bootstrap.json"
-grep -q '"init_command": "rs init --toolchain-preset homebrew"' "$TMP_DIR/bootstrap.json"
-grep -q '"doctor_command": "rs doctor --toolchain-only"' "$TMP_DIR/bootstrap.json"
+grep -q '"init_command": "rvx init --toolchain-preset homebrew"' "$TMP_DIR/bootstrap.json"
+grep -q '"doctor_command": "rvx doctor --toolchain-only"' "$TMP_DIR/bootstrap.json"
 
 echo "==> toolchain template should print toml and env variants"
 "$RS_BIN" toolchain template homebrew >"$TMP_DIR/template.toml"
@@ -79,7 +79,7 @@ grep -q 'pkg_config_path = \["'"$MAMBA_PREFIX"'/lib/pkgconfig", "'"$MAMBA_PREFIX
 grep -q 'toolchain_prefixes = \["'"$CONDA_PREFIX"'"\]' "$TMP_DIR/template-conda.toml"
 grep -q 'pkg_config_path = \["'"$CONDA_PREFIX"'/lib/pkgconfig", "'"$CONDA_PREFIX"'/share/pkgconfig"\]' "$TMP_DIR/template-conda.toml"
 
-echo "==> rs init should be able to use the auto-detected preset directly"
+echo "==> rvx init should be able to use the auto-detected preset directly"
 PROJECT_DIR="$TMP_DIR/project"
 "$RS_BIN" init --toolchain-preset auto "$PROJECT_DIR" >"$TMP_DIR/init-auto.txt"
 grep -q "^wrote " "$TMP_DIR/init-auto.txt"
