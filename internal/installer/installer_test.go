@@ -131,6 +131,19 @@ func TestInstallerFormatElapsed(t *testing.T) {
 	}
 }
 
+func TestPlanRootsSkipsBundledBasePackages(t *testing.T) {
+	installer := &nativeInstaller{
+		req:       Request{},
+		planned:   map[string]plannedPackage{},
+		resolving: map[string]bool{},
+		resolved:  map[string]bool{},
+	}
+
+	if err := installer.planRoots([]string{"stats"}, 0); err != nil {
+		t.Fatalf("planRoots() error = %v, want bundled base package to be skipped", err)
+	}
+}
+
 func TestFetchRepoIndexParsesPackagesGz(t *testing.T) {
 	oldGOOS := installerGOOS
 	t.Cleanup(func() {
@@ -2604,7 +2617,7 @@ func TestInstallerNotefPrefixesMessage(t *testing.T) {
 	var buf bytes.Buffer
 	inst := nativeInstaller{stderr: &buf}
 	inst.notef("native package install completed in %s", "12s")
-	if got := buf.String(); got != "[rs] native package install completed in 12s\n" {
+	if got := buf.String(); got != "["+brand.CLIName+"] native package install completed in 12s\n" {
 		t.Fatalf("notef() = %q", got)
 	}
 }
@@ -2625,10 +2638,10 @@ func TestLogInstallCompletionIncludesSlowInstallSummary(t *testing.T) {
 	})
 
 	got := buf.String()
-	if !strings.Contains(got, "[rs] slow installs: sass 3m30s, ragg 1m34s\n") {
+	if !strings.Contains(got, "["+brand.CLIName+"] slow installs: sass 3m30s, ragg 1m34s\n") {
 		t.Fatalf("logInstallCompletion() missing slow install summary:\n%s", got)
 	}
-	if !strings.Contains(got, "[rs] native package install completed in 10m00s (12 installed, 4 compiled, 3 reused)\n") {
+	if !strings.Contains(got, "["+brand.CLIName+"] native package install completed in 10m00s (12 installed, 4 compiled, 3 reused)\n") {
 		t.Fatalf("logInstallCompletion() missing final summary:\n%s", got)
 	}
 }
@@ -2684,12 +2697,12 @@ func TestDefaultInstallerLogStoryStaysCompact(t *testing.T) {
 
 	got := log.String()
 	for _, want := range []string{
-		"[rs] prefetching 99 package artifact(s)",
-		"[rs] prefetched 99 package artifact(s), downloaded 99",
-		"[rs] validating source build toolchain for stringi",
-		"[rs] dependency layer 2/5: 3 compiled package(s)",
-		"[rs] slow installs: sass 3m30s, ragg 1m34s, stringi 53s",
-		"[rs] native package install completed in 34m28s (99 installed, 28 compiled)",
+		"[" + brand.CLIName + "] prefetching 99 package artifact(s)",
+		"[" + brand.CLIName + "] prefetched 99 package artifact(s), downloaded 99",
+		"[" + brand.CLIName + "] validating source build toolchain for stringi",
+		"[" + brand.CLIName + "] dependency layer 2/5: 3 compiled package(s)",
+		"[" + brand.CLIName + "] slow installs: sass 3m30s, ragg 1m34s, stringi 53s",
+		"[" + brand.CLIName + "] native package install completed in 34m28s (99 installed, 28 compiled)",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("compact log story missing %q:\n%s", want, got)

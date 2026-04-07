@@ -137,9 +137,9 @@ func nativeInstallWithOptions(opts InstallOptions) error {
 			if method == InstallMethodAuto {
 				if opts.Stderr != nil {
 					if nativeGOOS == "darwin" {
-						fmt.Fprintf(opts.Stderr, "[rs] existing managed macOS R %s is not runnable after repair; rebuilding from source\n", concrete)
+						fmt.Fprintf(opts.Stderr, "["+brand.CLIName+"] existing managed macOS R %s is not runnable after repair; rebuilding from source\n", concrete)
 					} else {
-						fmt.Fprintf(opts.Stderr, "[rs] existing managed R %s is not runnable after repair; rebuilding from source\n", concrete)
+						fmt.Fprintf(opts.Stderr, "["+brand.CLIName+"] existing managed R %s is not runnable after repair; rebuilding from source\n", concrete)
 					}
 				}
 				if err := nativeRemoveAll(targetDir); err != nil {
@@ -249,7 +249,7 @@ func nativeEnsureInstalledRscript(spec string, stdout, stderr io.Writer) (string
 		return resolved, nil
 	}
 	if stderr != nil {
-		fmt.Fprintf(stderr, "[rs] Rscript is not available; installing R %s with the native manager\n", target)
+		fmt.Fprintf(stderr, "["+brand.CLIName+"] Rscript is not available; installing R %s with the native manager\n", target)
 	}
 	if err := nativeInstallWithOptions(InstallOptions{
 		Version: target,
@@ -372,7 +372,7 @@ func installBinaryWithFallback(version string, method InstallMethod, targetDir s
 	if err := install(); err != nil {
 		if method == InstallMethodAuto {
 			if stderr != nil {
-				fmt.Fprintf(stderr, "[rs] %s binary install for R %s failed; falling back to source build\n", platform, version)
+				fmt.Fprintf(stderr, "["+brand.CLIName+"] %s binary install for R %s failed; falling back to source build\n", platform, version)
 			}
 			_ = nativeRemoveAll(targetDir)
 			return nativeInstallSrc(version, targetDir, stdout, stderr)
@@ -382,7 +382,7 @@ func installBinaryWithFallback(version string, method InstallMethod, targetDir s
 	if err := sanityCheckManagedR(targetDir); err != nil {
 		if method == InstallMethodAuto {
 			if stderr != nil {
-				fmt.Fprintf(stderr, "[rs] %s binary install for R %s was not runnable; falling back to source build\n", platform, version)
+				fmt.Fprintf(stderr, "["+brand.CLIName+"] %s binary install for R %s was not runnable; falling back to source build\n", platform, version)
 			}
 			_ = nativeRemoveAll(targetDir)
 			return nativeInstallSrc(version, targetDir, stdout, stderr)

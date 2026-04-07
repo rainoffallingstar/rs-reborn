@@ -9,7 +9,7 @@ This repository keeps a small set of focused Go microbenchmarks for the hot path
 - cache/store reuse discovery
 - cached prefetch behavior
 
-The goal is not to perfectly model end-to-end wall time. The goal is to catch accidental regressions in the pure Go logic that sits on the critical path of `rs run`, `rs list`, `rs doctor`, and the native installer.
+The goal is not to perfectly model end-to-end wall time. The goal is to catch accidental regressions in the pure Go logic that sits on the critical path of `rvx run`, `rvx list`, `rvx doctor`, and the native installer.
 
 ## Commands
 

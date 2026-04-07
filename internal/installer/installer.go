@@ -197,7 +197,7 @@ func (i *nativeInstaller) notef(format string, args ...any) {
 	if i.stderr == nil || i.stderr == io.Discard || strings.TrimSpace(format) == "" {
 		return
 	}
-	fmt.Fprintf(i.stderr, "[rs] "+format+"\n", args...)
+	fmt.Fprintf(i.stderr, "["+brand.CLIName+"] "+format+"\n", args...)
 }
 
 func (i *nativeInstaller) verbosef(format string, args ...any) {
@@ -1786,6 +1786,9 @@ func (i *nativeInstaller) planRoots(roots []string, idx int) error {
 		return nil
 	}
 	name := roots[idx]
+	if rdeps.IsBundledPackage(name) {
+		return i.planRoots(roots, idx+1)
+	}
 	hint := i.hintForRoot(name)
 	if _, ok := i.req.SourceDeps[name]; ok {
 		state := i.snapshotPlanningState()

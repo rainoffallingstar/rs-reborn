@@ -52,7 +52,7 @@ Status:
 - completed: runtime metadata and custom source identity now influence managed library selection
 - completed: lock validation now checks `arch` and `os` in addition to existing runtime metadata
 - completed: human-readable validation failures now distinguish missing lockfile, input drift, and installed-library drift
-- completed: installed-library failures now point users toward `rs cache rm <managed-library>` and `rs lock`
+- completed: installed-library failures now point users toward `rvx cache rm <managed-library>` and `rvx lock`
 - completed: local source files and source directories now contribute stable content fingerprints to both the managed-library cache key and lockfile validation
 - remaining: broaden real-world drift coverage, especially around more mixed custom-source combinations and older-library metadata edge cases
 

@@ -215,7 +215,7 @@ func BootstrapWithPackages(name, home string, env, packages []string, stdout, st
 		candidate.SuggestedSetupCommand = SetupCommandForCandidate(*candidate, packages)
 	}
 	if stderr != nil {
-		fmt.Fprintf(stderr, "[rs] bootstrapping rootless toolchain preset: %s\n", candidate.Preset)
+		fmt.Fprintf(stderr, "["+brand.CLIName+"] bootstrapping rootless toolchain preset: %s\n", candidate.Preset)
 	}
 	if err := detectRunCommand(candidate.SuggestedSetupCommand, env, stdout, stderr); err != nil {
 		return nil, fmt.Errorf("bootstrap rootless toolchain preset %s: %w", candidate.Preset, err)
@@ -430,7 +430,7 @@ func pkgConfigPathsForPrefixes(prefixes []string) []string {
 }
 
 func explicitInitCommand(prefixes, pkgConfig []string) string {
-	parts := []string{"rs", "init"}
+	parts := []string{brand.CLIName, "init"}
 	for _, prefix := range prefixes {
 		parts = append(parts, "--toolchain-prefix", prefix)
 	}
@@ -691,24 +691,24 @@ func suggestedSetupNote(preset string, prefixes []string) string {
 	switch preset {
 	case "enva":
 		if prefix == "" {
-			return "create a dedicated rattler-managed rs-sysdeps environment with enva, then let rs wire its bin/include/lib/pkgconfig paths automatically"
+			return fmt.Sprintf("create a dedicated rattler-managed rs-sysdeps environment with enva, then let %s wire its bin/include/lib/pkgconfig paths automatically", brand.CLIName)
 		}
-		return fmt.Sprintf("this creates a dedicated enva-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix)
+		return fmt.Sprintf("this creates a dedicated enva-managed build-tools environment at %s that %s can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix, brand.CLIName)
 	case "micromamba":
 		if prefix == "" {
 			return "create a dedicated micromamba or Conda environment for build tools instead of reusing a large runtime R environment"
 		}
-		return fmt.Sprintf("this creates a dedicated build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix)
+		return fmt.Sprintf("this creates a dedicated build-tools environment at %s that %s can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix, brand.CLIName)
 	case "mamba":
 		if prefix == "" {
 			return "create a dedicated mamba environment for build tools instead of reusing a large runtime R environment"
 		}
-		return fmt.Sprintf("this creates a dedicated mamba-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix)
+		return fmt.Sprintf("this creates a dedicated mamba-managed build-tools environment at %s that %s can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix, brand.CLIName)
 	case "conda":
 		if prefix == "" {
 			return "create a dedicated conda environment for build tools instead of reusing a large runtime R environment"
 		}
-		return fmt.Sprintf("this creates a dedicated conda-managed build-tools environment at %s that rs can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix)
+		return fmt.Sprintf("this creates a dedicated conda-managed build-tools environment at %s that %s can wire into PATH, CPPFLAGS, LDFLAGS, LIBRARY_PATH, runtime library paths, and PKG_CONFIG_PATH", prefix, brand.CLIName)
 	case "homebrew":
 		if prefix == "" {
 			return "install or reuse a Homebrew prefix in your home directory first, then use brew to add pkg-config, gcc, and any headers or libraries your R packages need"

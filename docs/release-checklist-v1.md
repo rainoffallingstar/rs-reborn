@@ -1,6 +1,6 @@
-# `rs` v1 Release Checklist
+# `rvx` v1 Release Checklist
 
-This checklist is for the first public release of `rs` as an R-only dependency bootstrap CLI.
+This checklist is for the first public release of `rvx` as an R-only dependency bootstrap CLI.
 
 ## Release Goal
 
@@ -41,13 +41,13 @@ GOCACHE=/tmp/go-build GOMODCACHE=/tmp/gomodcache go test ./...
 
 Verify at least one end-to-end project fixture for each of these:
 
-- [ ] `rs init`
-- [ ] `rs run`
-- [ ] `rs lock`
-- [ ] `rs check`
-- [ ] `rs doctor`
-- [ ] `rs shell`
-- [ ] `rs exec`
+- [ ] `rvx init`
+- [ ] `rvx run`
+- [ ] `rvx lock`
+- [ ] `rvx check`
+- [ ] `rvx doctor`
+- [ ] `rvx shell`
+- [ ] `rvx exec`
 
 ### 3. Lock lifecycle
 
@@ -73,17 +73,17 @@ At least one machine with multiple R installations should verify:
 
 - [ ] `rscript = "..."` in `rs.toml` is respected
 - [ ] `--rscript` overrides config
-- [ ] `rs shell` chooses matching `R` when possible
-- [ ] `rs check` and `rs doctor` report the selected interpreter path
+- [ ] `rvx shell` chooses matching `R` when possible
+- [ ] `rvx check` and `rvx doctor` report the selected interpreter path
 
 ### 6. Native R manager smoke test
 
 Run on a machine where the native manager can install or discover multiple R versions:
 
-- [ ] `rs r list`
-- [ ] `rs r install <version>`
-- [ ] `rs r use <version>`
-- [ ] `rs r which`
+- [ ] `rvx r list`
+- [ ] `rvx r install <version>`
+- [ ] `rvx r use <version>`
+- [ ] `rvx r which`
 
 Notes:
 
@@ -113,11 +113,11 @@ Unless additional validation changes this, the safest public statement is:
 
 - runtime commands are supported on macOS, Linux, and Windows x64
 - explicit interpreter selection via `rscript` and `--rscript` is supported
-- `rs r ...` is a first-party native R manager on macOS, Linux, and Windows x64
+- `rvx r ...` is a first-party native R manager on macOS, Linux, and Windows x64
 - rootless source-build flows support detected user-local prefixes by default, plus explicit `--bootstrap-toolchain` opt-in for manager-driven prefix creation
 - conda-style `auto` bootstrap stays on `enva`; micromamba/mamba/conda remain explicit compatibility presets only
 - Windows ARM64 remains a shipped secondary artifact with lighter validation depth
-- stable automation-oriented commands today are `scan`, `list`, `doctor`, `check`, `lock`, `sync`, `run`, `exec`, `shell`, and `rs r list|install|use|which` on macOS, Linux, and Windows x64
+- stable automation-oriented commands today are `scan`, `list`, `doctor`, `check`, `lock`, `sync`, `run`, `exec`, `shell`, and `rvx r list|install|use|which` on macOS, Linux, and Windows x64
 
 ## Release Artifacts
 
@@ -135,7 +135,7 @@ The current GitHub Actions workflow is split into these release-facing jobs:
 - `toolchain-doctor`: end-to-end verification of rootless toolchain-only validation and diagnostics on Linux and macOS
 - `toolchain-cli`: end-to-end verification of toolchain detect/template/bootstrap CLI behavior on Linux and macOS
 - `toolchain-enva`: end-to-end verification that `enva` is preferred over micromamba when actively bootstrapping a new rootless toolchain prefix
-- `toolchain-enva-runtime`: end-to-end verification that `rs run --bootstrap-toolchain` injects the bootstrapped `enva` prefix into the real runtime environment
+- `toolchain-enva-runtime`: end-to-end verification that `rvx run --bootstrap-toolchain` injects the bootstrapped `enva` prefix into the real runtime environment
 - `release-install-smoke`: build a host release artifact, install it through `install.sh` or `install.ps1`, and verify the installed binary starts on Linux, macOS, and Windows x64
 - `local-source-drift`: end-to-end verification that local source fingerprint drift breaks `check`, `--locked`, and `--frozen` as expected
 - `doctor-failures`: end-to-end verification of blocking doctor failure output
@@ -147,8 +147,8 @@ The current GitHub Actions workflow is split into these release-facing jobs:
 - `native-github`: end-to-end verification of standard GitHub sources on the native installer
 - `native-bioc`: end-to-end verification of Bioconductor installs on the native installer
 - `pak-backend`: explicit compatibility coverage for the `pak` backend on Linux and Windows x64
-- `native-r-manager`: macOS, Linux, and Windows x64 smoke coverage for `rs r list/install/use/which`
-- `native-r-manager-source`: Ubuntu end-to-end verification of explicit `rs r install --method source`
+- `native-r-manager`: macOS, Linux, and Windows x64 smoke coverage for `rvx r list/install/use/which`
+- `native-r-manager-source`: Ubuntu end-to-end verification of explicit `rvx r install --method source`
 
 ## Final Human Sign-Off Before Tagging
 

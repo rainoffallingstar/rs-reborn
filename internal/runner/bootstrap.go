@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 )
 
-const bootstrapSource = `rs_bootstrap_context <- function() {
+const bootstrapSourceTemplate = `rs_bootstrap_context <- function() {
   rs_lib <- Sys.getenv("RS_LIB_PATH", "")
   rs_repos <- Sys.getenv("RS_REPOS", "https://cloud.r-project.org")
   rs_install <- identical(tolower(Sys.getenv("RS_INSTALL_ENABLED", "true")), "true")
@@ -232,11 +235,11 @@ rs_install_pak <- function(ctx) {
   }
 
   if (!"pak" %in% installed) {
-    message("[rs] installing pak")
+    message("[__CLI__] installing pak")
     utils::install.packages("pak", lib = ctx$lib, repos = ctx$repos)
   }
 
-  message(sprintf("[rs] installing via pak: %s", paste(refs, collapse = ", ")))
+  message(sprintf("[__CLI__] installing via pak: %s", paste(refs, collapse = ", ")))
   pak::pkg_install(refs, lib = ctx$lib, ask = FALSE, upgrade = FALSE)
   rs_write_local_source_metadata(ctx$meta_dir, ctx$sources)
   rs_write_git_source_metadata(ctx$meta_dir, ctx$sources)
@@ -350,16 +353,21 @@ if (identical(tolower(Sys.getenv("RS_BOOTSTRAP_AUTORUN", "true")), "true")) {
   rs_bootstrap()
 }`
 
+func bootstrapSource() string {
+	return strings.ReplaceAll(bootstrapSourceTemplate, "__CLI__", brand.CLIName)
+}
+
 func writeBootstrap(cacheRoot string) (string, error) {
 	bootstrapDir := filepath.Join(cacheRoot, "bootstrap")
 	if err := os.MkdirAll(bootstrapDir, 0o755); err != nil {
 		return "", fmt.Errorf("create bootstrap dir: %w", err)
 	}
 	path := filepath.Join(bootstrapDir, "rs-profile.R")
-	if data, err := os.ReadFile(path); err == nil && string(data) == bootstrapSource {
+	source := bootstrapSource()
+	if data, err := os.ReadFile(path); err == nil && string(data) == source {
 		return path, nil
 	}
-	if err := os.WriteFile(path, []byte(bootstrapSource), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
 		return "", fmt.Errorf("write bootstrap profile: %w", err)
 	}
 	return path, nil

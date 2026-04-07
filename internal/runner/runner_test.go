@@ -285,7 +285,7 @@ func TestBootstrapSourceIncludesInstallerBackends(t *testing.T) {
 		"git::",
 		"github::",
 	} {
-		if !strings.Contains(bootstrapSource, want) {
+		if !strings.Contains(bootstrapSource(), want) {
 			t.Fatalf("bootstrapSource missing %q", want)
 		}
 	}
@@ -309,7 +309,7 @@ func TestWriteBootstrapReusesCachedProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(%q) error = %v", first, err)
 	}
-	if string(data) != bootstrapSource {
+	if string(data) != bootstrapSource() {
 		t.Fatalf("bootstrap profile content mismatch")
 	}
 }
@@ -820,16 +820,16 @@ func TestPrintEnvironmentSummarizesVerboseOutput(t *testing.T) {
 
 	printEnvironment(env)
 	out := stderr.String()
-	if !strings.Contains(out, "[rs] script: /tmp/analysis.R | project=/tmp/rs.toml | profile=default") {
+	if !strings.Contains(out, "["+brand.CLIName+"] script: /tmp/analysis.R | project=/tmp/rs.toml | profile=default") {
 		t.Fatalf("printEnvironment() script summary = %q", out)
 	}
-	if !strings.Contains(out, "[rs] runtime: interpreter=/tmp/Rscript | library=/tmp/lib | lockfile=/tmp/rs.lock.json") {
+	if !strings.Contains(out, "["+brand.CLIName+"] runtime: interpreter=/tmp/Rscript | library=/tmp/lib | lockfile=/tmp/rs.lock.json") {
 		t.Fatalf("printEnvironment() runtime summary = %q", out)
 	}
-	if !strings.Contains(out, "[rs] packages: detected=2 | cran=1 | bioc=1 | sources=1") {
+	if !strings.Contains(out, "["+brand.CLIName+"] packages: detected=2 | cran=1 | bioc=1 | sources=1") {
 		t.Fatalf("printEnvironment() package summary = %q", out)
 	}
-	if !strings.Contains(out, "[rs] resolved custom sources: mypkg=github:owner/repo@main") {
+	if !strings.Contains(out, "["+brand.CLIName+"] resolved custom sources: mypkg=github:owner/repo@main") {
 		t.Fatalf("printEnvironment() source summary = %q", out)
 	}
 }
@@ -858,16 +858,16 @@ func TestPrintEnvironmentPreviewsLargePackageLists(t *testing.T) {
 
 	printEnvironment(env)
 	out := stderr.String()
-	if !strings.Contains(out, "[rs] detected packages: a, b, c, d, e, f, g, h, +2 more") {
+	if !strings.Contains(out, "["+brand.CLIName+"] detected packages: a, b, c, d, e, f, g, h, +2 more") {
 		t.Fatalf("printEnvironment() detected preview = %q", out)
 	}
-	if !strings.Contains(out, "[rs] resolved CRAN packages: a, b, c, d, e, f, g, h, +1 more") {
+	if !strings.Contains(out, "["+brand.CLIName+"] resolved CRAN packages: a, b, c, d, e, f, g, h, +1 more") {
 		t.Fatalf("printEnvironment() cran preview = %q", out)
 	}
-	if !strings.Contains(out, "[rs] resolved Bioconductor packages: A, B, C, D, E, F, G, H, +1 more") {
+	if !strings.Contains(out, "["+brand.CLIName+"] resolved Bioconductor packages: A, B, C, D, E, F, G, H, +1 more") {
 		t.Fatalf("printEnvironment() bioc preview = %q", out)
 	}
-	if !strings.Contains(out, "[rs] resolved custom sources: pkg1=github:owner/one, pkg2=github:owner/two, pkg3=github:owner/three, pkg4=github:owner/four, pkg5=github:owner/five, pkg6=github:owner/six, +1 more") {
+	if !strings.Contains(out, "["+brand.CLIName+"] resolved custom sources: pkg1=github:owner/one, pkg2=github:owner/two, pkg3=github:owner/three, pkg4=github:owner/four, pkg5=github:owner/five, pkg6=github:owner/six, +1 more") {
 		t.Fatalf("printEnvironment() source preview = %q", out)
 	}
 }
@@ -896,10 +896,10 @@ func TestPrintEnvironmentPreviewsLongToolchainLists(t *testing.T) {
 
 	printEnvironment(env)
 	out := stderr.String()
-	if !strings.Contains(out, "[rs] toolchain prefixes: "+strings.Join([]string{p1, p2, p3, p4}, ", ")+", +1 more") {
+	if !strings.Contains(out, "["+brand.CLIName+"] toolchain prefixes: "+strings.Join([]string{p1, p2, p3, p4}, ", ")+", +1 more") {
 		t.Fatalf("printEnvironment() toolchain prefix preview = %q", out)
 	}
-	if !strings.Contains(out, "[rs] pkg-config path: "+strings.Join([]string{pc1, pc2, pc3, pc4}, ", ")+", +1 more") {
+	if !strings.Contains(out, "["+brand.CLIName+"] pkg-config path: "+strings.Join([]string{pc1, pc2, pc3, pc4}, ", ")+", +1 more") {
 		t.Fatalf("printEnvironment() pkg-config preview = %q", out)
 	}
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -917,10 +917,10 @@ func TestRunnerStageSequenceStaysCompact(t *testing.T) {
 
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 	want := []string{
-		"[rs] preparing project and dependencies...",
-		"[rs] resolving interpreter and managed library...",
-		"[rs] recording lockfile...",
-		"[rs] launching script...",
+		"[" + brand.CLIName + "] preparing project and dependencies...",
+		"[" + brand.CLIName + "] resolving interpreter and managed library...",
+		"[" + brand.CLIName + "] recording lockfile...",
+		"[" + brand.CLIName + "] launching script...",
 	}
 	if !reflect.DeepEqual(lines, want) {
 		t.Fatalf("runner stage sequence = %v, want %v", lines, want)
@@ -1210,7 +1210,7 @@ func TestInstallerRequestFromEnvironmentAutoDetectsToolchainWhenUnset(t *testing
 	if !foundPrefix {
 		t.Fatalf("Environment = %v, want auto-detected homebrew prefix", req.Environment)
 	}
-	if !strings.Contains(stderr.String(), "[rs] auto-detected rootless toolchain preset: homebrew") {
+	if !strings.Contains(stderr.String(), "["+brand.CLIName+"] auto-detected rootless toolchain preset: homebrew") {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
@@ -3827,7 +3827,7 @@ func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T
 			return nil, err
 		}
 		if stderr != nil {
-			fmt.Fprintln(stderr, "[rs] bootstrapping rootless toolchain preset: micromamba")
+			fmt.Fprintln(stderr, "["+brand.CLIName+"] bootstrapping rootless toolchain preset: micromamba")
 		}
 		return &toolchainenv.Candidate{
 			Preset:            "micromamba",
@@ -3879,7 +3879,7 @@ func TestDoctorToolchainOnlyBootstrapToolchainCreatesDetectedPrefix(t *testing.T
 	if report.Status != "ok" {
 		t.Fatalf("report.Status = %q, want ok", report.Status)
 	}
-	if !strings.Contains(stderr.String(), "[rs] bootstrapping rootless toolchain preset: micromamba") {
+	if !strings.Contains(stderr.String(), "["+brand.CLIName+"] bootstrapping rootless toolchain preset: micromamba") {
 		t.Fatalf("Doctor() stderr missing bootstrap message:\n%s", stderr.String())
 	}
 	pkgConfigName := "pkg-config"
@@ -4580,7 +4580,7 @@ func TestBuildDoctorNextStepsSuggestsNativeBootstrapWhenMissing(t *testing.T) {
 			t.Fatalf("spec = %q, want 5.3.2", spec)
 		}
 		return rmanager.RBootstrapAdvice{
-			ManualMessage: "install a managed R version with rs",
+			ManualMessage: "install a managed R version with " + brand.CLIName,
 			ManualCommand: brand.Command("r install 5.3.2"),
 			AutoEnableEnv: "RS_AUTO_INSTALL_R",
 		}
@@ -4893,13 +4893,13 @@ func TestFormatDoctorSummary(t *testing.T) {
 
 func TestPrintAppliedAdjustments(t *testing.T) {
 	var out bytes.Buffer
-	printAppliedAdjustments(&out, "[rs] ", []string{"cli"}, []string{"Biostrings"}, []string{"dplyr"})
+	printAppliedAdjustments(&out, "["+brand.CLIName+"] ", []string{"cli"}, []string{"Biostrings"}, []string{"dplyr"})
 
 	got := out.String()
-	if !strings.Contains(got, "[rs] included packages: CRAN=cli | Bioconductor=Biostrings") {
+	if !strings.Contains(got, "["+brand.CLIName+"] included packages: CRAN=cli | Bioconductor=Biostrings") {
 		t.Fatalf("printAppliedAdjustments() missing include line:\n%s", got)
 	}
-	if !strings.Contains(got, "[rs] excluded packages: dplyr") {
+	if !strings.Contains(got, "["+brand.CLIName+"] excluded packages: dplyr") {
 		t.Fatalf("printAppliedAdjustments() missing exclude line:\n%s", got)
 	}
 }
@@ -5114,6 +5114,29 @@ func TestResolveDependencyPlanIncludeAndExclude(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plan.BiocDeps, []string{"Biostrings"}) {
 		t.Fatalf("plan.BiocDeps = %v", plan.BiocDeps)
+	}
+}
+
+func TestResolveDependencyPlanFiltersBundledBasePackages(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "report.R")
+	if err := os.WriteFile(scriptPath, []byte("library(stats)\njsonlite::fromJSON('{}')\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(script) error = %v", err)
+	}
+
+	plan, err := resolveDependencyPlan(scriptPath, nil, nil, nil, "", "", "")
+	if err != nil {
+		t.Fatalf("resolveDependencyPlan() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(plan.DetectedDeps, []string{"jsonlite", "stats"}) {
+		t.Fatalf("plan.DetectedDeps = %v", plan.DetectedDeps)
+	}
+	if !reflect.DeepEqual(plan.CRANDeps, []string{"jsonlite"}) {
+		t.Fatalf("plan.CRANDeps = %v, want bundled stats to be filtered out", plan.CRANDeps)
+	}
+	if len(plan.BiocDeps) != 0 {
+		t.Fatalf("plan.BiocDeps = %v, want none", plan.BiocDeps)
 	}
 }
 

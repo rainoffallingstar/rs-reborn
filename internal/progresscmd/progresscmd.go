@@ -9,9 +9,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 )
 
 const defaultTailLines = 120
+const logPrefix = "[" + brand.CLIName + "] "
 
 var progressIsTTY = isTTY
 var progressHeartbeatInterval = 15 * time.Second
@@ -55,10 +58,10 @@ func Stage(w io.Writer, label string) {
 			return
 		}
 		defer release()
-		fmt.Fprintf(w, "[rs] %s\n", label)
+		fmt.Fprintf(w, logPrefix+"%s\n", label)
 		return
 	}
-	fmt.Fprintf(w, "[rs] %s...\n", label)
+	fmt.Fprintf(w, logPrefix+"%s...\n", label)
 }
 
 func Run(cmd *exec.Cmd, label string, progress io.Writer, errors io.Writer) error {
@@ -161,7 +164,7 @@ func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct
 		if delay > 0 {
 			delayTimer = time.NewTimer(delay)
 		} else {
-			fmt.Fprintf(w, "[rs] %s...\n", label)
+			fmt.Fprintf(w, logPrefix+"%s...\n", label)
 			ticker = time.NewTicker(heartbeat)
 		}
 		for {
@@ -177,11 +180,11 @@ func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct
 			case <-stop:
 				return
 			case <-delayC:
-				fmt.Fprintf(w, "[rs] %s...\n", label)
+				fmt.Fprintf(w, logPrefix+"%s...\n", label)
 				ticker = time.NewTicker(heartbeat)
 				delayTimer = nil
 			case <-tickerC:
-				fmt.Fprintf(w, "[rs] %s (%s elapsed)\n", label, formatElapsed(time.Since(start)))
+				fmt.Fprintf(w, logPrefix+"%s (%s elapsed)\n", label, formatElapsed(time.Since(start)))
 			}
 		}
 	}
@@ -190,7 +193,7 @@ func animate(w io.Writer, label string, stop <-chan struct{}, done chan<- struct
 	defer ticker.Stop()
 	idx := 0
 	for {
-		writeTTYLine(w, fmt.Sprintf("[rs] %s %s %s", label, frames[idx%len(frames)], formatElapsed(time.Since(start))))
+		writeTTYLine(w, fmt.Sprintf(logPrefix+"%s %s %s", label, frames[idx%len(frames)], formatElapsed(time.Since(start))))
 		idx++
 		select {
 		case <-stop:
@@ -206,7 +209,7 @@ func writeSuccess(w io.Writer, label string) {
 		return
 	}
 	if progressIsTTY(w) {
-		writeTTYLine(w, fmt.Sprintf("[rs] %s done", label))
+		writeTTYLine(w, fmt.Sprintf(logPrefix+"%s done", label))
 		fmt.Fprintln(w)
 	}
 }
@@ -216,7 +219,7 @@ func writeFailure(w io.Writer, label, output string) {
 		return
 	}
 	if label != "" {
-		fmt.Fprintf(w, "[rs] %s failed\n", label)
+		fmt.Fprintf(w, logPrefix+"%s failed\n", label)
 	}
 	tail := tailLines(output, defaultTailLines)
 	if strings.TrimSpace(tail) == "" {
@@ -291,7 +294,7 @@ func (w *progressWriter) animate(stop <-chan struct{}, done chan<- struct{}) {
 		if delay > 0 {
 			delayTimer = time.NewTimer(delay)
 		} else {
-			fmt.Fprintf(w.progress, "[rs] %s...\n", w.label)
+			fmt.Fprintf(w.progress, logPrefix+"%s...\n", w.label)
 			ticker = time.NewTicker(heartbeat)
 		}
 		for {
@@ -307,11 +310,11 @@ func (w *progressWriter) animate(stop <-chan struct{}, done chan<- struct{}) {
 			case <-stop:
 				return
 			case <-delayC:
-				fmt.Fprintf(w.progress, "[rs] %s...\n", w.label)
+				fmt.Fprintf(w.progress, logPrefix+"%s...\n", w.label)
 				ticker = time.NewTicker(heartbeat)
 				delayTimer = nil
 			case <-tickerC:
-				fmt.Fprintf(w.progress, "[rs] %s (%s elapsed)\n", w.label, formatElapsed(time.Since(start)))
+				fmt.Fprintf(w.progress, logPrefix+"%s (%s elapsed)\n", w.label, formatElapsed(time.Since(start)))
 			}
 		}
 	}
@@ -328,7 +331,7 @@ func (w *progressWriter) animate(stop <-chan struct{}, done chan<- struct{}) {
 		if total > 0 {
 			status = fmt.Sprintf("%s/%s", humanBytes(written), humanBytes(total))
 		}
-		writeTTYLine(w.progress, fmt.Sprintf("[rs] %s %s %s %s", w.label, frames[idx%len(frames)], status, formatElapsed(time.Since(start))))
+		writeTTYLine(w.progress, fmt.Sprintf(logPrefix+"%s %s %s %s", w.label, frames[idx%len(frames)], status, formatElapsed(time.Since(start))))
 		idx++
 		select {
 		case <-stop:
@@ -344,7 +347,7 @@ func (w *progressWriter) finish() {
 		return
 	}
 	if progressIsTTY(w.progress) {
-		writeTTYLine(w.progress, fmt.Sprintf("[rs] %s done", w.label))
+		writeTTYLine(w.progress, fmt.Sprintf(logPrefix+"%s done", w.label))
 		fmt.Fprintln(w.progress)
 	}
 }

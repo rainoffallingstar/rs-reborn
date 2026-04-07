@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 )
 
 func TestRunSuppressesSuccessfulCommandOutput(t *testing.T) {
@@ -22,7 +24,7 @@ func TestRunSuppressesSuccessfulCommandOutput(t *testing.T) {
 	if got := errors.String(); got != "" {
 		t.Fatalf("errors = %q, want empty", got)
 	}
-	if !strings.Contains(progress.String(), "[rs] testing success...") {
+	if !strings.Contains(progress.String(), "["+brand.CLIName+"] testing success...") {
 		t.Fatalf("progress = %q, want start message", progress.String())
 	}
 }
@@ -37,7 +39,7 @@ func TestRunPrintsTailOnFailure(t *testing.T) {
 		t.Fatal("Run() error = nil, want failure")
 	}
 	out := errors.String()
-	if !strings.Contains(out, "[rs] testing failure failed") {
+	if !strings.Contains(out, "["+brand.CLIName+"] testing failure failed") {
 		t.Fatalf("errors = %q, want failure header", out)
 	}
 	if !strings.Contains(out, "first") || !strings.Contains(out, "second") {
@@ -96,7 +98,7 @@ func TestRunWithOptionsEmitsDelayedNonTTYStartForSlowCommand(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("RunWithOptions() error = %v", err)
 	}
-	if !strings.Contains(progress.String(), "[rs] testing success...") {
+	if !strings.Contains(progress.String(), "["+brand.CLIName+"] testing success...") {
 		t.Fatalf("progress = %q, want delayed non-TTY start line", progress.String())
 	}
 }
@@ -119,7 +121,7 @@ func TestAnimateUsesCustomNonTTYHeartbeat(t *testing.T) {
 	<-done
 
 	out := buf.String()
-	if !strings.Contains(out, "[rs] compiling package...") {
+	if !strings.Contains(out, "["+brand.CLIName+"] compiling package...") {
 		t.Fatalf("animate() output = %q, want start line", out)
 	}
 	if !strings.Contains(out, "elapsed") {
@@ -130,7 +132,7 @@ func TestAnimateUsesCustomNonTTYHeartbeat(t *testing.T) {
 func TestStageWritesMessage(t *testing.T) {
 	var buf bytes.Buffer
 	Stage(&buf, "resolving dependencies")
-	if !strings.Contains(buf.String(), "[rs] resolving dependencies") {
+	if !strings.Contains(buf.String(), "["+brand.CLIName+"] resolving dependencies") {
 		t.Fatalf("Stage() output = %q", buf.String())
 	}
 }
@@ -145,7 +147,7 @@ func TestCopyReportsNonTTYStage(t *testing.T) {
 	if got := dst.String(); got != "abcdef" {
 		t.Fatalf("Copy() wrote %q, want abcdef", got)
 	}
-	if !strings.Contains(progress.String(), "[rs] downloading file...") {
+	if !strings.Contains(progress.String(), "["+brand.CLIName+"] downloading file...") {
 		t.Fatalf("progress = %q, want stage line", progress.String())
 	}
 }
@@ -173,7 +175,7 @@ func TestCopyWithOptionsEmitsDelayedNonTTYStartForSlowCopy(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CopyWithOptions() error = %v", err)
 	}
-	if !strings.Contains(progress.String(), "[rs] downloading file...") {
+	if !strings.Contains(progress.String(), "["+brand.CLIName+"] downloading file...") {
 		t.Fatalf("progress = %q, want delayed non-TTY copy start line", progress.String())
 	}
 }
@@ -196,8 +198,8 @@ func (r *slowReader) Read(p []byte) (int, error) {
 
 func TestWriteTTYLineClearsPreviousOutput(t *testing.T) {
 	var buf bytes.Buffer
-	writeTTYLine(&buf, "[rs] downloading file | 1.0 MiB/5.0 MiB")
-	if !strings.Contains(buf.String(), "\r\033[2K[rs] downloading file | 1.0 MiB/5.0 MiB") {
+	writeTTYLine(&buf, "["+brand.CLIName+"] downloading file | 1.0 MiB/5.0 MiB")
+	if !strings.Contains(buf.String(), "\r\033[2K["+brand.CLIName+"] downloading file | 1.0 MiB/5.0 MiB") {
 		t.Fatalf("writeTTYLine() output = %q", buf.String())
 	}
 }
@@ -211,7 +213,7 @@ func TestWriteSuccessClearsTTYLineBeforeDone(t *testing.T) {
 
 	var buf bytes.Buffer
 	writeSuccess(&buf, "downloading file")
-	if !strings.Contains(buf.String(), "\033[2K[rs] downloading file done\n") {
+	if !strings.Contains(buf.String(), "\033[2K["+brand.CLIName+"] downloading file done\n") {
 		t.Fatalf("writeSuccess() output = %q", buf.String())
 	}
 }
@@ -232,7 +234,7 @@ func TestAnimateEmitsHeartbeatForNonTTY(t *testing.T) {
 	<-done
 
 	out := buf.String()
-	if !strings.Contains(out, "[rs] compiling package...") {
+	if !strings.Contains(out, "["+brand.CLIName+"] compiling package...") {
 		t.Fatalf("animate() output = %q, want start line", out)
 	}
 	if !strings.Contains(out, "elapsed") {

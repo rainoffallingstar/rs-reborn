@@ -16,14 +16,14 @@ This first release focuses on making the core execution model trustworthy:
 
 `rs` now supports the core workflow around one script or a small repository:
 
-- `rs run`
-- `rs shell`
-- `rs exec`
-- `rs lock` / `rs sync`
-- `rs check`
-- `rs doctor`
-- `rs scan`
-- `rs list`
+- `rvx run`
+- `rvx shell`
+- `rvx exec`
+- `rvx lock` / `rvx sync`
+- `rvx check`
+- `rvx doctor`
+- `rvx scan`
+- `rvx list`
 
 ### Custom source support
 
@@ -46,7 +46,7 @@ The lockfile and managed-library cache now track more than package names:
 
 ### Better diagnostics
 
-`rs doctor` and `rs check` now provide:
+`rvx doctor` and `rvx check` now provide:
 
 - clearer setup/source/runtime buckets
 - structured JSON details for automation
@@ -58,9 +58,9 @@ The lockfile and managed-library cache now track more than package names:
 This release also makes rootless and user-local source-build flows much more practical:
 
 - `rs` can auto-detect and auto-use an existing user-local toolchain prefix when no explicit toolchain config is present
-- `rs init --toolchain-preset auto|enva|micromamba|mamba|conda|homebrew|spack` can seed common rootless layouts directly into `rs.toml`
-- `rs toolchain detect`, `rs toolchain template`, and `rs doctor --toolchain-only` now provide a complete discover/preview/validate loop
-- commands such as `rs run`, `rs lock`, `rs check`, `rs doctor`, and `rs r install --method source` now accept `--bootstrap-toolchain` to explicitly create a user-local toolchain prefix through a supported external manager when needed
+- `rvx init --toolchain-preset auto|enva|micromamba|mamba|conda|homebrew|spack` can seed common rootless layouts directly into `rs.toml`
+- `rvx toolchain detect`, `rvx toolchain template`, and `rvx doctor --toolchain-only` now provide a complete discover/preview/validate loop
+- commands such as `rvx run`, `rvx lock`, `rvx check`, `rvx doctor`, and `rvx r install --method source` now accept `--bootstrap-toolchain` to explicitly create a user-local toolchain prefix through a supported external manager when needed
 
 For active bootstrap of a new conda-style build-tools prefix, `auto` now stays on:
 
@@ -74,16 +74,16 @@ This release adds basic multi-R support without expanding the tool beyond R:
 
 - pin an interpreter in `rs.toml` with `rscript = "..."`
 - override it per invocation with `--rscript`
-- inspect or update project selection with `rs r which` and `rs r use`
+- inspect or update project selection with `rvx r which` and `rvx r use`
 
 ### Native multi-R management
 
 On macOS, Linux, and Windows x64, `rs` now exposes:
 
-- `rs r list`
-- `rs r install <version>`
-- `rs r use <version>`
-- `rs r which`
+- `rvx r list`
+- `rvx r install <version>`
+- `rvx r use <version>`
+- `rvx r which`
 
 This is now a first-party native R manager with user-local installs, source-build fallback where supported, and project-level interpreter selection.
 
@@ -92,7 +92,7 @@ This is now a first-party native R manager with user-local installs, source-buil
 This release is intended to be described conservatively:
 
 - runtime commands are supported on macOS, Linux, and Windows x64
-- `rs r ...` is the supported native-manager path on macOS, Linux, and Windows x64
+- `rvx r ...` is the supported native-manager path on macOS, Linux, and Windows x64
 - Windows ARM64 binaries are still published as secondary artifacts with lighter validation depth
 
 ## Scope Boundaries

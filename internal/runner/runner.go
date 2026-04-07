@@ -35,6 +35,8 @@ import (
 type Event = eventstream.Event
 type EventHandler = eventstream.Handler
 
+const runnerLogPrefix = "[" + brand.CLIName + "] "
+
 type RunOptions struct {
 	ScriptPath         string
 	ScriptArgs         []string
@@ -490,7 +492,7 @@ var bootstrapToolchainPresetForPhase = func(categories []string, phase string, s
 		return nil, err
 	}
 	if stderr != nil {
-		fmt.Fprintf(stderr, "[rs] rootless bootstrap phase %s packages: %s\n", phase, summarizeBootstrapPackages(packages))
+		fmt.Fprintf(stderr, runnerLogPrefix+"rootless bootstrap phase %s packages: %s\n", phase, summarizeBootstrapPackages(packages))
 	}
 	return toolchainenv.BootstrapWithPackages(candidate.Preset, "", os.Environ(), packages, stdout, stderr)
 }
@@ -1154,7 +1156,7 @@ func Run(opts RunOptions) (runErr error) {
 				return
 			}
 			if opts.Stderr != nil {
-				fmt.Fprintf(opts.Stderr, "[rs] background managed package cache sync failed: %v\n", err)
+				fmt.Fprintf(opts.Stderr, runnerLogPrefix+"background managed package cache sync failed: %v\n", err)
 			}
 		}
 	}()
@@ -1867,8 +1869,8 @@ func Check(opts CheckOptions) error {
 		return err
 	}
 	if env.Verbose {
-		printAppliedAdjustments(env.Stderr, "[rs] ", opts.IncludeDeps, opts.IncludeBiocDeps, opts.ExcludeDeps)
-		fmt.Fprintf(env.Stderr, "[rs] lockfile validated: %s\n", env.LockfilePath)
+		printAppliedAdjustments(env.Stderr, runnerLogPrefix, opts.IncludeDeps, opts.IncludeBiocDeps, opts.ExcludeDeps)
+		fmt.Fprintf(env.Stderr, runnerLogPrefix+"lockfile validated: %s\n", env.LockfilePath)
 	}
 	return nil
 }
@@ -4757,9 +4759,9 @@ func mergeDeps(groups ...[]string) []string {
 }
 
 func resolveManagedPackageSets(detectedDeps, configuredCRAN, configuredBioc, extraCRAN, extraBioc, excludeDeps []string) ([]string, []string) {
-	requested := mergeDeps(detectedDeps, configuredCRAN, extraCRAN)
+	requested := rdeps.FilterInstallable(mergeDeps(detectedDeps, configuredCRAN, extraCRAN))
 	autoCRAN, autoBioc := rdeps.SplitBiocPackages(requested)
-	bioc := mergeDeps(autoBioc, configuredBioc, extraBioc)
+	bioc := rdeps.FilterInstallable(mergeDeps(autoBioc, configuredBioc, extraBioc))
 	return filterDeps(autoCRAN, excludeDeps), filterDeps(bioc, excludeDeps)
 }
 
@@ -4873,7 +4875,7 @@ func maybeUpgradeBootstrappedToolchainAndRetry(env *ResolvedEnvironment, install
 		return false, nil
 	}
 	if env.Stderr != nil {
-		fmt.Fprintln(env.Stderr, "[rs] package install failed after base rootless bootstrap; retrying with full system dependency bootstrap")
+		fmt.Fprintln(env.Stderr, runnerLogPrefix+"package install failed after base rootless bootstrap; retrying with full system dependency bootstrap")
 	}
 	candidate, err := bootstrapToolchainPresetForPhase(env.BootstrappedToolchainCategories, "full", env.Stdout, env.Stderr)
 	if err != nil {
@@ -4902,7 +4904,7 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 		return installer.Request{}, err
 	}
 	if detectedToolchain != nil && stderr != nil {
-		fmt.Fprintf(stderr, "[rs] auto-detected rootless toolchain preset: %s\n", detectedToolchain.Preset)
+		fmt.Fprintf(stderr, runnerLogPrefix+"auto-detected rootless toolchain preset: %s\n", detectedToolchain.Preset)
 	}
 	if detectedToolchain != nil {
 		emitToolchainEvent(env.Events, "auto_detected_toolchain", fmt.Sprintf("auto-detected rootless toolchain preset: %s", detectedToolchain.Preset), env.ScriptPath, map[string]string{"preset": detectedToolchain.Preset})
@@ -5784,14 +5786,14 @@ func recordToolchainBootstrapState(cacheRoot string, candidate *toolchainenv.Can
 	plan, err := toolchainenv.BuildPackagePlan(candidate.Preset, categories)
 	if err != nil {
 		if stderr != nil {
-			fmt.Fprintf(stderr, "[rs] warning: could not build toolchain bootstrap state package plan: %v\n", err)
+			fmt.Fprintf(stderr, runnerLogPrefix+"warning: could not build toolchain bootstrap state package plan: %v\n", err)
 		}
 		return
 	}
 	packages, err := plan.PackagesForPhase(phase)
 	if err != nil {
 		if stderr != nil {
-			fmt.Fprintf(stderr, "[rs] warning: could not build toolchain bootstrap state package phase %s: %v\n", phase, err)
+			fmt.Fprintf(stderr, runnerLogPrefix+"warning: could not build toolchain bootstrap state package phase %s: %v\n", phase, err)
 		}
 		return
 	}
@@ -5807,24 +5809,24 @@ func recordToolchainBootstrapState(cacheRoot string, candidate *toolchainenv.Can
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		if stderr != nil {
-			fmt.Fprintf(stderr, "[rs] warning: could not marshal toolchain bootstrap state: %v\n", err)
+			fmt.Fprintf(stderr, runnerLogPrefix+"warning: could not marshal toolchain bootstrap state: %v\n", err)
 		}
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
 		if stderr != nil {
-			fmt.Fprintf(stderr, "[rs] warning: could not create toolchain bootstrap state dir: %v\n", err)
+			fmt.Fprintf(stderr, runnerLogPrefix+"warning: could not create toolchain bootstrap state dir: %v\n", err)
 		}
 		return
 	}
 	if err := os.WriteFile(statePath, data, 0o644); err != nil {
 		if stderr != nil {
-			fmt.Fprintf(stderr, "[rs] warning: could not write toolchain bootstrap state: %v\n", err)
+			fmt.Fprintf(stderr, runnerLogPrefix+"warning: could not write toolchain bootstrap state: %v\n", err)
 		}
 		return
 	}
 	if stderr != nil {
-		fmt.Fprintf(stderr, "[rs] wrote toolchain bootstrap state: %s\n", statePath)
+		fmt.Fprintf(stderr, runnerLogPrefix+"wrote toolchain bootstrap state: %s\n", statePath)
 	}
 }
 
@@ -5868,9 +5870,9 @@ func printEnvironment(env ResolvedEnvironment) {
 	if env.ScriptConfig.ScriptKey != "" {
 		scriptParts = append(scriptParts, "profile="+env.ScriptConfig.ScriptKey)
 	}
-	fmt.Fprintf(env.Stderr, "[rs] script: %s\n", strings.Join(scriptParts, " | "))
+	fmt.Fprintf(env.Stderr, runnerLogPrefix+"script: %s\n", strings.Join(scriptParts, " | "))
 
-	fmt.Fprintf(env.Stderr, "[rs] runtime: interpreter=%s | library=%s | lockfile=%s\n", env.Interpreter, env.LibraryPath, env.LockfilePath)
+	fmt.Fprintf(env.Stderr, runnerLogPrefix+"runtime: interpreter=%s | library=%s | lockfile=%s\n", env.Interpreter, env.LibraryPath, env.LockfilePath)
 
 	toolchainParts := []string{}
 	if detectedToolchain != nil {
@@ -5878,33 +5880,33 @@ func printEnvironment(env ResolvedEnvironment) {
 	}
 	toolchainParts = append(toolchainParts, fmt.Sprintf("prefixes=%d", len(effectivePrefixes)))
 	toolchainParts = append(toolchainParts, fmt.Sprintf("pkg-config=%d", len(effectivePkgConfig)))
-	fmt.Fprintf(env.Stderr, "[rs] toolchain: %s\n", strings.Join(toolchainParts, " | "))
+	fmt.Fprintf(env.Stderr, runnerLogPrefix+"toolchain: %s\n", strings.Join(toolchainParts, " | "))
 	if len(effectivePrefixes) > 0 {
-		fmt.Fprintf(env.Stderr, "[rs] toolchain prefixes: %s\n", previewStrings(effectivePrefixes, 4))
+		fmt.Fprintf(env.Stderr, runnerLogPrefix+"toolchain prefixes: %s\n", previewStrings(effectivePrefixes, 4))
 	}
 	if len(effectivePkgConfig) > 0 {
-		fmt.Fprintf(env.Stderr, "[rs] pkg-config path: %s\n", previewStrings(effectivePkgConfig, 4))
+		fmt.Fprintf(env.Stderr, runnerLogPrefix+"pkg-config path: %s\n", previewStrings(effectivePkgConfig, 4))
 	}
 
 	fmt.Fprintf(
 		env.Stderr,
-		"[rs] packages: detected=%d | cran=%d | bioc=%d | sources=%d\n",
+		runnerLogPrefix+"packages: detected=%d | cran=%d | bioc=%d | sources=%d\n",
 		len(env.DetectedDeps),
 		len(env.CRANDeps),
 		len(env.BiocDeps),
 		len(env.SourceDeps),
 	)
 	if len(env.DetectedDeps) > 0 {
-		fmt.Fprintf(env.Stderr, "[rs] detected packages: %s\n", previewStrings(env.DetectedDeps, 8))
+		fmt.Fprintf(env.Stderr, runnerLogPrefix+"detected packages: %s\n", previewStrings(env.DetectedDeps, 8))
 	}
 	if len(env.CRANDeps) > 0 {
-		fmt.Fprintf(env.Stderr, "[rs] resolved CRAN packages: %s\n", previewStrings(env.CRANDeps, 8))
+		fmt.Fprintf(env.Stderr, runnerLogPrefix+"resolved CRAN packages: %s\n", previewStrings(env.CRANDeps, 8))
 	}
 	if len(env.BiocDeps) > 0 {
-		fmt.Fprintf(env.Stderr, "[rs] resolved Bioconductor packages: %s\n", previewStrings(env.BiocDeps, 8))
+		fmt.Fprintf(env.Stderr, runnerLogPrefix+"resolved Bioconductor packages: %s\n", previewStrings(env.BiocDeps, 8))
 	}
 	if len(env.SourceDeps) > 0 {
-		fmt.Fprintf(env.Stderr, "[rs] resolved custom sources: %s\n", previewStrings(sourceSummary(env.SourceDeps), 6))
+		fmt.Fprintf(env.Stderr, runnerLogPrefix+"resolved custom sources: %s\n", previewStrings(sourceSummary(env.SourceDeps), 6))
 	}
 }
 

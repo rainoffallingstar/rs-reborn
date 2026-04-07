@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/rainoffallingstar/rs-reborn/internal/brand"
 )
 
 func setTestHomeDir(t *testing.T, dir string) {
@@ -526,7 +528,7 @@ func TestBootstrapResolvesAdoptedEnvaPrefix(t *testing.T) {
 	if !reflect.DeepEqual(candidate.ToolchainPrefixes, []string{actualPrefix}) {
 		t.Fatalf("candidate.ToolchainPrefixes = %v", candidate.ToolchainPrefixes)
 	}
-	if candidate.SuggestedInitCommand != "rs init --toolchain-prefix "+actualPrefix+" --pkg-config-path "+filepath.Join(actualPrefix, "lib", "pkgconfig")+" --pkg-config-path "+filepath.Join(actualPrefix, "share", "pkgconfig") {
+	if candidate.SuggestedInitCommand != brand.Command("init", "--toolchain-prefix", actualPrefix, "--pkg-config-path", filepath.Join(actualPrefix, "lib", "pkgconfig"), "--pkg-config-path", filepath.Join(actualPrefix, "share", "pkgconfig")) {
 		t.Fatalf("candidate.SuggestedInitCommand = %q", candidate.SuggestedInitCommand)
 	}
 }
@@ -577,7 +579,7 @@ func TestRecommendedCandidatePrefersAdoptedEnvaOverMamba(t *testing.T) {
 	if !reflect.DeepEqual(candidate.ToolchainPrefixes, []string{actualPrefix}) {
 		t.Fatalf("candidate.ToolchainPrefixes = %v", candidate.ToolchainPrefixes)
 	}
-	if candidate.SuggestedInitCommand != "rs init --toolchain-prefix "+actualPrefix+" --pkg-config-path "+filepath.Join(actualPrefix, "lib", "pkgconfig")+" --pkg-config-path "+filepath.Join(actualPrefix, "share", "pkgconfig") {
+	if candidate.SuggestedInitCommand != brand.Command("init", "--toolchain-prefix", actualPrefix, "--pkg-config-path", filepath.Join(actualPrefix, "lib", "pkgconfig"), "--pkg-config-path", filepath.Join(actualPrefix, "share", "pkgconfig")) {
 		t.Fatalf("candidate.SuggestedInitCommand = %q", candidate.SuggestedInitCommand)
 	}
 }
