@@ -1215,7 +1215,7 @@ func TestSeedPlannedPackagesFromStoreReusesMatchingStoredPackage(t *testing.T) {
 		PackageType:     "source",
 	}
 	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
-	storeLib := packageStorePathForPlanned(cacheRoot, pkg, runtime)
+	storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
 	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
 	for _, path := range []string{
 		filepath.Join(storeLib, "cli"),
@@ -1273,6 +1273,96 @@ func TestSeedPlannedPackagesFromStoreReusesMatchingStoredPackage(t *testing.T) {
 	}
 }
 
+func TestSeedPlannedPackagesFromCacheRewritesPreparedSourceMetadata(t *testing.T) {
+	cacheRoot := t.TempDir()
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	sourceLib := filepath.Join(cacheRoot, "lib", "aaaaaaaaaaaaaaaa")
+	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
+	sourceMetaDir := filepath.Join(sourceLib, ".rs-source-meta")
+	targetMetaDir := filepath.Join(targetLib, ".rs-source-meta")
+	for _, path := range []string{
+		filepath.Join(sourceLib, "demo"),
+		sourceMetaDir,
+		targetLib,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(sourceLib, "demo", "DESCRIPTION"),
+		filepath.Join(sourceLib, "demo", "NAMESPACE"),
+	} {
+		data := []byte("Package: demo\nVersion: 1.0.0\n")
+		if strings.HasSuffix(path, "NAMESPACE") {
+			data = []byte("exportPattern(\"^[[:alpha:]]+\")\n")
+		}
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatalf("WriteFile(%q) error = %v", path, err)
+		}
+	}
+	donorPrepared := preparedSource{
+		Name:            "demo",
+		Version:         "1.0.0",
+		Source:          sourceLocal,
+		Location:        "/project-a/vendor/demo_1.0.0.tar.gz",
+		Fingerprint:     "abc123",
+		FingerprintKind: localKindFileSHA256,
+	}
+	if err := writeSourceMetadata(sourceMetaDir, "demo", donorPrepared); err != nil {
+		t.Fatalf("writeSourceMetadata(donor) error = %v", err)
+	}
+	currentPrepared := preparedSource{
+		Name:            "demo",
+		Version:         "1.0.0",
+		Source:          sourceLocal,
+		Location:        "/project-b/vendor/demo_1.0.0.tar.gz",
+		Fingerprint:     "abc123",
+		FingerprintKind: localKindFileSHA256,
+	}
+
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: targetLib,
+			Runtime:     runtime,
+		},
+		metaDir: targetMetaDir,
+		stderr:  &bytes.Buffer{},
+		planned: map[string]plannedPackage{
+			"demo": {
+				Name:     "demo",
+				Version:  "1.0.0",
+				Source:   sourceLocal,
+				Prepared: &currentPrepared,
+			},
+		},
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.seedPlannedPackagesFromCache(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromCache() error = %v", err)
+	}
+
+	meta, err := readInstalledSourceMetadataForPackage(targetMetaDir, "demo")
+	if err != nil {
+		t.Fatalf("readInstalledSourceMetadataForPackage(target) error = %v", err)
+	}
+	if meta.Location != currentPrepared.Location {
+		t.Fatalf("target source metadata location = %q, want %q", meta.Location, currentPrepared.Location)
+	}
+	if got := inst.installedPackages["demo"]; got.Location != currentPrepared.Location || got.Fingerprint != currentPrepared.Fingerprint {
+		t.Fatalf("installedPackages[demo] = %#v", got)
+	}
+}
+
 func TestSeedPlannedPackagesFromStoreReportsSingleReuseWhenVerbose(t *testing.T) {
 	cacheRoot := t.TempDir()
 	runtime := Runtime{
@@ -1285,7 +1375,7 @@ func TestSeedPlannedPackagesFromStoreReportsSingleReuseWhenVerbose(t *testing.T)
 		PackageType:     "source",
 	}
 	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
-	storeLib := packageStorePathForPlanned(cacheRoot, pkg, runtime)
+	storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
 	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
 	for _, path := range []string{
 		filepath.Join(storeLib, "cli"),
@@ -1345,7 +1435,7 @@ func TestSeedPlannedPackagesFromStoreReusesMultipleStoredPackages(t *testing.T) 
 	order := []string{"cli", "glue"}
 	for _, name := range order {
 		pkg := planned[name]
-		storeLib := packageStorePathForPlanned(cacheRoot, pkg, runtime)
+		storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
 		if err := os.MkdirAll(filepath.Join(storeLib, name), 0o755); err != nil {
 			t.Fatalf("MkdirAll(%s store) error = %v", name, err)
 		}
@@ -1382,6 +1472,56 @@ func TestSeedPlannedPackagesFromStoreReusesMultipleStoredPackages(t *testing.T) 
 	}
 	if log := inst.stderr.(*bytes.Buffer).String(); !strings.Contains(log, "reused 2 stored packages") || strings.Contains(log, "reusing stored cli") || strings.Contains(log, "reusing stored glue") {
 		t.Fatalf("store reuse log = %q", log)
+	}
+}
+
+func TestSeedPlannedPackagesFromStoreUsesSharedStoreRoot(t *testing.T) {
+	cacheRoot := t.TempDir()
+	sharedStoreRoot := t.TempDir()
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
+	storeLib := packageStorePathForPlanned(sharedStoreRoot, pkg, runtime)
+	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
+	for _, path := range []string{
+		filepath.Join(storeLib, "cli"),
+		targetLib,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "cli", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(NAMESPACE) error = %v", err)
+	}
+
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:       cacheRoot,
+			SharedStoreRoot: sharedStoreRoot,
+			LibraryPath:     targetLib,
+			Runtime:         runtime,
+		},
+		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
+		stderr:            &bytes.Buffer{},
+		planned:           map[string]plannedPackage{"cli": pkg},
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.seedPlannedPackagesFromStore(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromStore() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetLib, "cli", "DESCRIPTION")); err != nil {
+		t.Fatalf("Stat(copied DESCRIPTION) error = %v", err)
 	}
 }
 
@@ -1809,7 +1949,7 @@ func TestSyncPlannedPackageToStoreMaterializesStoreEntry(t *testing.T) {
 		t.Fatalf("syncPlannedPackageToStore() error = %v", err)
 	}
 
-	storeLib := packageStorePathForPlanned(cacheRoot, pkg, runtime)
+	storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
 	installed, err := loadInstalledPackagesFromLibrary(storeLib)
 	if err != nil {
 		t.Fatalf("loadInstalledPackagesFromLibrary(store) error = %v", err)
@@ -1876,7 +2016,7 @@ func TestSyncPlannedPackageToStoreSkipsRewriteForMatchingStoreEntry(t *testing.T
 		Source:   sourceGitHub,
 		Prepared: &prepared,
 	}
-	storeLib := packageStorePathForPlanned(cacheRoot, pkg, runtime)
+	storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
 	for _, path := range []string{
 		filepath.Join(libraryPath, "demo"),
 		metaDir,
@@ -1949,6 +2089,329 @@ func TestSyncPlannedPackageToStoreSkipsRewriteForMatchingStoreEntry(t *testing.T
 	}
 	if state.LastUsedAt == "" || state.LastUsedAt == originalTime {
 		t.Fatalf("state.LastUsedAt = %q, want refreshed timestamp", state.LastUsedAt)
+	}
+}
+
+func TestSyncPlannedPackageToStoreHealsBrokenStoreEntry(t *testing.T) {
+	cacheRoot := t.TempDir()
+	libraryPath := filepath.Join(cacheRoot, "lib", "current")
+	metaDir := filepath.Join(libraryPath, ".rs-source-meta")
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	pkg := plannedPackage{Name: "demo", Version: "0.1.0", Source: sourceCRAN}
+	storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
+	for _, path := range []string{
+		filepath.Join(libraryPath, "demo"),
+		metaDir,
+		filepath.Join(storeLib, "demo"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(libraryPath, "demo", "DESCRIPTION"), []byte("Package: demo\nVersion: 0.1.0\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(current DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libraryPath, "demo", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(current NAMESPACE) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "demo", "DESCRIPTION"), []byte("Package: demo\nVersion: 9.9.9\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(store DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, PackageStoreStateFile), []byte("{bad-json}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(broken package store state) error = %v", err)
+	}
+
+	var events []eventstream.Event
+	var stderr bytes.Buffer
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: libraryPath,
+			Runtime:     runtime,
+			Events: func(evt eventstream.Event) {
+				events = append(events, evt)
+			},
+		},
+		planned: map[string]plannedPackage{"demo": pkg},
+		metaDir: metaDir,
+		stderr:  &stderr,
+	}
+	if err := inst.syncPlannedPackageToStore("demo"); err != nil {
+		t.Fatalf("syncPlannedPackageToStore() error = %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), "warning: shared package store lookup failed for demo:") {
+		t.Fatalf("stderr = %q, want shared store lookup warning", stderr.String())
+	}
+	if len(events) != 1 || events[0].Kind != "shared_store_warning" || events[0].Fields["operation"] != "lookup" {
+		t.Fatalf("events = %#v", events)
+	}
+	state, err := readPackageStoreState(storeLib)
+	if err != nil {
+		t.Fatalf("readPackageStoreState() error = %v", err)
+	}
+	if state.Package != "demo" || state.Version != "0.1.0" || state.LastUsedAt == "" || state.UpdatedAt == "" {
+		t.Fatalf("package store state = %#v", state)
+	}
+	data, err := os.ReadFile(filepath.Join(storeLib, "demo", "DESCRIPTION"))
+	if err != nil {
+		t.Fatalf("ReadFile(store DESCRIPTION) error = %v", err)
+	}
+	if !strings.Contains(string(data), "Version: 0.1.0") {
+		t.Fatalf("store DESCRIPTION = %q, want rewritten package contents", string(data))
+	}
+}
+
+func TestSyncPlannedPackageToStoreUsesSharedStoreRoot(t *testing.T) {
+	cacheRoot := t.TempDir()
+	sharedStoreRoot := t.TempDir()
+	libraryPath := filepath.Join(cacheRoot, "lib", "aaaaaaaaaaaaaaaa")
+	metaDir := filepath.Join(libraryPath, ".rs-source-meta")
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	pkg := plannedPackage{Name: "demo", Version: "0.1.0", Source: sourceCRAN}
+	for _, path := range []string{
+		filepath.Join(libraryPath, "demo"),
+		metaDir,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(libraryPath, "demo", "DESCRIPTION"), []byte("Package: demo\nVersion: 0.1.0\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libraryPath, "demo", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(NAMESPACE) error = %v", err)
+	}
+
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:       cacheRoot,
+			SharedStoreRoot: sharedStoreRoot,
+			LibraryPath:     libraryPath,
+			Runtime:         runtime,
+		},
+		planned: map[string]plannedPackage{"demo": pkg},
+		metaDir: metaDir,
+	}
+	if err := inst.syncPlannedPackageToStore("demo"); err != nil {
+		t.Fatalf("syncPlannedPackageToStore() error = %v", err)
+	}
+
+	storeLib := packageStorePathForPlanned(sharedStoreRoot, pkg, runtime)
+	if _, err := os.Stat(filepath.Join(storeLib, "demo", "DESCRIPTION")); err != nil {
+		t.Fatalf("Stat(shared store DESCRIPTION) error = %v", err)
+	}
+}
+
+func TestSeedPlannedPackagesFromStoreWarnsWhenLastUsedUpdateFails(t *testing.T) {
+	originalTouch := packageStoreTouchLastUsed
+	packageStoreTouchLastUsed = func(storeLibrary string, pkg plannedPackage, runtime Runtime, when time.Time) error {
+		return errors.New("touch failed")
+	}
+	t.Cleanup(func() {
+		packageStoreTouchLastUsed = originalTouch
+	})
+
+	cacheRoot := t.TempDir()
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
+	storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
+	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
+	for _, path := range []string{
+		filepath.Join(storeLib, "cli"),
+		targetLib,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "cli", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(NAMESPACE) error = %v", err)
+	}
+
+	var events []eventstream.Event
+	var stderr bytes.Buffer
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: targetLib,
+			Runtime:     runtime,
+			Events: func(evt eventstream.Event) {
+				events = append(events, evt)
+			},
+		},
+		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
+		stderr:            &stderr,
+		planned:           map[string]plannedPackage{"cli": pkg},
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.seedPlannedPackagesFromStore(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromStore() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetLib, "cli", "DESCRIPTION")); err != nil {
+		t.Fatalf("Stat(copied DESCRIPTION) error = %v", err)
+	}
+	if !strings.Contains(stderr.String(), "warning: shared package store last_used update failed for cli: touch failed") {
+		t.Fatalf("stderr = %q, want shared store warning", stderr.String())
+	}
+	if len(events) != 1 || events[0].Kind != "shared_store_warning" || events[0].Package != "cli" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestSeedPlannedPackagesFromStoreWarnsAndSkipsBrokenStoreEntry(t *testing.T) {
+	cacheRoot := t.TempDir()
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
+	storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
+	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
+	for _, path := range []string{
+		filepath.Join(storeLib, "cli"),
+		targetLib,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, PackageStoreStateFile), []byte("{bad-json}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(broken package store state) error = %v", err)
+	}
+
+	var events []eventstream.Event
+	var stderr bytes.Buffer
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: targetLib,
+			Runtime:     runtime,
+			Events: func(evt eventstream.Event) {
+				events = append(events, evt)
+			},
+		},
+		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
+		stderr:            &stderr,
+		planned:           map[string]plannedPackage{"cli": pkg},
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.seedPlannedPackagesFromStore(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromStore() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetLib, "cli", "DESCRIPTION")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("target package should not be materialized from broken store, stat err = %v", err)
+	}
+	if !strings.Contains(stderr.String(), "warning: shared package store lookup failed for cli:") {
+		t.Fatalf("stderr = %q, want shared store warning", stderr.String())
+	}
+	if len(events) != 1 || events[0].Kind != "shared_store_warning" || events[0].Fields["operation"] != "lookup" {
+		t.Fatalf("events = %#v", events)
+	}
+	if len(inst.installedPackages) != 0 {
+		t.Fatalf("installedPackages = %#v, want empty after broken store skip", inst.installedPackages)
+	}
+}
+
+func TestSeedPlannedPackagesFromStoreFallsBackToCacheWhenStoreEntryIsBroken(t *testing.T) {
+	cacheRoot := t.TempDir()
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
+	storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, runtime)
+	sourceLib := filepath.Join(cacheRoot, "lib", "aaaaaaaaaaaaaaaa")
+	targetLib := filepath.Join(cacheRoot, "lib", "bbbbbbbbbbbbbbbb")
+	for _, path := range []string{
+		filepath.Join(storeLib, "cli"),
+		filepath.Join(sourceLib, "cli"),
+		targetLib,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(store DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeLib, PackageStoreStateFile), []byte("{bad-json}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(broken package store state) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceLib, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(cache DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceLib, "cli", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(cache NAMESPACE) error = %v", err)
+	}
+
+	var stderr bytes.Buffer
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:   cacheRoot,
+			LibraryPath: targetLib,
+			Runtime:     runtime,
+		},
+		metaDir:           filepath.Join(targetLib, ".rs-source-meta"),
+		stderr:            &stderr,
+		planned:           map[string]plannedPackage{"cli": pkg},
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.seedPlannedPackagesFromStore(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromStore() error = %v", err)
+	}
+	if err := inst.seedPlannedPackagesFromCache(); err != nil {
+		t.Fatalf("seedPlannedPackagesFromCache() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(targetLib, "cli", "DESCRIPTION")); err != nil {
+		t.Fatalf("target package should be materialized from sibling cache, stat err = %v", err)
+	}
+	if !strings.Contains(stderr.String(), "warning: shared package store lookup failed for cli:") {
+		t.Fatalf("stderr = %q, want shared store warning", stderr.String())
+	}
+	if got := inst.installedPackages["cli"]; got.Version != "3.6.5" {
+		t.Fatalf("installedPackages[cli] = %#v", got)
 	}
 }
 
@@ -2045,17 +2508,147 @@ func TestRecordPlannedPackagesInstalledSyncsBatchToStore(t *testing.T) {
 		if inst.installedPackages[name].Version != "1.0.0" {
 			t.Fatalf("installedPackages[%s] = %#v", name, inst.installedPackages[name])
 		}
-		storeLib := packageStorePathForPlanned(cacheRoot, inst.planned[name], runtime)
+		storeLib := packageStorePathForPlanned(packageStoreRoot(cacheRoot), inst.planned[name], runtime)
 		if _, err := os.Stat(filepath.Join(storeLib, name, "DESCRIPTION")); err != nil {
 			t.Fatalf("Stat(store %s DESCRIPTION) error = %v", name, err)
 		}
 	}
 }
 
+func TestRecordPlannedPackagesInstalledWarnsWhenSharedStoreSyncFails(t *testing.T) {
+	cacheRoot := t.TempDir()
+	blockedRoot := filepath.Join(cacheRoot, "blocked-root")
+	if err := os.WriteFile(blockedRoot, []byte("blocked"), 0o644); err != nil {
+		t.Fatalf("WriteFile(blocked root) error = %v", err)
+	}
+	sharedStoreRoot := filepath.Join(blockedRoot, "pkgstore")
+	libraryPath := filepath.Join(cacheRoot, "lib", "current")
+	metaDir := filepath.Join(libraryPath, ".rs-source-meta")
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	for _, path := range []string{
+		filepath.Join(libraryPath, "demo"),
+		metaDir,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(libraryPath, "demo", "DESCRIPTION"), []byte("Package: demo\nVersion: 1.0.0\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libraryPath, "demo", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(NAMESPACE) error = %v", err)
+	}
+
+	var events []eventstream.Event
+	var stderr bytes.Buffer
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:       cacheRoot,
+			SharedStoreRoot: sharedStoreRoot,
+			LibraryPath:     libraryPath,
+			Runtime:         runtime,
+			Events: func(evt eventstream.Event) {
+				events = append(events, evt)
+			},
+		},
+		planned: map[string]plannedPackage{
+			"demo": {Name: "demo", Version: "1.0.0", Source: sourceCRAN},
+		},
+		metaDir:           metaDir,
+		stderr:            &stderr,
+		installedPackages: map[string]installedPackage{},
+	}
+	if err := inst.recordPlannedPackagesInstalled([]string{"demo"}); err != nil {
+		t.Fatalf("recordPlannedPackagesInstalled() error = %v", err)
+	}
+	if got := inst.installedPackages["demo"]; got.Version != "1.0.0" {
+		t.Fatalf("installedPackages[demo] = %#v", got)
+	}
+	if !strings.Contains(stderr.String(), "warning: shared package store lookup failed for demo:") {
+		t.Fatalf("stderr = %q, want shared store warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "warning: shared package store create entry failed for demo:") {
+		t.Fatalf("stderr = %q, want shared store create warning", stderr.String())
+	}
+	if len(events) != 2 ||
+		events[0].Kind != "shared_store_warning" ||
+		events[0].Fields["operation"] != "lookup" ||
+		events[1].Kind != "shared_store_warning" ||
+		events[1].Fields["operation"] != "create entry" {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
+func TestFinalizePendingStoreSyncsIgnoresSharedStoreSyncWarnings(t *testing.T) {
+	cacheRoot := t.TempDir()
+	blockedRoot := filepath.Join(cacheRoot, "blocked-root")
+	if err := os.WriteFile(blockedRoot, []byte("blocked"), 0o644); err != nil {
+		t.Fatalf("WriteFile(blocked root) error = %v", err)
+	}
+	libraryPath := filepath.Join(cacheRoot, "lib", "current")
+	metaDir := filepath.Join(libraryPath, ".rs-source-meta")
+	runtime := Runtime{
+		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
+		InterpreterKind: "managed",
+		RVersion:        "4.4.3",
+		Platform:        "x86_64-pc-linux-gnu",
+		Arch:            "x86_64",
+		OS:              "linux-gnu",
+		PackageType:     "source",
+	}
+	for _, path := range []string{
+		filepath.Join(libraryPath, "demo"),
+		metaDir,
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(libraryPath, "demo", "DESCRIPTION"), []byte("Package: demo\nVersion: 1.0.0\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(libraryPath, "demo", "NAMESPACE"), []byte("exportPattern(\"^[[:alpha:]]+\")\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(NAMESPACE) error = %v", err)
+	}
+
+	var stderr bytes.Buffer
+	inst := nativeInstaller{
+		req: Request{
+			CacheRoot:       cacheRoot,
+			SharedStoreRoot: filepath.Join(blockedRoot, "pkgstore"),
+			LibraryPath:     libraryPath,
+			Runtime:         runtime,
+		},
+		planned: map[string]plannedPackage{
+			"demo": {Name: "demo", Version: "1.0.0", Source: sourceCRAN},
+		},
+		metaDir:           metaDir,
+		stderr:            &stderr,
+		installedPackages: map[string]installedPackage{"demo": {Name: "demo", Version: "1.0.0", Source: sourceCRAN}},
+	}
+
+	done := inst.startSyncPlannedPackagesToStore([]string{"demo"})
+	if err := finalizePendingStoreSyncs(&stderr, []<-chan error{done}); err != nil {
+		t.Fatalf("finalizePendingStoreSyncs() error = %v", err)
+	}
+	if !strings.Contains(stderr.String(), "finalizing managed package cache") || !strings.Contains(stderr.String(), "warning: shared package store lookup failed for demo:") {
+		t.Fatalf("stderr = %q, want finalization stage and warning", stderr.String())
+	}
+}
+
 func TestPackageStorePathForPlannedIncludesRuntimeIdentity(t *testing.T) {
 	cacheRoot := t.TempDir()
 	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
-	first := packageStorePathForPlanned(cacheRoot, pkg, Runtime{
+	first := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, Runtime{
 		Interpreter:     "/opt/demo/R/4.4.3/bin/Rscript",
 		InterpreterKind: "managed",
 		RVersion:        "4.4.3",
@@ -2064,7 +2657,7 @@ func TestPackageStorePathForPlannedIncludesRuntimeIdentity(t *testing.T) {
 		OS:              "linux-gnu",
 		PackageType:     "source",
 	})
-	second := packageStorePathForPlanned(cacheRoot, pkg, Runtime{
+	second := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, Runtime{
 		Interpreter:     "/opt/other/R/4.4.3/bin/Rscript",
 		InterpreterKind: "external-conda",
 		RVersion:        "4.4.3",
@@ -2081,7 +2674,7 @@ func TestPackageStorePathForPlannedIncludesRuntimeIdentity(t *testing.T) {
 func TestPackageStorePathForPlannedNormalizesManagedInterpreterIdentity(t *testing.T) {
 	cacheRoot := t.TempDir()
 	pkg := plannedPackage{Name: "cli", Version: "3.6.5", Source: sourceCRAN}
-	first := packageStorePathForPlanned(cacheRoot, pkg, Runtime{
+	first := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, Runtime{
 		Interpreter:     "/opt/rs-a/versions/4.5.3-linux-amd64/bin/Rscript",
 		InterpreterKind: "managed",
 		RVersion:        "4.5.3",
@@ -2090,7 +2683,7 @@ func TestPackageStorePathForPlannedNormalizesManagedInterpreterIdentity(t *testi
 		OS:              "linux-gnu",
 		PackageType:     "source",
 	})
-	second := packageStorePathForPlanned(cacheRoot, pkg, Runtime{
+	second := packageStorePathForPlanned(packageStoreRoot(cacheRoot), pkg, Runtime{
 		Interpreter:     "/other/root/versions/4.5.3-linux-amd64/bin/Rscript",
 		InterpreterKind: "managed",
 		RVersion:        "4.5.3",

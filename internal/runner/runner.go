@@ -907,21 +907,22 @@ type ListSource struct {
 }
 
 type pruneSummary struct {
-	CacheRoot    string
-	Kept         []string
-	Removed      []string
-	KeptStore    []string
-	RemovedStore []string
+	CacheRoot string
+	Kept      []string
+	Removed   []string
+	Warnings  []string
 }
 
 type CacheListReport struct {
-	CacheRoot            string            `json:"cache_root"`
-	Libraries            []CacheLibrary    `json:"libraries"`
-	PackageStore         []CacheStoreEntry `json:"package_store,omitempty"`
-	PackageStorePackages int               `json:"package_store_packages,omitempty"`
-	PackageStoreBytes    int64             `json:"package_store_bytes,omitempty"`
-	Scope                string            `json:"scope,omitempty"`
-	ProjectDir           string            `json:"project_dir,omitempty"`
+	CacheRoot              string            `json:"cache_root"`
+	SharedPackageStoreRoot string            `json:"shared_package_store_root"`
+	Libraries              []CacheLibrary    `json:"libraries"`
+	PackageStore           []CacheStoreEntry `json:"package_store,omitempty"`
+	PackageStorePackages   int               `json:"package_store_packages,omitempty"`
+	PackageStoreBytes      int64             `json:"package_store_bytes,omitempty"`
+	Warnings               []string          `json:"warnings,omitempty"`
+	Scope                  string            `json:"scope,omitempty"`
+	ProjectDir             string            `json:"project_dir,omitempty"`
 }
 
 type CacheLibrary struct {
@@ -1593,20 +1594,16 @@ func Prune(opts PruneOptions) error {
 		_ = projectRoot
 	}
 
-	if len(keepByCacheRoot) == 0 {
-		fmt.Fprintln(opts.Stdout, "[ok] no managed libraries to prune")
-		return nil
-	}
-
 	cacheRoots := make([]string, 0, len(keepByCacheRoot))
 	for cacheRoot := range keepByCacheRoot {
 		cacheRoots = append(cacheRoots, cacheRoot)
 	}
 	slices.Sort(cacheRoots)
 
-	totalRemoved := 0
+	totalRemovedLibraries := 0
+	totalRemovedStoreEntries := 0
 	for _, cacheRoot := range cacheRoots {
-		summary, err := pruneCacheRoot(cacheRoot, keepByCacheRoot[cacheRoot], opts.DryRun, opts.PackageStoreRetentionDays)
+		summary, err := pruneCacheRoot(cacheRoot, keepByCacheRoot[cacheRoot], opts.DryRun)
 		if err != nil {
 			return err
 		}
@@ -1620,21 +1617,34 @@ func Prune(opts PruneOptions) error {
 			} else {
 				fmt.Fprintf(opts.Stdout, "[remove] %s\n", removed)
 			}
-			totalRemoved++
+			totalRemovedLibraries++
 		}
-		for _, kept := range summary.KeptStore {
+	}
+
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	if sharedStoreRoot != "" {
+		storeSummary, err := prunePackageStoreRoot(sharedStoreRoot, opts.DryRun, opts.PackageStoreRetentionDays)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(opts.Stdout, "[info] shared package store root: %s\n", sharedStoreRoot)
+		for _, warning := range storeSummary.Warnings {
+			fmt.Fprintf(opts.Stdout, "[warn] %s\n", warning)
+		}
+		for _, kept := range storeSummary.Kept {
 			fmt.Fprintf(opts.Stdout, "[keep-store] %s\n", kept)
 		}
-		for _, removed := range summary.RemovedStore {
+		for _, removed := range storeSummary.Removed {
 			if opts.DryRun {
 				fmt.Fprintf(opts.Stdout, "[dry-run] would remove store entry %s\n", removed)
 			} else {
 				fmt.Fprintf(opts.Stdout, "[remove-store] %s\n", removed)
 			}
-			totalRemoved++
+			totalRemovedStoreEntries++
 		}
 	}
 
+	totalRemoved := totalRemovedLibraries + totalRemovedStoreEntries
 	if totalRemoved == 0 {
 		if opts.DryRun {
 			fmt.Fprintln(opts.Stdout, "[ok] prune found nothing to remove")
@@ -1644,9 +1654,9 @@ func Prune(opts PruneOptions) error {
 		return nil
 	}
 	if opts.DryRun {
-		fmt.Fprintf(opts.Stdout, "[ok] prune would remove %d managed librar", totalRemoved)
+		fmt.Fprintf(opts.Stdout, "[ok] prune would remove %d cache entr", totalRemoved)
 	} else {
-		fmt.Fprintf(opts.Stdout, "[ok] prune removed %d managed librar", totalRemoved)
+		fmt.Fprintf(opts.Stdout, "[ok] prune removed %d cache entr", totalRemoved)
 	}
 	if totalRemoved == 1 {
 		fmt.Fprintln(opts.Stdout, "y")
@@ -1717,16 +1727,19 @@ func CacheList(opts CacheListOptions) error {
 	if err != nil {
 		return err
 	}
-	storeEntries, err := listPackageStoreEntries(cacheRoot)
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	storeEntries, warnings, err := listPackageStoreEntries(sharedStoreRoot)
 	if err != nil {
 		return err
 	}
 	report := CacheListReport{
-		CacheRoot:            cacheRoot,
-		Libraries:            libs,
-		PackageStore:         storeEntries,
-		PackageStorePackages: cacheStorePackageCount(storeEntries),
-		PackageStoreBytes:    cacheStoreSizeBytes(storeEntries),
+		CacheRoot:              cacheRoot,
+		SharedPackageStoreRoot: sharedStoreRoot,
+		Libraries:              libs,
+		PackageStore:           storeEntries,
+		PackageStorePackages:   cacheStorePackageCount(storeEntries),
+		PackageStoreBytes:      cacheStoreSizeBytes(storeEntries),
+		Warnings:               warnings,
 	}
 	if scopeLabel != "" {
 		report.Scope = scopeLabel
@@ -1745,6 +1758,10 @@ func CacheList(opts CacheListOptions) error {
 	}
 
 	fmt.Fprintf(opts.Stdout, "cache root: %s\n", report.CacheRoot)
+	fmt.Fprintf(opts.Stdout, "shared package store root: %s\n", report.SharedPackageStoreRoot)
+	for _, warning := range report.Warnings {
+		fmt.Fprintf(opts.Stdout, "[warn] %s\n", warning)
+	}
 	if projectConfig != "" {
 		fmt.Fprintf(opts.Stdout, "project config: %s\n", projectConfig)
 	}
@@ -1815,7 +1832,11 @@ func CacheRemove(opts CacheRemoveOptions) error {
 		return fmt.Errorf("stat %s: %w", targetLabel, err)
 	}
 
-	fmt.Fprintf(opts.Stdout, "[info] cache root: %s\n", cacheRoot)
+	if targetLabel == "package store entry" {
+		fmt.Fprintf(opts.Stdout, "[info] shared package store root: %s\n", cacheRoot)
+	} else {
+		fmt.Fprintf(opts.Stdout, "[info] cache root: %s\n", cacheRoot)
+	}
 	if opts.DryRun {
 		fmt.Fprintf(opts.Stdout, "[dry-run] would remove %s\n", targetPath)
 		fmt.Fprintf(opts.Stdout, "[ok] cache rm would remove 1 %s\n", targetLabel)
@@ -3795,13 +3816,11 @@ func collectKeepByCacheRoot(scriptPath, projectDir string) (map[string]map[strin
 	return keepByCacheRoot, "project " + projectCfg.RootDir, projectCfg.RootDir, projectCfg.Path, len(scriptPaths), nil
 }
 
-func pruneCacheRoot(cacheRoot string, keep map[string]struct{}, dryRun bool, retentionDays int) (pruneSummary, error) {
+func pruneCacheRoot(cacheRoot string, keep map[string]struct{}, dryRun bool) (pruneSummary, error) {
 	summary := pruneSummary{
-		CacheRoot:    cacheRoot,
-		Kept:         []string{},
-		Removed:      []string{},
-		KeptStore:    []string{},
-		RemovedStore: []string{},
+		CacheRoot: cacheRoot,
+		Kept:      []string{},
+		Removed:   []string{},
 	}
 	libRoot := filepath.Join(cacheRoot, "lib")
 	entries, err := os.ReadDir(libRoot)
@@ -3829,23 +3848,20 @@ func pruneCacheRoot(cacheRoot string, keep map[string]struct{}, dryRun bool, ret
 
 	slices.Sort(summary.Kept)
 	slices.Sort(summary.Removed)
-	storeSummary, err := prunePackageStoreRoot(cacheRoot, dryRun, retentionDays)
-	if err != nil {
-		return summary, err
-	}
-	summary.KeptStore = storeSummary.Kept
-	summary.RemovedStore = storeSummary.Removed
 	return summary, nil
 }
 
-func prunePackageStoreRoot(cacheRoot string, dryRun bool, retentionDays int) (pruneSummary, error) {
+func prunePackageStoreRoot(storeRoot string, dryRun bool, retentionDays int) (pruneSummary, error) {
 	summary := pruneSummary{
-		CacheRoot: cacheRoot,
+		CacheRoot: storeRoot,
 		Kept:      []string{},
 		Removed:   []string{},
+		Warnings:  []string{},
+	}
+	if strings.TrimSpace(storeRoot) == "" {
+		return summary, nil
 	}
 	cutoff := time.Now().UTC().Add(-packageStoreRetentionDuration(retentionDays))
-	storeRoot := filepath.Join(cacheRoot, "pkgstore")
 	entries, err := os.ReadDir(storeRoot)
 	if errors.Is(err, os.ErrNotExist) {
 		return summary, nil
@@ -3861,7 +3877,8 @@ func prunePackageStoreRoot(cacheRoot string, dryRun bool, retentionDays int) (pr
 		path := filepath.Join(storeRoot, entry.Name())
 		info, err := inspectPackageStoreEntry(path)
 		if err != nil {
-			return summary, fmt.Errorf("inspect package store entry %s: %w", path, err)
+			summary.Warnings = append(summary.Warnings, formatSharedStoreEntryWarning(path, err))
+			continue
 		}
 		if info.PackageCount > 0 && (info.LastUsedAt.IsZero() || !info.LastUsedAt.Before(cutoff)) {
 			summary.Kept = append(summary.Kept, path)
@@ -3877,6 +3894,7 @@ func prunePackageStoreRoot(cacheRoot string, dryRun bool, retentionDays int) (pr
 
 	slices.Sort(summary.Kept)
 	slices.Sort(summary.Removed)
+	slices.Sort(summary.Warnings)
 	return summary, nil
 }
 
@@ -3909,14 +3927,16 @@ func listManagedLibraries(cacheRoot string, active map[string]struct{}) ([]Cache
 	return out, nil
 }
 
-func listPackageStoreEntries(cacheRoot string) ([]CacheStoreEntry, error) {
-	storeRoot := filepath.Join(cacheRoot, "pkgstore")
+func listPackageStoreEntries(storeRoot string) ([]CacheStoreEntry, []string, error) {
+	if strings.TrimSpace(storeRoot) == "" {
+		return []CacheStoreEntry{}, []string{}, nil
+	}
 	entries, err := os.ReadDir(storeRoot)
 	if errors.Is(err, os.ErrNotExist) {
-		return []CacheStoreEntry{}, nil
+		return []CacheStoreEntry{}, []string{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read package store: %w", err)
+		return nil, nil, fmt.Errorf("read package store: %w", err)
 	}
 
 	type sortableStoreEntry struct {
@@ -3925,6 +3945,7 @@ func listPackageStoreEntries(cacheRoot string) ([]CacheStoreEntry, error) {
 		updated  time.Time
 	}
 	out := make([]sortableStoreEntry, 0, len(entries))
+	warnings := make([]string, 0, 1)
 	for _, entry := range entries {
 		if !entry.IsDir() || !isPackageStoreDir(entry.Name()) {
 			continue
@@ -3932,7 +3953,8 @@ func listPackageStoreEntries(cacheRoot string) ([]CacheStoreEntry, error) {
 		path := filepath.Join(storeRoot, entry.Name())
 		info, err := inspectPackageStoreEntry(path)
 		if err != nil {
-			return nil, fmt.Errorf("inspect package store entry %s: %w", path, err)
+			warnings = append(warnings, formatSharedStoreEntryWarning(path, err))
+			continue
 		}
 		out = append(out, sortableStoreEntry{
 			entry: CacheStoreEntry{
@@ -3960,7 +3982,12 @@ func listPackageStoreEntries(cacheRoot string) ([]CacheStoreEntry, error) {
 	for _, entry := range out {
 		entriesOut = append(entriesOut, entry.entry)
 	}
-	return entriesOut, nil
+	slices.Sort(warnings)
+	return entriesOut, warnings, nil
+}
+
+func formatSharedStoreEntryWarning(path string, err error) string {
+	return fmt.Sprintf("shared package store entry skipped: %s (%v)", path, err)
 }
 
 func isManagedLibraryDir(name string) bool {
@@ -4179,14 +4206,15 @@ func resolveCacheTarget(opts CacheRemoveOptions) (string, string, string, error)
 		}
 	}
 
-	cacheRoot, err := resolveCacheRootForLookup(opts.CacheDir, opts.ScriptPath, opts.ProjectDir)
-	if err != nil {
-		return "", "", "", err
-	}
 	if isManagedLibraryDir(target) {
+		cacheRoot, err := resolveCacheRootForLookup(opts.CacheDir, opts.ScriptPath, opts.ProjectDir)
+		if err != nil {
+			return "", "", "", err
+		}
 		return filepath.Join(cacheRoot, "lib", target), cacheRoot, "managed library", nil
 	}
-	return filepath.Join(cacheRoot, "pkgstore", target), cacheRoot, "package store entry", nil
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	return filepath.Join(sharedStoreRoot, target), sharedStoreRoot, "package store entry", nil
 }
 
 func resolveCacheRootForLookup(cacheDirOverride, scriptPath, projectDir string) (string, error) {
@@ -4626,6 +4654,14 @@ func resolveCacheRoot(override string) (string, error) {
 	return cacheDir, nil
 }
 
+func resolveSharedPackageStoreRoot() (string, error) {
+	cacheRoot, err := resolveCacheRoot("")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(cacheRoot, "pkgstore"), nil
+}
+
 func predictedCacheRoot(override string) string {
 	if override != "" {
 		return override
@@ -4638,6 +4674,14 @@ func predictedCacheRoot(override string) string {
 		return ""
 	}
 	return filepath.Join(userCacheDir, "rs")
+}
+
+func predictedSharedPackageStoreRoot() string {
+	cacheRoot := predictedCacheRoot("")
+	if cacheRoot == "" {
+		return ""
+	}
+	return filepath.Join(cacheRoot, "pkgstore")
 }
 
 func resolveLibraryPath(cacheRoot, scriptPath string, cranDeps, biocDeps []string, sourceDeps map[string]project.SourceSpec, repo string, runtime RuntimeMetadata) (string, error) {
@@ -4899,6 +4943,10 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 	if err != nil {
 		return installer.Request{}, err
 	}
+	sharedStoreRoot, err := resolveSharedPackageStoreRoot()
+	if err != nil {
+		return installer.Request{}, err
+	}
 	effectivePrefixes, effectivePkgConfig, detectedToolchain, err := effectiveToolchainConfig(env.ToolchainPrefixes, env.PkgConfigPath)
 	if err != nil {
 		return installer.Request{}, err
@@ -4914,13 +4962,14 @@ func installerRequestFromEnvironment(env ResolvedEnvironment, stdout, stderr io.
 		sourceDeps[name] = spec
 	}
 	return installer.Request{
-		Interpreter: env.Interpreter,
-		ScriptPath:  env.ScriptPath,
-		WorkDir:     filepath.Dir(env.ScriptPath),
-		CacheRoot:   env.CacheRoot,
-		LibraryPath: env.LibraryPath,
-		Repo:        env.Repo,
-		Verbose:     env.Verbose,
+		Interpreter:     env.Interpreter,
+		ScriptPath:      env.ScriptPath,
+		WorkDir:         filepath.Dir(env.ScriptPath),
+		CacheRoot:       env.CacheRoot,
+		SharedStoreRoot: sharedStoreRoot,
+		LibraryPath:     env.LibraryPath,
+		Repo:            env.Repo,
+		Verbose:         env.Verbose,
 		Environment: toolchainenv.ApplyWithPlan(
 			os.Environ(),
 			effectivePrefixes,

@@ -5222,7 +5222,7 @@ func TestPruneCacheRootDryRun(t *testing.T) {
 		}
 	}
 
-	summary, err := pruneCacheRoot(cacheRoot, map[string]struct{}{keep: {}}, true, -1)
+	summary, err := pruneCacheRoot(cacheRoot, map[string]struct{}{keep: {}}, true)
 	if err != nil {
 		t.Fatalf("pruneCacheRoot() error = %v", err)
 	}
@@ -5254,12 +5254,12 @@ func TestPruneCacheRootRemovesEmptyPackageStoreEntry(t *testing.T) {
 		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
 	}
 
-	summary, err := pruneCacheRoot(cacheRoot, nil, false, -1)
+	summary, err := prunePackageStoreRoot(storeRoot, false, -1)
 	if err != nil {
-		t.Fatalf("pruneCacheRoot() error = %v", err)
+		t.Fatalf("prunePackageStoreRoot() error = %v", err)
 	}
-	if !slices.Contains(summary.KeptStore, keep) || !slices.Contains(summary.RemovedStore, remove) {
-		t.Fatalf("pruneCacheRoot() store summary = %#v", summary)
+	if !slices.Contains(summary.Kept, keep) || !slices.Contains(summary.Removed, remove) {
+		t.Fatalf("prunePackageStoreRoot() summary = %#v", summary)
 	}
 	if _, err := os.Stat(remove); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("empty package store entry should be removed, stat err = %v", err)
@@ -5311,15 +5311,65 @@ func TestPruneCacheRootRemovesExpiredPackageStoreEntry(t *testing.T) {
 		}
 	}
 
-	summary, err := pruneCacheRoot(cacheRoot, nil, false, -1)
+	summary, err := prunePackageStoreRoot(storeRoot, false, -1)
 	if err != nil {
-		t.Fatalf("pruneCacheRoot() error = %v", err)
+		t.Fatalf("prunePackageStoreRoot() error = %v", err)
 	}
-	if !slices.Contains(summary.KeptStore, keep) || !slices.Contains(summary.RemovedStore, remove) {
-		t.Fatalf("pruneCacheRoot() store summary = %#v", summary)
+	if !slices.Contains(summary.Kept, keep) || !slices.Contains(summary.Removed, remove) {
+		t.Fatalf("prunePackageStoreRoot() summary = %#v", summary)
 	}
 	if _, err := os.Stat(remove); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("expired package store entry should be removed, stat err = %v", err)
+	}
+}
+
+func TestPrunePackageStoreRootSkipsBrokenEntry(t *testing.T) {
+	cacheRoot := t.TempDir()
+	storeRoot := filepath.Join(cacheRoot, "pkgstore")
+	keep := filepath.Join(storeRoot, strings.Repeat("e", 64))
+	broken := filepath.Join(storeRoot, strings.Repeat("f", 64))
+	for _, path := range []string{
+		filepath.Join(keep, "cli"),
+		filepath.Join(broken, "glue"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+		}
+	}
+	state := installer.PackageStoreState{
+		Package:         "cli",
+		Version:         "3.6.5",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       time.Now().UTC().Format(time.RFC3339),
+		LastUsedAt:      time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(keep, installer.PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile(package store state) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(broken, installer.PackageStoreStateFile), []byte("{not-json}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(broken package store state) error = %v", err)
+	}
+
+	summary, err := prunePackageStoreRoot(storeRoot, false, -1)
+	if err != nil {
+		t.Fatalf("prunePackageStoreRoot() error = %v", err)
+	}
+	if !slices.Contains(summary.Kept, keep) {
+		t.Fatalf("prunePackageStoreRoot() kept = %#v, want %s", summary.Kept, keep)
+	}
+	if len(summary.Warnings) != 1 || !strings.Contains(summary.Warnings[0], broken) {
+		t.Fatalf("prunePackageStoreRoot() warnings = %#v, want broken entry warning", summary.Warnings)
+	}
+	if _, err := os.Stat(broken); err != nil {
+		t.Fatalf("broken entry should be skipped, stat err = %v", err)
 	}
 }
 
@@ -5377,6 +5427,120 @@ func TestPruneProject(t *testing.T) {
 	}
 }
 
+func TestPruneProjectAlsoPrunesSharedPackageStore(t *testing.T) {
+	dir := t.TempDir()
+	rsHome := filepath.Join(dir, "rs-home")
+	t.Setenv("RS_HOME", rsHome)
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(scripts) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("cache_dir = \".rs-cache\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rs.toml) error = %v", err)
+	}
+	scriptPath := filepath.Join(dir, "scripts", "a.R")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a.R) error = %v", err)
+	}
+
+	plan, err := resolveDependencyPlan(scriptPath, nil, nil, nil, "", "", "")
+	if err != nil {
+		t.Fatalf("resolveDependencyPlan() error = %v", err)
+	}
+	if err := os.MkdirAll(plan.LibraryPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(active library) error = %v", err)
+	}
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	staleStore := filepath.Join(sharedStoreRoot, strings.Repeat("7", 64))
+	if err := os.MkdirAll(filepath.Join(staleStore, "jsonlite"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(stale store) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleStore, "jsonlite", "DESCRIPTION"), []byte("Package: jsonlite\nVersion: 1.8.8\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	state := installer.PackageStoreState{
+		Package:         "jsonlite",
+		Version:         "1.8.8",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       time.Now().UTC().Add(-45 * 24 * time.Hour).Format(time.RFC3339),
+		LastUsedAt:      time.Now().UTC().Add(-45 * 24 * time.Hour).Format(time.RFC3339),
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleStore, installer.PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile(package store state) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = Prune(PruneOptions{
+		ProjectDir: dir,
+		Stdout:     &stdout,
+		Stderr:     &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	if _, err := os.Stat(staleStore); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale shared store should be removed, stat err = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "[remove-store]") || !strings.Contains(stdout.String(), "shared package store root: "+sharedStoreRoot) {
+		t.Fatalf("Prune() output = %q, want shared store removal details", stdout.String())
+	}
+}
+
+func TestPruneProjectWarnsAndSkipsBrokenSharedPackageStoreEntry(t *testing.T) {
+	dir := t.TempDir()
+	rsHome := filepath.Join(dir, "rs-home")
+	t.Setenv("RS_HOME", rsHome)
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(scripts) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("cache_dir = \".rs-cache\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rs.toml) error = %v", err)
+	}
+	scriptPath := filepath.Join(dir, "scripts", "a.R")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a.R) error = %v", err)
+	}
+
+	plan, err := resolveDependencyPlan(scriptPath, nil, nil, nil, "", "", "")
+	if err != nil {
+		t.Fatalf("resolveDependencyPlan() error = %v", err)
+	}
+	if err := os.MkdirAll(plan.LibraryPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(active library) error = %v", err)
+	}
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	brokenStore := filepath.Join(sharedStoreRoot, strings.Repeat("8", 64))
+	if err := os.MkdirAll(filepath.Join(brokenStore, "jsonlite"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(broken store) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(brokenStore, "jsonlite", "DESCRIPTION"), []byte("Package: jsonlite\nVersion: 1.8.8\nRepository: CRAN\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(brokenStore, installer.PackageStoreStateFile), []byte("{bad-json}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(broken package store state) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = Prune(PruneOptions{
+		ProjectDir: dir,
+		Stdout:     &stdout,
+		Stderr:     &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("Prune() error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "[warn] shared package store entry skipped: "+brokenStore) {
+		t.Fatalf("Prune() output = %q, want broken entry warning", stdout.String())
+	}
+	if _, err := os.Stat(brokenStore); err != nil {
+		t.Fatalf("broken shared store entry should be skipped, stat err = %v", err)
+	}
+}
+
 func TestPruneCacheRootSupportsRetentionOverride(t *testing.T) {
 	cacheRoot := t.TempDir()
 	storeRoot := filepath.Join(cacheRoot, "pkgstore")
@@ -5403,12 +5567,12 @@ func TestPruneCacheRootSupportsRetentionOverride(t *testing.T) {
 		t.Fatalf("WriteFile(package store state) error = %v", err)
 	}
 
-	summary, err := pruneCacheRoot(cacheRoot, nil, false, 0)
+	summary, err := prunePackageStoreRoot(storeRoot, false, 0)
 	if err != nil {
-		t.Fatalf("pruneCacheRoot() error = %v", err)
+		t.Fatalf("prunePackageStoreRoot() error = %v", err)
 	}
-	if !slices.Contains(summary.RemovedStore, target) {
-		t.Fatalf("pruneCacheRoot() summary = %#v, want immediate removal under retention override", summary)
+	if !slices.Contains(summary.Removed, target) {
+		t.Fatalf("prunePackageStoreRoot() summary = %#v, want immediate removal under retention override", summary)
 	}
 	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("target should be removed, stat err = %v", err)
@@ -5431,6 +5595,8 @@ func TestCacheDirDefault(t *testing.T) {
 
 func TestCacheListProjectJSON(t *testing.T) {
 	dir := t.TempDir()
+	rsHome := filepath.Join(dir, "rs-home")
+	t.Setenv("RS_HOME", rsHome)
 	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(scripts) error = %v", err)
 	}
@@ -5448,8 +5614,9 @@ func TestCacheListProjectJSON(t *testing.T) {
 	}
 	activeLib := plan.LibraryPath
 	staleLib := filepath.Join(plan.CacheRoot, "lib", "aaaaaaaaaaaaaaaa")
-	storeHashRecent := filepath.Join(plan.CacheRoot, "pkgstore", strings.Repeat("c", 64))
-	storeHashOlder := filepath.Join(plan.CacheRoot, "pkgstore", strings.Repeat("d", 64))
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	storeHashRecent := filepath.Join(sharedStoreRoot, strings.Repeat("c", 64))
+	storeHashOlder := filepath.Join(sharedStoreRoot, strings.Repeat("d", 64))
 	storeEntryRecent := filepath.Join(storeHashRecent, "cli")
 	storeEntryOlder := filepath.Join(storeHashOlder, "glue")
 	for _, path := range []string{activeLib, staleLib} {
@@ -5518,6 +5685,9 @@ func TestCacheListProjectJSON(t *testing.T) {
 	if report.CacheRoot != plan.CacheRoot {
 		t.Fatalf("report.CacheRoot = %q, want %q", report.CacheRoot, plan.CacheRoot)
 	}
+	if report.SharedPackageStoreRoot != sharedStoreRoot {
+		t.Fatalf("report.SharedPackageStoreRoot = %q, want %q", report.SharedPackageStoreRoot, sharedStoreRoot)
+	}
 	if len(report.Libraries) != 2 {
 		t.Fatalf("report.Libraries = %#v", report.Libraries)
 	}
@@ -5545,6 +5715,9 @@ func TestCacheListProjectJSON(t *testing.T) {
 	if report.PackageStoreBytes != report.PackageStore[0].SizeBytes+report.PackageStore[1].SizeBytes {
 		t.Fatalf("report.PackageStoreBytes = %d, want sum of entries", report.PackageStoreBytes)
 	}
+	if len(report.Warnings) != 0 {
+		t.Fatalf("report.Warnings = %#v, want none", report.Warnings)
+	}
 
 	activeFound := false
 	staleFound := false
@@ -5561,8 +5734,91 @@ func TestCacheListProjectJSON(t *testing.T) {
 	}
 }
 
+func TestCacheListProjectJSONSkipsBrokenSharedStoreEntry(t *testing.T) {
+	dir := t.TempDir()
+	rsHome := filepath.Join(dir, "rs-home")
+	t.Setenv("RS_HOME", rsHome)
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(scripts) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("cache_dir = \".rs-cache\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rs.toml) error = %v", err)
+	}
+	scriptPath := filepath.Join(dir, "scripts", "a.R")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a.R) error = %v", err)
+	}
+
+	plan, err := resolveDependencyPlan(scriptPath, nil, nil, nil, "", "", "")
+	if err != nil {
+		t.Fatalf("resolveDependencyPlan() error = %v", err)
+	}
+	if err := os.MkdirAll(plan.LibraryPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(active library) error = %v", err)
+	}
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	goodHash := filepath.Join(sharedStoreRoot, strings.Repeat("c", 64))
+	badHash := filepath.Join(sharedStoreRoot, strings.Repeat("d", 64))
+	for _, path := range []string{
+		filepath.Join(goodHash, "cli"),
+		filepath.Join(badHash, "glue"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(goodHash, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(good DESCRIPTION) error = %v", err)
+	}
+	state := installer.PackageStoreState{
+		Package:         "cli",
+		Version:         "3.6.5",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       "2026-04-01T08:00:00Z",
+		LastUsedAt:      "2026-04-01T09:00:00Z",
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(goodHash, installer.PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile(good package store state) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badHash, "glue", "DESCRIPTION"), []byte("Package: glue\nVersion: 1.7.0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(bad DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badHash, installer.PackageStoreStateFile), []byte("{bad-json}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(bad package store state) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = CacheList(CacheListOptions{
+		ProjectDir: dir,
+		JSON:       true,
+		Stdout:     &stdout,
+		Stderr:     &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("CacheList() error = %v", err)
+	}
+
+	var report CacheListReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\noutput=%s", err, stdout.String())
+	}
+	if len(report.PackageStore) != 1 || report.PackageStore[0].Path != goodHash {
+		t.Fatalf("report.PackageStore = %#v, want only healthy entry", report.PackageStore)
+	}
+	if len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], badHash) {
+		t.Fatalf("report.Warnings = %#v, want broken entry warning", report.Warnings)
+	}
+}
+
 func TestCacheListProjectTextSummary(t *testing.T) {
 	dir := t.TempDir()
+	rsHome := filepath.Join(dir, "rs-home")
+	t.Setenv("RS_HOME", rsHome)
 	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(scripts) error = %v", err)
 	}
@@ -5579,7 +5835,8 @@ func TestCacheListProjectTextSummary(t *testing.T) {
 		t.Fatalf("resolveDependencyPlan() error = %v", err)
 	}
 	activeLib := plan.LibraryPath
-	storeHash := filepath.Join(plan.CacheRoot, "pkgstore", strings.Repeat("e", 64))
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	storeHash := filepath.Join(sharedStoreRoot, strings.Repeat("e", 64))
 	storeEntry := filepath.Join(storeHash, "cli")
 	if err := os.MkdirAll(activeLib, 0o755); err != nil {
 		t.Fatalf("MkdirAll(activeLib) error = %v", err)
@@ -5617,6 +5874,9 @@ func TestCacheListProjectTextSummary(t *testing.T) {
 	}
 
 	output := stdout.String()
+	if !strings.Contains(output, "shared package store root: "+sharedStoreRoot) {
+		t.Fatalf("CacheList() output = %q, want shared package store root", output)
+	}
 	if !strings.Contains(output, "package store summary: entries=1 packages=1") {
 		t.Fatalf("CacheList() output = %q, want package store summary", output)
 	}
@@ -5625,6 +5885,83 @@ func TestCacheListProjectTextSummary(t *testing.T) {
 	}
 	if !strings.Contains(output, "size=") {
 		t.Fatalf("CacheList() output = %q, want size field", output)
+	}
+}
+
+func TestCacheListProjectTextSummaryWarnsAndSkipsBrokenSharedStoreEntry(t *testing.T) {
+	dir := t.TempDir()
+	rsHome := filepath.Join(dir, "rs-home")
+	t.Setenv("RS_HOME", rsHome)
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(scripts) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rs.toml"), []byte("cache_dir = \".rs-cache\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(rs.toml) error = %v", err)
+	}
+	scriptPath := filepath.Join(dir, "scripts", "a.R")
+	if err := os.WriteFile(scriptPath, []byte("library(jsonlite)\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(a.R) error = %v", err)
+	}
+
+	plan, err := resolveDependencyPlan(scriptPath, nil, nil, nil, "", "", "")
+	if err != nil {
+		t.Fatalf("resolveDependencyPlan() error = %v", err)
+	}
+	if err := os.MkdirAll(plan.LibraryPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(activeLib) error = %v", err)
+	}
+	sharedStoreRoot := predictedSharedPackageStoreRoot()
+	goodHash := filepath.Join(sharedStoreRoot, strings.Repeat("e", 64))
+	badHash := filepath.Join(sharedStoreRoot, strings.Repeat("f", 64))
+	for _, path := range []string{
+		filepath.Join(goodHash, "cli"),
+		filepath.Join(badHash, "glue"),
+	} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", path, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(goodHash, "cli", "DESCRIPTION"), []byte("Package: cli\nVersion: 3.6.5\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(good DESCRIPTION) error = %v", err)
+	}
+	state := installer.PackageStoreState{
+		Package:         "cli",
+		Version:         "3.6.5",
+		Source:          "cran",
+		RuntimeIdentity: "managed:4.5.3-linux-amd64",
+		UpdatedAt:       "2026-04-01T08:00:00Z",
+		LastUsedAt:      "2026-04-01T09:00:00Z",
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(goodHash, installer.PackageStoreStateFile), append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("WriteFile(good package store state) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badHash, "glue", "DESCRIPTION"), []byte("Package: glue\nVersion: 1.7.0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(bad DESCRIPTION) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(badHash, installer.PackageStoreStateFile), []byte("{bad-json}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(bad package store state) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = CacheList(CacheListOptions{
+		ProjectDir: dir,
+		Stdout:     &stdout,
+		Stderr:     &bytes.Buffer{},
+	})
+	if err != nil {
+		t.Fatalf("CacheList() error = %v", err)
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "[warn] shared package store entry skipped: "+badHash) {
+		t.Fatalf("CacheList() output = %q, want broken entry warning", output)
+	}
+	if !strings.Contains(output, goodHash) || strings.Contains(output, badHash+" [") {
+		t.Fatalf("CacheList() output = %q, want only healthy entry listed", output)
 	}
 }
 
@@ -5680,7 +6017,9 @@ func TestCacheRemoveByPathDryRun(t *testing.T) {
 
 func TestCacheRemovePackageStoreByHash(t *testing.T) {
 	cacheRoot := t.TempDir()
-	target := filepath.Join(cacheRoot, "pkgstore", strings.Repeat("d", 64))
+	rsHome := filepath.Join(cacheRoot, "rs-home")
+	t.Setenv("RS_HOME", rsHome)
+	target := filepath.Join(predictedSharedPackageStoreRoot(), strings.Repeat("d", 64))
 	if err := os.MkdirAll(filepath.Join(target, "cli"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(target) error = %v", err)
 	}
@@ -5701,8 +6040,8 @@ func TestCacheRemovePackageStoreByHash(t *testing.T) {
 	if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("target should be removed, stat err = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "package store entry") {
-		t.Fatalf("CacheRemove() output = %q, want package store label", stdout.String())
+	if !strings.Contains(stdout.String(), "package store entry") || !strings.Contains(stdout.String(), "shared package store root") {
+		t.Fatalf("CacheRemove() output = %q, want package store label and shared root", stdout.String())
 	}
 }
 

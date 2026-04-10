@@ -65,6 +65,7 @@ var (
 	installerRunProgressCommand  = progresscmd.RunWithOptions
 	installerReadDescriptionFile = readDescriptionFromTarball
 	installerEnsureBuildTools    = ensurePackageBuildToolsForEnvironment
+	packageStoreTouchLastUsed    = touchPackageStoreLastUsed
 )
 
 type Runtime struct {
@@ -79,21 +80,22 @@ type Runtime struct {
 }
 
 type Request struct {
-	Interpreter string
-	ScriptPath  string
-	WorkDir     string
-	CacheRoot   string
-	LibraryPath string
-	Repo        string
-	Verbose     bool
-	Environment []string
-	Runtime     Runtime
-	CRANDeps    []string
-	BiocDeps    []string
-	SourceDeps  map[string]project.SourceSpec
-	Stdout      io.Writer
-	Stderr      io.Writer
-	Events      eventstream.Handler
+	Interpreter     string
+	ScriptPath      string
+	WorkDir         string
+	CacheRoot       string
+	SharedStoreRoot string
+	LibraryPath     string
+	Repo            string
+	Verbose         bool
+	Environment     []string
+	Runtime         Runtime
+	CRANDeps        []string
+	BiocDeps        []string
+	SourceDeps      map[string]project.SourceSpec
+	Stdout          io.Writer
+	Stderr          io.Writer
+	Events          eventstream.Handler
 }
 
 type nativeInstaller struct {
@@ -205,6 +207,27 @@ func (i *nativeInstaller) verbosef(format string, args ...any) {
 		return
 	}
 	i.notef(format, args...)
+}
+
+func (i *nativeInstaller) warnSharedStoreFailure(operation, pkg string, err error) error {
+	if err == nil {
+		return nil
+	}
+	message := "shared package store " + strings.TrimSpace(operation) + " failed"
+	if pkg = strings.TrimSpace(pkg); pkg != "" {
+		message += " for " + pkg
+	}
+	message += ": " + err.Error()
+	i.notef("warning: %s", message)
+	fields := map[string]string{
+		"operation": strings.TrimSpace(operation),
+		"error":     err.Error(),
+	}
+	if storeRoot := packageStoreRootForRequest(i.req); storeRoot != "" {
+		fields["store_root"] = storeRoot
+	}
+	i.emitEvent("shared_store_warning", message, pkg, 0, 0, 0, fields)
+	return nil
 }
 
 type plannedPackage struct {
@@ -642,6 +665,20 @@ func backgroundStoreSyncWaiter(stderr io.Writer, dones []<-chan error) func() er
 	}
 }
 
+func materializePlannedPackageMetadata(targetMetaDir, sourceLibrary string, pkg plannedPackage) error {
+	if pkg.Prepared != nil {
+		return writeSourceMetadata(targetMetaDir, pkg.Name, *pkg.Prepared)
+	}
+	return copyInstalledPackageMetadata(sourceLibrary, targetMetaDir, pkg.Name)
+}
+
+func installedPackageForMaterializedPlan(pkg plannedPackage, fallback installedPackage) installedPackage {
+	if pkg.Prepared != nil {
+		return installedPackageForPlanned(pkg)
+	}
+	return fallback
+}
+
 func (i *nativeInstaller) markPlannedPackageInstalled(name string) error {
 	pkg, ok := i.planned[name]
 	if !ok {
@@ -652,7 +689,8 @@ func (i *nativeInstaller) markPlannedPackageInstalled(name string) error {
 }
 
 func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
-	if len(i.planned) == 0 || strings.TrimSpace(i.req.CacheRoot) == "" || strings.TrimSpace(i.req.LibraryPath) == "" {
+	storeRoot := packageStoreRootForRequest(i.req)
+	if len(i.planned) == 0 || strings.TrimSpace(storeRoot) == "" || strings.TrimSpace(i.req.LibraryPath) == "" {
 		return nil
 	}
 
@@ -673,7 +711,7 @@ func (i *nativeInstaller) seedPlannedPackagesFromStore() error {
 		if i.isPlannedPackageInstalled(pkg) {
 			continue
 		}
-		storeLibrary := packageStorePathForPlanned(i.req.CacheRoot, pkg, i.req.Runtime)
+		storeLibrary := packageStorePathForPlanned(storeRoot, pkg, i.req.Runtime)
 		if strings.TrimSpace(storeLibrary) == "" {
 			continue
 		}
@@ -745,7 +783,7 @@ func (i *nativeInstaller) seedPlannedPackageFromStore(task storeSeedTask) storeS
 	result := storeSeedResult{name: task.name}
 	installedPkg, ok, err := loadInstalledPackageFromLibrary(task.storeLibrary, task.name)
 	if err != nil {
-		result.err = err
+		_ = i.warnSharedStoreFailure("lookup", task.name, err)
 		return result
 	}
 	if !ok || !plannedPackageMatchesInstalled(task.pkg, installedPkg) {
@@ -755,15 +793,14 @@ func (i *nativeInstaller) seedPlannedPackageFromStore(task storeSeedTask) storeS
 		result.err = err
 		return result
 	}
-	if err := copyInstalledPackageMetadata(task.storeLibrary, i.metaDir, task.name); err != nil {
+	if err := materializePlannedPackageMetadata(i.metaDir, task.storeLibrary, task.pkg); err != nil {
 		result.err = err
 		return result
 	}
-	if err := touchPackageStoreLastUsed(task.storeLibrary, task.pkg, i.req.Runtime, time.Now().UTC()); err != nil {
-		result.err = err
-		return result
+	if err := packageStoreTouchLastUsed(task.storeLibrary, task.pkg, i.req.Runtime, time.Now().UTC()); err != nil {
+		_ = i.warnSharedStoreFailure("last_used update", task.name, err)
 	}
-	result.installedPkg = installedPkg
+	result.installedPkg = installedPackageForMaterializedPlan(task.pkg, installedPkg)
 	result.reused = true
 	return result
 }
@@ -823,10 +860,10 @@ func (i *nativeInstaller) seedPlannedPackagesFromCache() error {
 			if err := copyInstalledPackage(result.path, i.req.LibraryPath, name); err != nil {
 				return err
 			}
-			if err := copyInstalledPackageMetadata(result.path, i.metaDir, name); err != nil {
+			if err := materializePlannedPackageMetadata(i.metaDir, result.path, pkg); err != nil {
 				return err
 			}
-			i.installedPackages[name] = installedPkg
+			i.installedPackages[name] = installedPackageForMaterializedPlan(pkg, installedPkg)
 			if err := i.syncPlannedPackageToStore(name); err != nil {
 				return err
 			}
@@ -927,36 +964,56 @@ func findReusablePackagesInLibrary(libraryPath string, remaining map[string]plan
 }
 
 func (i *nativeInstaller) syncPlannedPackageToStore(name string) error {
-	if strings.TrimSpace(i.req.CacheRoot) == "" || strings.TrimSpace(i.req.LibraryPath) == "" {
+	storeRoot := packageStoreRootForRequest(i.req)
+	if strings.TrimSpace(storeRoot) == "" || strings.TrimSpace(i.req.LibraryPath) == "" {
 		return nil
 	}
 	pkg, ok := i.planned[name]
 	if !ok {
 		return nil
 	}
-	storeLibrary := packageStorePathForPlanned(i.req.CacheRoot, pkg, i.req.Runtime)
+	storeLibrary := packageStorePathForPlanned(storeRoot, pkg, i.req.Runtime)
 	if strings.TrimSpace(storeLibrary) == "" {
 		return nil
 	}
 	now := time.Now().UTC()
 	if installedPkg, installed, err := loadInstalledPackageFromLibrary(storeLibrary, name); err != nil {
-		return err
+		_ = i.warnSharedStoreFailure("lookup", name, err)
 	} else if installed && plannedPackageMatchesInstalled(pkg, installedPkg) {
-		return touchPackageStoreLastUsed(storeLibrary, pkg, i.req.Runtime, now)
+		if err := packageStoreTouchLastUsed(storeLibrary, pkg, i.req.Runtime, now); err != nil {
+			return i.warnSharedStoreFailure("last_used update", name, err)
+		}
+		return nil
 	}
 	if err := os.MkdirAll(storeLibrary, 0o755); err != nil {
-		return fmt.Errorf("create package store dir for %s: %w", name, err)
+		return i.warnSharedStoreFailure("create entry", name, fmt.Errorf("create package store dir for %s: %w", name, err))
 	}
 	if err := copyInstalledPackage(i.req.LibraryPath, storeLibrary, name); err != nil {
-		return err
+		return i.warnSharedStoreFailure("sync package", name, err)
 	}
-	if err := copyInstalledPackageMetadata(i.req.LibraryPath, filepath.Join(storeLibrary, ".rs-source-meta"), name); err != nil {
-		return err
+	if pkg.Prepared != nil {
+		if err := writeSourceMetadata(filepath.Join(storeLibrary, ".rs-source-meta"), name, packageStorePreparedSource(*pkg.Prepared)); err != nil {
+			return i.warnSharedStoreFailure("write metadata", name, err)
+		}
+	} else {
+		if err := copyInstalledPackageMetadata(i.req.LibraryPath, filepath.Join(storeLibrary, ".rs-source-meta"), name); err != nil {
+			return i.warnSharedStoreFailure("write metadata", name, err)
+		}
 	}
-	return writePackageStoreState(storeLibrary, pkg, i.req.Runtime, PackageStoreState{
+	if err := writePackageStoreState(storeLibrary, pkg, i.req.Runtime, PackageStoreState{
 		UpdatedAt:  now.Format(time.RFC3339),
 		LastUsedAt: now.Format(time.RFC3339),
-	})
+	}); err != nil {
+		return i.warnSharedStoreFailure("write state", name, err)
+	}
+	return nil
+}
+
+func packageStoreRootForRequest(req Request) string {
+	if root := strings.TrimSpace(req.SharedStoreRoot); root != "" {
+		return filepath.Clean(root)
+	}
+	return packageStoreRoot(req.CacheRoot)
 }
 
 func packageStoreRoot(cacheRoot string) string {
@@ -966,9 +1023,9 @@ func packageStoreRoot(cacheRoot string) string {
 	return filepath.Join(cacheRoot, "pkgstore")
 }
 
-func packageStorePathForPlanned(cacheRoot string, pkg plannedPackage, runtime Runtime) string {
-	root := packageStoreRoot(cacheRoot)
-	if root == "" {
+func packageStorePathForPlanned(storeRoot string, pkg plannedPackage, runtime Runtime) string {
+	storeRoot = strings.TrimSpace(storeRoot)
+	if storeRoot == "" {
 		return ""
 	}
 	sum := sha256.New()
@@ -976,7 +1033,7 @@ func packageStorePathForPlanned(cacheRoot string, pkg plannedPackage, runtime Ru
 		_, _ = sum.Write([]byte(part))
 		_, _ = sum.Write([]byte{0})
 	}
-	return filepath.Join(root, hex.EncodeToString(sum.Sum(nil)))
+	return filepath.Join(storeRoot, hex.EncodeToString(sum.Sum(nil)))
 }
 
 func packageStoreIdentityParts(pkg plannedPackage, runtime Runtime) []string {
@@ -993,17 +1050,25 @@ func packageStoreIdentityParts(pkg plannedPackage, runtime Runtime) []string {
 		runtime.PackageType,
 	}
 	if pkg.Prepared != nil {
+		prepared := packageStorePreparedSource(*pkg.Prepared)
 		parts = append(parts,
-			pkg.Prepared.Host,
-			pkg.Prepared.Location,
-			pkg.Prepared.Ref,
-			pkg.Prepared.Commit,
-			pkg.Prepared.Subdir,
-			pkg.Prepared.Fingerprint,
-			pkg.Prepared.FingerprintKind,
+			prepared.Host,
+			prepared.Location,
+			prepared.Ref,
+			prepared.Commit,
+			prepared.Subdir,
+			prepared.Fingerprint,
+			prepared.FingerprintKind,
 		)
 	}
 	return parts
+}
+
+func packageStorePreparedSource(prepared preparedSource) preparedSource {
+	if prepared.Source == sourceLocal {
+		prepared.Location = ""
+	}
+	return prepared
 }
 
 func runtimeInterpreterIdentity(runtime Runtime) string {
@@ -1043,7 +1108,7 @@ func writePackageStoreState(storeLibrary string, pkg plannedPackage, runtime Run
 	state.Version = pkg.Version
 	state.Source = pkg.Source
 	state.RuntimeIdentity = runtimeInterpreterIdentity(runtime)
-	if installed := installedPackageForPlanned(pkg); installed.Name != "" {
+	if installed := installedPackageForPackageStore(pkg); installed.Name != "" {
 		state.Host = installed.Host
 		state.Location = installed.Location
 		state.Ref = installed.Ref
@@ -3773,7 +3838,7 @@ func plannedPackageMatchesInstalled(pkg plannedPackage, installed installedPacka
 		if pkg.Prepared.Host != "" && installed.Host != pkg.Prepared.Host {
 			return false
 		}
-		if pkg.Prepared.Location != "" && installed.Location != pkg.Prepared.Location {
+		if pkg.Source != sourceLocal && pkg.Prepared.Location != "" && installed.Location != pkg.Prepared.Location {
 			return false
 		}
 		if pkg.Prepared.Ref != "" && installed.Ref != pkg.Prepared.Ref {
@@ -3814,6 +3879,16 @@ func installedPackageForPlanned(pkg plannedPackage) installedPackage {
 	installed.Fingerprint = pkg.Prepared.Fingerprint
 	installed.FingerprintKind = pkg.Prepared.FingerprintKind
 	return installed
+}
+
+func installedPackageForPackageStore(pkg plannedPackage) installedPackage {
+	if pkg.Prepared == nil {
+		return installedPackageForPlanned(pkg)
+	}
+	normalized := pkg
+	prepared := packageStorePreparedSource(*pkg.Prepared)
+	normalized.Prepared = &prepared
+	return installedPackageForPlanned(normalized)
 }
 
 func (i *nativeInstaller) ensureCRANIndex() error {
@@ -5501,6 +5576,9 @@ func injectGitToken(rawURL, token string) string {
 func writeSourceMetadata(metaDir, pkg string, prepared preparedSource) error {
 	if metaDir == "" {
 		return nil
+	}
+	if err := os.MkdirAll(metaDir, 0o755); err != nil {
+		return fmt.Errorf("create source metadata dir: %w", err)
 	}
 	encode := func(value string) string {
 		return neturl.QueryEscape(value)

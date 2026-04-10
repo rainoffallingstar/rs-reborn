@@ -2039,7 +2039,7 @@ Flags for "list":
 Flags for "prune":
   --project-dir <dir>       prune a project by scanning script files under this directory
   --dry-run                 show which managed libraries would be removed without deleting them
-  --pkgstore-retention-days remove package-store entries unused for more than this many days
+  --pkgstore-retention-days remove shared package-store entries unused for more than this many days
 
 Flags for "shell":
   --repo <url>              CRAN mirror to use (defaults to rs.toml or cloud.r-project.org)
@@ -2075,15 +2075,15 @@ Flags for "cache dir":
 
 Flags for "cache ls":
   --project-dir <dir>       project directory used to mark active libraries
-  --json                    print cache libraries as JSON
+  --json                    print cache libraries and the shared package store as JSON
   accepts an optional path/to/script.R to mark active libraries for one script
 
 Flags for "cache rm":
   --script <path>           script path used to resolve the cache root when removing by hash
   --project-dir <dir>       project directory used to resolve the cache root when removing by hash
   --cache-dir <dir>         explicit cache root used when removing by hash
-  --dry-run                 show which managed library would be removed without deleting it
-  accepts one managed library hash, package-store hash, or matching path under <cache>/
+  --dry-run                 show which managed library or shared package-store entry would be removed without deleting it
+  accepts one managed library hash, shared package-store hash, or matching path under a managed lib/pkgstore root
 
 Flags for "scan":
   --json                    print detected package dependencies as JSON

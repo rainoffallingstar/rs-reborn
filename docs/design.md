@@ -182,10 +182,10 @@ Installed packages do not go into the default user library. Instead, `rs` create
 <cache>/lib/<hash>
 ```
 
-The cache root can also keep a persistent package store for already-built packages:
+In addition to the project-managed library cache, `rvx` keeps a shared per-user package store for already-built packages under the global cache root:
 
 ```text
-<cache>/pkgstore/<hash>
+<global-cache>/pkgstore/<hash>
 ```
 
 The hash is derived from inputs that materially affect package compatibility and installation intent, including:
@@ -205,7 +205,7 @@ This design gives a few useful properties:
 - different scripts can have different environments without manual naming
 - cache management can stay filesystem-oriented and debuggable
 
-The package store exists to reduce rebuild churn across library hashes that target the same effective runtime and package source identity. `rs` can seed a fresh managed library from that store, reuse already-built package directories, and then sync newly installed packages back into the store with usage timestamps.
+The package store exists to reduce rebuild churn across library hashes that target the same effective runtime and package source identity. `rs` can seed a fresh project-local managed library from that shared store, reuse already-built package directories, and then sync newly installed packages back into the store with usage timestamps. That means projects that pin local `.rs-cache` directories can still benefit from cross-project reuse without putting the shared store itself on `.libPaths()`. The shared store is intentionally a best-effort cache layer; the project-local managed library remains the runtime truth even if shared-store bookkeeping fails and only emits warnings.
 
 The current design still does not include every conceivable ABI-relevant dimension in the hash, but it now folds in the major runtime metadata plus local-source content fingerprints so the most obvious cross-runtime and same-path local-source reuse hazards are avoided.
 
@@ -328,9 +328,9 @@ Current cache commands support:
 - printing the cache root
 - listing managed libraries and persistent package-store entries
 - pruning stale managed libraries plus old or empty package-store entries
-- removing one managed library or package-store entry by hash or explicit managed path
+- removing one managed library or shared package-store entry by hash or explicit path
 
-Safety rules are intentionally strict. Deletion only applies to directories that match the managed `<cache>/lib/<16-hex>` or package-store `<cache>/pkgstore/<64-hex>` layouts.
+Safety rules are intentionally strict. Deletion only applies to directories that match the managed `<cache>/lib/<16-hex>` layout or the shared package-store `<global-cache>/pkgstore/<64-hex>` layout.
 
 ## Why Go
 

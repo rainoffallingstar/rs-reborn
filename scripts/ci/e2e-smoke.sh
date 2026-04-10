@@ -95,6 +95,7 @@ test -s "$TMP_DIR/cache-dir.txt"
 
 "$RS_BIN" cache ls --json "$SCRIPT_PATH" | tee "$TMP_DIR/cache-ls.json"
 grep -q '"active": true' "$TMP_DIR/cache-ls.json"
+grep -q '"shared_package_store_root":' "$TMP_DIR/cache-ls.json"
 
 "$RS_BIN" prune --dry-run "$SCRIPT_PATH" | tee "$TMP_DIR/prune.txt"
 grep -q '\[ok\] prune' "$TMP_DIR/prune.txt"

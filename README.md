@@ -197,6 +197,7 @@ Inspect cache locations and managed libraries:
 ./rvx cache ls --json analysis.R
 ./rvx cache rm --project-dir . aaaaaaaaaaaaaaaa
 ./rvx cache rm .rs-cache/lib/aaaaaaaaaaaaaaaa
+./rvx cache rm dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 ```
 
 Install dependencies and write or refresh the lockfile:
@@ -459,13 +460,13 @@ For those cases, `--package <name>` and `--bioc-package <name>` are the escape h
 - script-level overrides and additions
 - any `--package` or `--bioc-package` flags passed on the command line
 
-`rvx prune` removes hashed library directories under the managed cache that are no longer referenced by the current project scripts. With `--dry-run`, it reports what would be removed without deleting anything.
+`rvx prune` removes hashed library directories under the managed cache that are no longer referenced by the current project scripts. It also prunes the shared per-user package store under the global rvx cache root based on `last_used_at`, so stale cross-project package snapshots eventually age out. With `--dry-run`, it reports what would be removed without deleting anything.
 
 `rvx shell` resolves the same dependency plan as `rvx run`, prepares the managed library, and then launches interactive `R` with that library injected into `.libPaths()`. When `rscript` is pinned in config or overridden with `--rscript`, `rvx shell` first tries the sibling `R` binary from the same installation before falling back to `R` on `PATH`.
 
 `rvx exec` resolves the same dependency plan, then runs a one-off `Rscript -e` expression inside that managed environment. It is useful for quick checks, CI probes, and debugging without creating a temporary script file.
 
-`rvx cache dir` prints the cache root. `rvx cache ls` lists hashed managed library directories under that cache and, when given a script or project scope, marks which ones are currently active versus stale. `rvx cache rm` removes one managed library by hash or by explicit path, and only accepts directories that match the managed `<cache>/lib/<16-hex>` layout.
+`rvx cache dir` prints the project managed-cache root. `rvx cache ls` lists hashed managed library directories under that cache and, when given a script or project scope, marks which ones are currently active versus stale. It also reports the shared per-user package store root and its entries, which are used to seed project-local managed libraries across different repositories and local `.rs-cache` directories. That shared package store is a best-effort cache layer: if it cannot be updated, `rvx` keeps the project-local managed library as the runtime truth and only surfaces a warning. `rvx cache rm` removes one managed library by hash or path, and it can also remove one shared package-store entry by its 64-character hash or absolute path.
 
 ### 4. Runtime bootstrap
 
