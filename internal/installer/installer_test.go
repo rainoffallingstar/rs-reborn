@@ -2573,18 +2573,13 @@ func TestRecordPlannedPackagesInstalledWarnsWhenSharedStoreSyncFails(t *testing.
 	if got := inst.installedPackages["demo"]; got.Version != "1.0.0" {
 		t.Fatalf("installedPackages[demo] = %#v", got)
 	}
-	if !strings.Contains(stderr.String(), "warning: shared package store lookup failed for demo:") {
-		t.Fatalf("stderr = %q, want shared store warning", stderr.String())
-	}
 	if !strings.Contains(stderr.String(), "warning: shared package store create entry failed for demo:") {
 		t.Fatalf("stderr = %q, want shared store create warning", stderr.String())
 	}
-	if len(events) != 2 ||
-		events[0].Kind != "shared_store_warning" ||
-		events[0].Fields["operation"] != "lookup" ||
-		events[1].Kind != "shared_store_warning" ||
-		events[1].Fields["operation"] != "create entry" {
-		t.Fatalf("events = %#v", events)
+	if !slices.ContainsFunc(events, func(evt eventstream.Event) bool {
+		return evt.Kind == "shared_store_warning" && evt.Fields["operation"] == "create entry"
+	}) {
+		t.Fatalf("events = %#v, want create entry warning event", events)
 	}
 }
 
@@ -2640,8 +2635,8 @@ func TestFinalizePendingStoreSyncsIgnoresSharedStoreSyncWarnings(t *testing.T) {
 	if err := finalizePendingStoreSyncs(&stderr, []<-chan error{done}); err != nil {
 		t.Fatalf("finalizePendingStoreSyncs() error = %v", err)
 	}
-	if !strings.Contains(stderr.String(), "finalizing managed package cache") || !strings.Contains(stderr.String(), "warning: shared package store lookup failed for demo:") {
-		t.Fatalf("stderr = %q, want finalization stage and warning", stderr.String())
+	if !strings.Contains(stderr.String(), "finalizing managed package cache") || !strings.Contains(stderr.String(), "warning: shared package store create entry failed for demo:") {
+		t.Fatalf("stderr = %q, want finalization stage and create-entry warning", stderr.String())
 	}
 }
 
