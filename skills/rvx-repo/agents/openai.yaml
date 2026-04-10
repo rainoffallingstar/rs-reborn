@@ -1,0 +1,7 @@
+interface:
+  display_name: "rvx Repo"
+  short_description: "Work effectively in the rvx repository"
+  default_prompt: "Use $rvx-repo to understand the rvx repository, choose the right validation path, and implement or review changes safely."
+
+policy:
+  allow_implicit_invocation: true
